@@ -12,14 +12,15 @@ const CITIES = [
 ]
 
 const LIFE_STAGES = [
-  { id: 'professional', label: 'Working Professional', icon: '💼' },
   { id: 'student', label: 'Student', icon: '🎓' },
-  { id: 'business', label: 'Business Owner / Entrepreneur', icon: '🏢' },
-  { id: 'homemaker', label: 'Homemaker', icon: '🏠' },
+  { id: 'early_career', label: 'Early Career (0–5 yrs)', icon: '🌱' },
+  { id: 'mid_career', label: 'Mid Career (5–15 yrs)', icon: '💼' },
+  { id: 'senior', label: 'Senior Professional (15+ yrs)', icon: '⭐' },
+  { id: 'business', label: 'Business Owner', icon: '🏢' },
   { id: 'freelancer', label: 'Freelancer / Consultant', icon: '🔧' },
+  { id: 'homemaker', label: 'Homemaker', icon: '🏠' },
   { id: 'retired', label: 'Retired', icon: '☀️' },
-  { id: 'between', label: 'Between Jobs', icon: '🔄' },
-  { id: 'other', label: 'Other', icon: '◎' },
+  { id: 'prefer_not', label: 'Prefer not to say', icon: '◎' },
 ]
 
 const WORK_AREAS = [
@@ -48,53 +49,20 @@ const STUDY_LEVELS = [
   'PhD / Research', 'Professional Course', 'Other'
 ]
 
-const INTERESTS = {
-  'Arts & Culture': [
-    'Books & Literature', 'Cinema & Films', 'Theatre & Live Performances',
-    'Music — Bollywood', 'Music — Classical Indian', 'Music — Western Pop/Rock',
-    'Music — Jazz & Blues', 'Music — Electronic', 'Visual Art & Painting',
-    'Photography', 'Poetry & Creative Writing', 'Architecture & Design',
-    'Stand-up Comedy', 'Podcasts'
-  ],
-  'Food & Drink': [
-    'Cooking & Recipes', 'Restaurant Dining', 'Street Food',
-    'Baking & Desserts', 'Wine & Spirits', 'Coffee Culture',
-    'Nutrition & Healthy Eating', 'Veganism & Plant-based'
-  ],
-  'Travel & Outdoors': [
-    'Travel — Domestic India', 'Travel — International',
-    'Trekking & Hiking', 'Adventure Sports', 'Road Trips',
-    'Beach & Mountains', 'Backpacking', 'Luxury Travel'
-  ],
-  'Fitness & Wellness': [
-    'Running & Jogging', 'Yoga', 'Gym & Weight Training',
-    'Cycling', 'Swimming', 'Martial Arts',
-    'Mental Health & Mindfulness', 'Ayurveda & Holistic Health', 'Dance'
-  ],
-  'Sports': [
-    'Cricket', 'Football / Soccer', 'Badminton', 'Tennis',
-    'Formula 1', 'Basketball', 'Kabaddi', 'Chess',
-    'Fantasy Sports', 'Olympics & Athletics'
-  ],
-  'Mind & Learning': [
-    'History & Culture', 'Science & Space', 'Philosophy',
-    'Current Affairs & Politics', 'Personal Finance & Investing',
-    'Startups & Entrepreneurship', 'Artificial Intelligence & Tech',
-    'Environment & Climate', 'Learning Languages', 'Psychology'
-  ],
-  'Entertainment': [
-    'OTT & Web Series', 'Gaming — Mobile', 'Gaming — PC/Console',
-    'Anime & Manga', 'Fashion & Style', 'Beauty & Skincare',
-    'Astrology & Spirituality', 'Celebrity & Pop Culture'
-  ],
-  'Life & Community': [
-    'Parenting', 'Pets & Animals', 'Volunteering & Social Causes',
-    'LGBTQ+', 'Women & Feminism', 'Sustainability & Minimalism',
-    'Home Decor & Interiors', 'Gardening & Plants', 'Automobiles & Bikes'
-  ]
-}
+const INTERESTS = [
+  'World Affairs', 'Indian Politics', 'Business & Economy',
+  'Markets & Investing', 'Technology', 'Science',
+  'Health & Wellness', 'Environment & Climate', 'Culture & Arts',
+  'Books & Literature', 'Film & OTT', 'Music',
+  'Sport', 'Food & Travel', 'Style & Design',
+  'Startups & Entrepreneurship', 'Personal Finance', 'Philosophy',
+  'History', 'Psychology', 'Education', 'Law & Policy',
+  'Parenting', 'Sustainability', 'Gaming',
+  'Artificial Intelligence', 'Space & Astronomy', 'Cricket',
+  'Football', 'Formula 1'
+]
 
-// ── Shared UI components ───────────────────────────────────────────────────
+// ── Shared UI ──────────────────────────────────────────────────────────────
 
 const labelStyle = {
   display: 'block' as const,
@@ -107,9 +75,9 @@ const labelStyle = {
 function Chip({ label, selected, onToggle }: { label: string; selected: boolean; onToggle: () => void }) {
   return (
     <button onClick={onToggle} style={{
-      padding: '8px 12px',
+      padding: '9px 14px',
       background: selected ? '#C8A45A' : '#2A2A2A',
-      color: selected ? '#1A1A1A' : '#777',
+      color: selected ? '#1A1A1A' : '#999',
       fontFamily: "'DM Sans', sans-serif",
       fontSize: '13px', fontWeight: selected ? '600' : '400',
       border: `1px solid ${selected ? '#C8A45A' : '#333'}`,
@@ -124,7 +92,7 @@ function SelectInput({ label, value, onChange, options, placeholder }: {
 }) {
   return (
     <div>
-      <label style={labelStyle}>{label}</label>
+      {label && <label style={labelStyle}>{label}</label>}
       <select value={value} onChange={e => onChange(e.target.value)} style={{
         width: '100%', padding: '14px 16px',
         background: '#2A2A2A',
@@ -146,7 +114,7 @@ function TextInput({ label, value, onChange, placeholder }: {
 }) {
   return (
     <div>
-      <label style={labelStyle}>{label}</label>
+      {label && <label style={labelStyle}>{label}</label>}
       <input type="text" value={value} onChange={e => onChange(e.target.value)}
         placeholder={placeholder} style={{
           width: '100%', padding: '14px 16px',
@@ -156,19 +124,6 @@ function TextInput({ label, value, onChange, placeholder }: {
           fontSize: '15px', outline: 'none', borderRadius: '2px'
         }} />
     </div>
-  )
-}
-
-function SkipLink({ onSkip }: { onSkip: () => void }) {
-  return (
-    <button onClick={onSkip} style={{
-      background: 'none', border: 'none',
-      fontFamily: "'DM Mono', monospace",
-      fontSize: '9px', letterSpacing: '1px',
-      color: '#444', cursor: 'pointer',
-      textDecoration: 'underline', minHeight: '44px',
-      marginTop: '8px'
-    }}>Skip this step →</button>
   )
 }
 
@@ -194,7 +149,7 @@ export default function Onboarding() {
   const [step, setStep] = useState(0)
   const [saving, setSaving] = useState(false)
 
-  // Step 0 — Standard vs Personalised
+  // Step 0 — Brief type
   const [briefType, setBriefType] = useState<'standard' | 'personalised' | ''>('')
 
   // Step 1 — About you
@@ -202,7 +157,7 @@ export default function Onboarding() {
   const [gender, setGender] = useState('')
 
   // Step 2 — Cities
-  const [cityCurrente, setCityCurrent] = useState('')
+  const [cityCurrent, setCityCurrent] = useState('')
   const [cityHome, setCityHome] = useState('')
   const [sameAsCurrentCity, setSameAsCurrentCity] = useState(false)
   const [extraCities, setExtraCities] = useState<string[]>(['', '', ''])
@@ -210,10 +165,14 @@ export default function Onboarding() {
   // Step 3 — Life stage & work
   const [lifeStage, setLifeStage] = useState('')
   const [workArea, setWorkArea] = useState('')
+  const [workAreaOther, setWorkAreaOther] = useState('')
   const [industry, setIndustry] = useState('')
+  const [industryOther, setIndustryOther] = useState('')
   const [company, setCompany] = useState('')
   const [studyArea, setStudyArea] = useState('')
+  const [studyAreaOther, setStudyAreaOther] = useState('')
   const [studyLevel, setStudyLevel] = useState('')
+  const [studyLevelOther, setStudyLevelOther] = useState('')
 
   // Step 4 — Interests
   const [interests, setInterests] = useState<string[]>([])
@@ -222,9 +181,7 @@ export default function Onboarding() {
   const [mood, setMood] = useState('neutral')
   const [edition, setEdition] = useState('standard')
 
-  // Steps for personalised flow
   const personalisedSteps = 5
-  const totalSteps = briefType === 'personalised' ? personalisedSteps : 1
 
   const toggleInterest = (i: string) => {
     setInterests(prev => prev.includes(i) ? prev.filter(x => x !== i) : [...prev, i])
@@ -236,29 +193,25 @@ export default function Onboarding() {
     setExtraCities(updated)
   }
 
+  const isWorkingPro = ['early_career', 'mid_career', 'senior'].includes(lifeStage)
+
   const handleFinish = async () => {
     setSaving(true)
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) { router.push('/login'); return }
 
-    const allCities = [
-      cityCurrente,
-      sameAsCurrentCity ? cityCurrente : cityHome,
-      ...extraCities.filter(Boolean)
-    ].filter(Boolean)
-
     await supabase.from('profiles').update({
       age: age ? parseInt(age) : null,
       gender: gender || null,
-      city_current: cityCurrente || null,
-      city_home: sameAsCurrentCity ? cityCurrente : (cityHome || null),
+      city_current: cityCurrent || null,
+      city_home: sameAsCurrentCity ? cityCurrent : (cityHome || null),
       extra_cities: extraCities.filter(Boolean),
       life_stage: lifeStage || null,
-      work_area: workArea || null,
-      industry: industry || null,
+      work_area: workArea === 'Other' ? workAreaOther : (workArea || null),
+      industry: industry === 'Other' ? industryOther : (industry || null),
       company: company || null,
-      study_area: studyArea || null,
-      study_level: studyLevel || null,
+      study_area: studyArea === 'Other' ? studyAreaOther : (studyArea || null),
+      study_level: studyLevel === 'Other' ? studyLevelOther : (studyLevel || null),
       interests,
       mood_preference: mood,
       edition_preference: edition,
@@ -298,109 +251,204 @@ export default function Onboarding() {
     marginBottom: '28px', lineHeight: '1.6'
   }
 
-  const btnPrimary = (enabled: boolean): React.CSSProperties => ({
+  const btnPrimary: React.CSSProperties = {
     flex: 1, padding: '16px',
-    background: enabled ? '#C8A45A' : '#2A2A2A',
-    color: enabled ? '#1A1A1A' : '#444',
+    background: '#C8A45A',
+    color: '#1A1A1A',
     fontFamily: "'DM Sans', sans-serif",
     fontSize: '14px', fontWeight: '600',
     letterSpacing: '1px', textTransform: 'uppercase',
-    border: 'none', cursor: enabled ? 'pointer' : 'not-allowed',
+    border: 'none', cursor: 'pointer',
     borderRadius: '2px', minHeight: '52px', transition: 'all 0.2s'
-  })
+  }
 
   return (
     <div style={containerStyle}>
       <div style={{ maxWidth: '400px', width: '100%', margin: '0 auto', flex: 1 }}>
 
-        {briefType && (
-          <StepDots
-            total={briefType === 'personalised' ? personalisedSteps : 1}
-            current={step}
-          />
+        {briefType && step > 0 && (
+          <StepDots total={personalisedSteps} current={step - 1} />
         )}
 
-        {/* ── STEP 0: Standard vs Personalised ── */}
+        {/* ── STEP 0: Brief type ── */}
         {step === 0 && (
           <div>
-            <div style={{
-              fontFamily: "'DM Mono', monospace", fontSize: '9px',
-              letterSpacing: '3px', color: '#C8A45A', marginBottom: '16px'
-            }}>WELCOME</div>
-            <h2 style={headStyle}>How would you like your brief?</h2>
-            <p style={subStyle}>You can always change this later.</p>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '32px' }}>
-              {[
-                {
-                  id: 'standard',
-                  title: 'Standard Brief',
-                  desc: 'Top stories from India and the world. No setup needed — start reading immediately.',
-                  covers: ['Top 5 world stories', 'Top 3 India stories', 'Markets snapshot', 'Sport & culture']
-                },
-                {
-                  id: 'personalised',
-                  title: 'Personalised Brief',
-                  desc: 'Tailored to your city, profession, and interests. Takes 3 minutes to set up.',
-                  covers: ['Your city\'s local news', 'Industry-specific business', 'Topics you care about', 'Tone you prefer']
-                }
-              ].map(opt => (
-                <button key={opt.id} onClick={() => setBriefType(opt.id as any)} style={{
-                  padding: '20px',
-                  background: briefType === opt.id ? 'rgba(200,164,90,0.08)' : '#1E1E1E',
-                  border: `1px solid ${briefType === opt.id ? '#C8A45A' : '#2A2A2A'}`,
-                  borderRadius: '2px', cursor: 'pointer', textAlign: 'left', minHeight: '44px'
-                }}>
-                  <div style={{
-                    fontFamily: "'Playfair Display', Georgia, serif",
-                    fontSize: '17px', fontWeight: '700',
-                    color: briefType === opt.id ? '#C8A45A' : '#F5F1EA',
-                    marginBottom: '6px'
-                  }}>{opt.title}</div>
-                  <div style={{
-                    fontFamily: "'DM Sans', sans-serif",
-                    fontSize: '13px', color: '#666',
-                    lineHeight: '1.5', marginBottom: '12px'
-                  }}>{opt.desc}</div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                    {opt.covers.map(c => (
-                      <div key={c} style={{
-                        fontFamily: "'DM Mono', monospace",
-                        fontSize: '9px', letterSpacing: '0.5px',
-                        color: briefType === opt.id ? '#C8A45A' : '#444',
-                        display: 'flex', gap: '6px', alignItems: 'center'
-                      }}>
-                        <span>◆</span>{c}
-                      </div>
-                    ))}
-                  </div>
-                </button>
-              ))}
+            {/* Wordmark */}
+            <div style={{ textAlign: 'center', marginBottom: '32px' }}>
+              <div style={{
+                fontFamily: "'Playfair Display', Georgia, serif",
+                fontSize: 'clamp(28px, 8vw, 38px)', fontWeight: '900',
+                color: '#F5F1EA', letterSpacing: '-0.5px',
+                lineHeight: '1', marginBottom: '4px'
+              }}>Morning</div>
+              <div style={{
+                fontFamily: "'Playfair Display', Georgia, serif",
+                fontSize: 'clamp(28px, 8vw, 38px)', fontWeight: '900',
+                fontStyle: 'italic', color: '#C8A45A',
+                letterSpacing: '-0.5px', lineHeight: '1',
+                marginBottom: '20px'
+              }}>Brief</div>
+              <div style={{
+                fontFamily: "'DM Mono', monospace", fontSize: '11px',
+                letterSpacing: '4px', color: '#C8A45A',
+                textTransform: 'uppercase'
+              }}>WELCOME</div>
             </div>
 
-            <button
-              onClick={next}
-              disabled={!briefType || saving}
-              style={btnPrimary(!!briefType && !saving)}
-            >
-              {saving ? 'Setting up...' :
-                briefType === 'standard' ? 'Start Reading →' :
-                  briefType === 'personalised' ? 'Set Up My Profile →' : 'Choose an option'}
-            </button>
+            <h2 style={{ ...headStyle, textAlign: 'center', marginBottom: '6px' }}>
+              How would you like your brief?
+            </h2>
+            <p style={{ ...subStyle, textAlign: 'center' }}>You can always change this later.</p>
+
+            {/* Cards */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', marginBottom: '32px' }}>
+
+              {/* Standard card */}
+              <button onClick={() => setBriefType('standard')} style={{
+                padding: '0',
+                background: briefType === 'standard' ? 'rgba(200,164,90,0.06)' : '#1E1E1E',
+                border: `2px solid ${briefType === 'standard' ? '#C8A45A' : '#2A2A2A'}`,
+                borderRadius: '4px', cursor: 'pointer', textAlign: 'left',
+                overflow: 'hidden'
+              }}>
+                {/* Card header */}
+                <div style={{
+                  padding: '16px 20px 12px',
+                  borderBottom: `1px solid ${briefType === 'standard' ? 'rgba(200,164,90,0.2)' : '#242424'}`
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                    <div style={{
+                      fontFamily: "'Playfair Display', Georgia, serif",
+                      fontSize: '18px', fontWeight: '700',
+                      color: briefType === 'standard' ? '#C8A45A' : '#F5F1EA'
+                    }}>Standard Brief</div>
+                    <div style={{
+                      width: '20px', height: '20px', borderRadius: '50%',
+                      border: `2px solid ${briefType === 'standard' ? '#C8A45A' : '#444'}`,
+                      background: briefType === 'standard' ? '#C8A45A' : 'transparent',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      flexShrink: 0
+                    }}>
+                      {briefType === 'standard' && (
+                        <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#1A1A1A' }} />
+                      )}
+                    </div>
+                  </div>
+                  <div style={{
+                    fontFamily: "'DM Sans', sans-serif",
+                    fontSize: '13px', color: '#666', lineHeight: '1.5'
+                  }}>Top stories from India and the world. No setup needed.</div>
+                </div>
+                {/* Card bullets */}
+                <div style={{ padding: '12px 20px 16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {['Top 5 world stories', 'Top 3 India stories', 'Markets snapshot', 'Sport & culture'].map(c => (
+                    <div key={c} style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                      <span style={{ color: '#C8A45A', fontSize: '10px', flexShrink: 0 }}>◆</span>
+                      <span style={{
+                        fontFamily: "'DM Sans', sans-serif",
+                        fontSize: '13px', color: briefType === 'standard' ? '#B0A898' : '#555'
+                      }}>{c}</span>
+                    </div>
+                  ))}
+                </div>
+              </button>
+
+              {/* Personalised card */}
+              <button onClick={() => setBriefType('personalised')} style={{
+                padding: '0',
+                background: briefType === 'personalised' ? 'rgba(200,164,90,0.06)' : '#1E1E1E',
+                border: `2px solid ${briefType === 'personalised' ? '#C8A45A' : '#2A2A2A'}`,
+                borderRadius: '4px', cursor: 'pointer', textAlign: 'left',
+                overflow: 'hidden'
+              }}>
+                {/* Card header */}
+                <div style={{
+                  padding: '16px 20px 12px',
+                  borderBottom: `1px solid ${briefType === 'personalised' ? 'rgba(200,164,90,0.2)' : '#242424'}`
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                    <div style={{
+                      fontFamily: "'Playfair Display', Georgia, serif",
+                      fontSize: '18px', fontWeight: '700',
+                      color: briefType === 'personalised' ? '#C8A45A' : '#F5F1EA'
+                    }}>Personalised Brief</div>
+                    <div style={{
+                      width: '20px', height: '20px', borderRadius: '50%',
+                      border: `2px solid ${briefType === 'personalised' ? '#C8A45A' : '#444'}`,
+                      background: briefType === 'personalised' ? '#C8A45A' : 'transparent',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      flexShrink: 0
+                    }}>
+                      {briefType === 'personalised' && (
+                        <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#1A1A1A' }} />
+                      )}
+                    </div>
+                  </div>
+                  <div style={{
+                    fontFamily: "'DM Sans', sans-serif",
+                    fontSize: '13px', color: '#666', lineHeight: '1.5'
+                  }}>Tailored to your city, profession, and interests. Takes 3 minutes.</div>
+                </div>
+                {/* Card bullets */}
+                <div style={{ padding: '12px 20px 16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {["Your city's local news", 'Industry-specific business', 'Topics you care about', 'Tone you prefer'].map(c => (
+                    <div key={c} style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                      <span style={{ color: '#C8A45A', fontSize: '10px', flexShrink: 0 }}>◆</span>
+                      <span style={{
+                        fontFamily: "'DM Sans', sans-serif",
+                        fontSize: '13px', color: briefType === 'personalised' ? '#B0A898' : '#555'
+                      }}>{c}</span>
+                    </div>
+                  ))}
+                </div>
+              </button>
+            </div>
+
+            {/* Single CTA — only appears after selection */}
+            {briefType && (
+              <button
+                onClick={next}
+                disabled={saving}
+                style={btnPrimary}
+              >
+                {saving ? 'Setting up...' :
+                  briefType === 'standard' ? 'Start Reading →' : 'Set Up My Profile →'}
+              </button>
+            )}
           </div>
         )}
 
         {/* ── STEP 1: About you ── */}
         {step === 1 && briefType === 'personalised' && (
           <div>
-            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '9px', letterSpacing: '2px', color: '#C8A45A', marginBottom: '16px' }}>STEP 1 OF {personalisedSteps}</div>
+            <div style={{
+              fontFamily: "'Playfair Display', Georgia, serif",
+              fontSize: 'clamp(22px, 6vw, 30px)', fontWeight: '900',
+              color: '#F5F1EA', letterSpacing: '-0.5px',
+              lineHeight: '1', marginBottom: '2px'
+            }}>Morning</div>
+            <div style={{
+              fontFamily: "'Playfair Display', Georgia, serif",
+              fontSize: 'clamp(22px, 6vw, 30px)', fontWeight: '900',
+              fontStyle: 'italic', color: '#C8A45A',
+              letterSpacing: '-0.5px', lineHeight: '1',
+              marginBottom: '20px'
+            }}>Brief</div>
+            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '9px', letterSpacing: '2px', color: '#C8A45A', marginBottom: '12px' }}>STEP 1 OF {personalisedSteps}</div>
             <h2 style={headStyle}>A little about you</h2>
             <p style={subStyle}>All optional — helps us frame stories for your perspective.</p>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
               <div>
                 <label style={labelStyle}>Age</label>
-                <input type="number" value={age} onChange={e => setAge(e.target.value)}
-                  placeholder="32" style={{
+                <input
+                  type="number" value={age}
+                  onChange={e => {
+                    const val = parseInt(e.target.value)
+                    if (e.target.value === '') { setAge(''); return }
+                    if (val >= 12) setAge(e.target.value)
+                  }}
+                  min={12} placeholder="e.g. 28"
+                  style={{
                     width: '100%', padding: '14px 16px', background: '#2A2A2A',
                     border: `1px solid ${age ? '#C8A45A' : '#333'}`,
                     color: '#F5F1EA', fontFamily: "'DM Sans', sans-serif",
@@ -422,11 +470,21 @@ export default function Onboarding() {
         {/* ── STEP 2: Cities ── */}
         {step === 2 && briefType === 'personalised' && (
           <div>
-            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '9px', letterSpacing: '2px', color: '#C8A45A', marginBottom: '16px' }}>STEP 2 OF {personalisedSteps}</div>
+            <div style={{
+              fontFamily: "'Playfair Display', Georgia, serif",
+              fontSize: 'clamp(22px, 6vw, 30px)', fontWeight: '900',
+              color: '#F5F1EA', lineHeight: '1', marginBottom: '2px'
+            }}>Morning</div>
+            <div style={{
+              fontFamily: "'Playfair Display', Georgia, serif",
+              fontSize: 'clamp(22px, 6vw, 30px)', fontWeight: '900',
+              fontStyle: 'italic', color: '#C8A45A', lineHeight: '1', marginBottom: '20px'
+            }}>Brief</div>
+            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '9px', letterSpacing: '2px', color: '#C8A45A', marginBottom: '12px' }}>STEP 2 OF {personalisedSteps}</div>
             <h2 style={headStyle}>Your cities</h2>
-            <p style={subStyle}>We cover local news for every city you add. Add up to 5.</p>
+            <p style={subStyle}>We cover local news for every city you add.</p>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-              <SelectInput label="City you live in now" value={cityCurrente}
+              <SelectInput label="City you live in now" value={cityCurrent}
                 onChange={setCityCurrent} options={CITIES} placeholder="Select your city" />
 
               <div>
@@ -458,7 +516,7 @@ export default function Onboarding() {
               </div>
 
               <div>
-                <label style={labelStyle}>Other cities you want covered (optional)</label>
+                <label style={labelStyle}>Other cities to cover (optional, up to 3)</label>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                   {extraCities.map((city, idx) => (
                     <select key={idx} value={city} onChange={e => updateExtraCity(idx, e.target.value)} style={{
@@ -468,7 +526,7 @@ export default function Onboarding() {
                       fontFamily: "'DM Sans', sans-serif", fontSize: '14px',
                       outline: 'none', borderRadius: '2px', appearance: 'none' as const
                     }}>
-                      <option value="">+ Add another city</option>
+                      <option value="">+ Add city {idx + 1}</option>
                       {CITIES.map(c => <option key={c} value={c}>{c}</option>)}
                     </select>
                   ))}
@@ -481,56 +539,94 @@ export default function Onboarding() {
         {/* ── STEP 3: Life stage & work ── */}
         {step === 3 && briefType === 'personalised' && (
           <div>
-            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '9px', letterSpacing: '2px', color: '#C8A45A', marginBottom: '16px' }}>STEP 3 OF {personalisedSteps}</div>
+            <div style={{
+              fontFamily: "'Playfair Display', Georgia, serif",
+              fontSize: 'clamp(22px, 6vw, 30px)', fontWeight: '900',
+              color: '#F5F1EA', lineHeight: '1', marginBottom: '2px'
+            }}>Morning</div>
+            <div style={{
+              fontFamily: "'Playfair Display', Georgia, serif",
+              fontSize: 'clamp(22px, 6vw, 30px)', fontWeight: '900',
+              fontStyle: 'italic', color: '#C8A45A', lineHeight: '1', marginBottom: '20px'
+            }}>Brief</div>
+            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '9px', letterSpacing: '2px', color: '#C8A45A', marginBottom: '12px' }}>STEP 3 OF {personalisedSteps}</div>
             <h2 style={headStyle}>What do you do?</h2>
             <p style={subStyle}>Shapes how we cover business and economy news.</p>
 
+            {/* Life stage tiles */}
             <div style={{ marginBottom: '24px' }}>
               <label style={labelStyle}>Which best describes you?</label>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
                 {LIFE_STAGES.map(ls => (
-                  <button key={ls.id} onClick={() => setLifeStage(ls.id)} style={{
-                    padding: '14px 16px', textAlign: 'left',
-                    background: lifeStage === ls.id ? 'rgba(200,164,90,0.08)' : '#1E1E1E',
+                  <button key={ls.id} onClick={() => { setLifeStage(ls.id); setWorkArea(''); setIndustry(''); setCompany(''); setStudyArea(''); setStudyLevel('') }} style={{
+                    padding: '14px 12px', textAlign: 'center',
+                    background: lifeStage === ls.id ? 'rgba(200,164,90,0.1)' : '#1E1E1E',
                     border: `1px solid ${lifeStage === ls.id ? '#C8A45A' : '#2A2A2A'}`,
-                    borderRadius: '2px', cursor: 'pointer',
-                    display: 'flex', alignItems: 'center', gap: '12px', minHeight: '48px'
+                    borderRadius: '4px', cursor: 'pointer',
+                    display: 'flex', flexDirection: 'column',
+                    alignItems: 'center', gap: '6px', minHeight: '72px'
                   }}>
-                    <span style={{ fontSize: '18px' }}>{ls.icon}</span>
+                    <span style={{ fontSize: '22px' }}>{ls.icon}</span>
                     <span style={{
-                      fontFamily: "'DM Sans', sans-serif", fontSize: '14px',
-                      color: lifeStage === ls.id ? '#C8A45A' : '#C8C4BC'
+                      fontFamily: "'DM Sans', sans-serif", fontSize: '12px',
+                      fontWeight: lifeStage === ls.id ? '600' : '400',
+                      color: lifeStage === ls.id ? '#C8A45A' : '#999',
+                      lineHeight: '1.3'
                     }}>{ls.label}</span>
                   </button>
                 ))}
               </div>
             </div>
 
-            {/* Adaptive fields */}
-            {(lifeStage === 'professional' || lifeStage === 'freelancer') && (
+            {/* Adaptive follow-up fields */}
+            {isWorkingPro && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
                 <SelectInput label="Area of work" value={workArea} onChange={setWorkArea} options={WORK_AREAS} />
+                {workArea === 'Other' && (
+                  <TextInput label="Please specify" value={workAreaOther} onChange={setWorkAreaOther} placeholder="Your area of work" />
+                )}
                 <SelectInput label="Industry" value={industry} onChange={setIndustry} options={INDUSTRIES} />
+                {industry === 'Other' && (
+                  <TextInput label="Please specify" value={industryOther} onChange={setIndustryOther} placeholder="Your industry" />
+                )}
                 <TextInput label="Company name (optional)" value={company} onChange={setCompany} placeholder="e.g. Amazon" />
               </div>
             )}
+
+            {lifeStage === 'freelancer' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                <SelectInput label="Area of work" value={workArea} onChange={setWorkArea} options={WORK_AREAS} />
+                {workArea === 'Other' && (
+                  <TextInput label="Please specify" value={workAreaOther} onChange={setWorkAreaOther} placeholder="Your area of work" />
+                )}
+                <SelectInput label="Industry" value={industry} onChange={setIndustry} options={INDUSTRIES} />
+                {industry === 'Other' && (
+                  <TextInput label="Please specify" value={industryOther} onChange={setIndustryOther} placeholder="Your industry" />
+                )}
+              </div>
+            )}
+
             {lifeStage === 'business' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
                 <SelectInput label="Industry" value={industry} onChange={setIndustry} options={INDUSTRIES} />
+                {industry === 'Other' && (
+                  <TextInput label="Please specify" value={industryOther} onChange={setIndustryOther} placeholder="Your industry" />
+                )}
                 <TextInput label="Company / venture name (optional)" value={company} onChange={setCompany} placeholder="e.g. My Startup" />
               </div>
             )}
+
             {lifeStage === 'student' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
                 <SelectInput label="Area of study" value={studyArea} onChange={setStudyArea} options={STUDY_AREAS} />
+                {studyArea === 'Other' && (
+                  <TextInput label="Please specify" value={studyAreaOther} onChange={setStudyAreaOther} placeholder="Your field of study" />
+                )}
                 <SelectInput label="Level of education" value={studyLevel} onChange={setStudyLevel} options={STUDY_LEVELS} />
+                {studyLevel === 'Other' && (
+                  <TextInput label="Please specify" value={studyLevelOther} onChange={setStudyLevelOther} placeholder="Your level" />
+                )}
               </div>
-            )}
-            {lifeStage === 'retired' && (
-              <SelectInput label="Former industry (optional)" value={industry} onChange={setIndustry} options={INDUSTRIES} placeholder="Select if you'd like..." />
-            )}
-            {lifeStage === 'between' && (
-              <SelectInput label="Former industry (optional)" value={industry} onChange={setIndustry} options={INDUSTRIES} placeholder="Select if you'd like..." />
             )}
           </div>
         )}
@@ -538,33 +634,33 @@ export default function Onboarding() {
         {/* ── STEP 4: Interests ── */}
         {step === 4 && briefType === 'personalised' && (
           <div>
-            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '9px', letterSpacing: '2px', color: '#C8A45A', marginBottom: '16px' }}>STEP 4 OF {personalisedSteps}</div>
+            <div style={{
+              fontFamily: "'Playfair Display', Georgia, serif",
+              fontSize: 'clamp(22px, 6vw, 30px)', fontWeight: '900',
+              color: '#F5F1EA', lineHeight: '1', marginBottom: '2px'
+            }}>Morning</div>
+            <div style={{
+              fontFamily: "'Playfair Display', Georgia, serif",
+              fontSize: 'clamp(22px, 6vw, 30px)', fontWeight: '900',
+              fontStyle: 'italic', color: '#C8A45A', lineHeight: '1', marginBottom: '20px'
+            }}>Brief</div>
+            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '9px', letterSpacing: '2px', color: '#C8A45A', marginBottom: '12px' }}>STEP 4 OF {personalisedSteps}</div>
             <h2 style={headStyle}>What are you into?</h2>
-            <p style={subStyle}>Pick as many as you like. Shapes culture, sport, and lifestyle coverage.</p>
+            <p style={subStyle}>Pick as many as you like.</p>
 
-            {Object.entries(INTERESTS).map(([category, items]) => (
-              <div key={category} style={{ marginBottom: '24px' }}>
-                <div style={{
-                  fontFamily: "'DM Mono', monospace", fontSize: '9px',
-                  letterSpacing: '1.5px', color: '#555',
-                  marginBottom: '10px', textTransform: 'uppercase'
-                }}>{category}</div>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-                  {items.map(item => (
-                    <Chip key={item} label={item}
-                      selected={interests.includes(item)}
-                      onToggle={() => toggleInterest(item)} />
-                  ))}
-                </div>
-              </div>
-            ))}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '24px' }}>
+              {INTERESTS.map(item => (
+                <Chip key={item} label={item}
+                  selected={interests.includes(item)}
+                  onToggle={() => toggleInterest(item)} />
+              ))}
+            </div>
 
             {interests.length > 0 && (
               <div style={{
-                position: 'sticky', bottom: '80px',
                 fontFamily: "'DM Mono', monospace", fontSize: '10px',
                 color: '#C8A45A', letterSpacing: '1px',
-                background: '#1A1A1A', padding: '8px 0'
+                marginBottom: '8px'
               }}>
                 {interests.length} selected ✓
               </div>
@@ -575,7 +671,17 @@ export default function Onboarding() {
         {/* ── STEP 5: Preferences ── */}
         {step === 5 && briefType === 'personalised' && (
           <div>
-            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '9px', letterSpacing: '2px', color: '#C8A45A', marginBottom: '16px' }}>STEP 5 OF {personalisedSteps}</div>
+            <div style={{
+              fontFamily: "'Playfair Display', Georgia, serif",
+              fontSize: 'clamp(22px, 6vw, 30px)', fontWeight: '900',
+              color: '#F5F1EA', lineHeight: '1', marginBottom: '2px'
+            }}>Morning</div>
+            <div style={{
+              fontFamily: "'Playfair Display', Georgia, serif",
+              fontSize: 'clamp(22px, 6vw, 30px)', fontWeight: '900',
+              fontStyle: 'italic', color: '#C8A45A', lineHeight: '1', marginBottom: '20px'
+            }}>Brief</div>
+            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '9px', letterSpacing: '2px', color: '#C8A45A', marginBottom: '12px' }}>STEP 5 OF {personalisedSteps}</div>
             <h2 style={headStyle}>How do you like your news?</h2>
             <p style={subStyle}>Change these any time from your profile.</p>
 
@@ -604,17 +710,18 @@ export default function Onboarding() {
               <label style={labelStyle}>Default reading depth</label>
               <div style={{ display: 'flex', gap: '8px' }}>
                 {[
-                  { id: 'ultra', label: '5 Min' },
-                  { id: 'standard', label: '10 Min' },
-                  { id: 'deep', label: 'Deep' },
+                  { id: 'ultra', label: '5 Min', desc: 'Quick scan' },
+                  { id: 'standard', label: '10 Min', desc: 'Full brief' },
+                  { id: 'deep', label: 'Deep Dive', desc: 'Analysis' },
                 ].map(e => (
                   <button key={e.id} onClick={() => setEdition(e.id)} style={{
                     flex: 1, padding: '14px 8px',
                     background: edition === e.id ? 'rgba(200,164,90,0.08)' : '#1E1E1E',
                     border: `1px solid ${edition === e.id ? '#C8A45A' : '#2A2A2A'}`,
-                    borderRadius: '2px', cursor: 'pointer', minHeight: '48px'
+                    borderRadius: '2px', cursor: 'pointer', minHeight: '60px'
                   }}>
-                    <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '13px', fontWeight: '600', color: edition === e.id ? '#C8A45A' : '#F5F1EA' }}>{e.label}</div>
+                    <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '13px', fontWeight: '600', color: edition === e.id ? '#C8A45A' : '#F5F1EA', marginBottom: '4px' }}>{e.label}</div>
+                    <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '9px', color: '#555', letterSpacing: '0.5px' }}>{e.desc}</div>
                   </button>
                 ))}
               </div>
@@ -623,38 +730,30 @@ export default function Onboarding() {
         )}
 
         {/* ── Navigation ── */}
-        {(briefType || step === 0) && (
-          <div style={{ display: 'flex', gap: '12px', marginTop: '36px', paddingBottom: '48px' }}>
-            {step > 0 && (
-              <button onClick={back} style={{
-                padding: '16px 20px', background: 'transparent',
-                color: '#555', fontFamily: "'DM Sans', sans-serif",
-                fontSize: '14px', border: '1px solid #2A2A2A',
-                cursor: 'pointer', borderRadius: '2px', minHeight: '52px'
-              }}>← Back</button>
-            )}
+        <div style={{ display: 'flex', gap: '12px', marginTop: '36px', paddingBottom: '48px' }}>
+          {step > 0 && (
+            <button onClick={back} style={{
+              padding: '16px 20px', background: 'transparent',
+              color: '#555', fontFamily: "'DM Sans', sans-serif",
+              fontSize: '14px', border: '1px solid #2A2A2A',
+              cursor: 'pointer', borderRadius: '2px', minHeight: '52px'
+            }}>← Back</button>
+          )}
 
-            {step > 0 && step < (briefType === 'personalised' ? personalisedSteps : 1) && (
-              <SkipLink onSkip={next} />
-            )}
+          {step > 0 && (
+            <button
+              onClick={() => {
+                if (step < personalisedSteps) { setStep(s => s + 1) }
+                else { handleFinish() }
+              }}
+              disabled={saving}
+              style={btnPrimary}
+            >
+              {saving ? 'Saving...' : step === personalisedSteps ? 'Build My Brief →' : 'Continue →'}
+            </button>
+          )}
+        </div>
 
-            {(step > 0 || briefType) && (
-              <button
-                onClick={() => {
-                  if (step === 0) { next() }
-                  else if (step < (personalisedSteps)) { setStep(s => s + 1) }
-                  else { handleFinish() }
-                }}
-                disabled={step === 0 && !briefType || saving}
-                style={btnPrimary((step > 0 || !!briefType) && !saving)}
-              >
-                {saving ? 'Saving...' :
-                  step === 0 ? (briefType === 'standard' ? 'Start Reading →' : 'Continue →') :
-                    step === personalisedSteps ? 'Build My Brief →' : 'Continue →'}
-              </button>
-            )}
-          </div>
-        )}
       </div>
     </div>
   )
