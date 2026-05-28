@@ -7,7 +7,6 @@ export default function Home() {
   const router = useRouter()
   const [profile, setProfile] = useState<Profile | null>(null)
   const [loading, setLoading] = useState(true)
-
   const today = new Date().toLocaleDateString('en-IN', {
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'
   })
@@ -76,12 +75,10 @@ export default function Home() {
             fontFamily: "'DM Mono', monospace", fontSize: '9px',
             letterSpacing: '2px', color: '#C8A45A', marginBottom: '8px'
           }}>TODAY'S BRIEF</div>
-
           <div style={{
             fontFamily: "'Playfair Display', Georgia, serif",
             fontSize: '18px', fontWeight: '700', color: '#1A1A1A', marginBottom: '8px'
           }}>Your brief is being prepared</div>
-
           <div style={{
             fontFamily: "'DM Sans', sans-serif", fontSize: '13px',
             color: '#888', lineHeight: '1.6', marginBottom: '20px'
@@ -127,10 +124,10 @@ export default function Home() {
         </div>
       </div>
 
-      {/* Bottom nav — Brief and Profile only */}
+      {/* Bottom nav */}
       <div style={{
         position: 'fixed', bottom: 0, left: 0, right: 0,
-        background: '#1A1A1A', borderTop: '1px solid #222',
+        background: '#1A1A1A', borderTop: '1px solid #2A2A2A',
         display: 'flex', height: '60px',
         paddingBottom: 'env(safe-area-inset-bottom)'
       }}>
@@ -143,14 +140,15 @@ export default function Home() {
             alignItems: 'center', justifyContent: 'center',
             gap: '3px', textDecoration: 'none', minHeight: '60px'
           }}>
-            <span style={{ fontSize: '16px', color: active ? '#C8A45A' : '#3A3A3A' }}>{icon}</span>
+            <span style={{ fontSize: '16px', color: active ? '#C8A45A' : '#666' }}>{icon}</span>
             <span style={{
               fontFamily: "'DM Mono', monospace", fontSize: '8px',
-              letterSpacing: '1px', color: active ? '#C8A45A' : '#3A3A3A'
+              letterSpacing: '1px', color: active ? '#C8A45A' : '#666'
             }}>{label.toUpperCase()}</span>
           </Link>
         ))}
       </div>
+
     </div>
   )
 }
