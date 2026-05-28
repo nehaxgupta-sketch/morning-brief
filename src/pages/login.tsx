@@ -15,7 +15,20 @@ export default function Login() {
     if (!email || !password) { setError('Please fill in both fields'); return }
     setLoading(true)
     setError('')
-    const { error } = await supabase.auth.signInWithPassword({ email, password })
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+if (error) {
+  setError('Incorrect email or password. Please try again.')
+  setLoading(false)
+  return
+}
+if (data.session) {
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('onboarding_complete')
+    .eq('id', data.session.user.id)
+    .single()
+  router.push(profile?.onboarding_complete ? '/home' : '/onboarding')
+}
     if (error) { setError('Incorrect email or password. Please try again.'); setLoading(false) }
   }
 

@@ -9,7 +9,7 @@ export default function App({ Component, pageProps }: AppProps) {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    const publicRoutes = ['/login', '/signup', '/', '/verify']
+    const publicRoutes = ['/login', '/signup', '/', '/verify', '/forgot-password', '/reset-password']
 
     // TIMEOUT — never hang forever
     const timeout = setTimeout(() => {
