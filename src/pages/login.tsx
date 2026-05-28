@@ -47,14 +47,16 @@ export default function Login() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
           <div>
             <label style={{ display: 'block', fontFamily: "'DM Mono', monospace", fontSize: '9px', letterSpacing: '2px', color: '#999', marginBottom: '8px', textTransform: 'uppercase' as const }}>Email</label>
-            <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="your@email.com"
+            <input type="email" value={email} onChange={e => setEmail(e.target.value)}
+onBlur={e => setEmail(e.target.value)} placeholder="your@email.com"
               style={{ width: '100%', padding: '14px 16px', background: '#2A2A2A', border: `1px solid ${email ? '#C8A45A' : '#333'}`, color: '#F5F1EA', fontFamily: "'DM Sans', sans-serif", fontSize: '15px', outline: 'none', borderRadius: '2px' }} />
           </div>
 
           <div>
             <label style={{ display: 'block', fontFamily: "'DM Mono', monospace", fontSize: '9px', letterSpacing: '2px', color: '#999', marginBottom: '8px', textTransform: 'uppercase' as const }}>Password</label>
             <div style={{ position: 'relative' }}>
-              <input type={showPassword ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" onKeyDown={e => e.key === 'Enter' && handleLogin()}
+              <input type={showPassword ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)}
+onBlur={e => setPassword(e.target.value)} placeholder="••••••••" onKeyDown={e => e.key === 'Enter' && handleLogin()}
                 style={{ width: '100%', padding: '14px 44px 14px 16px', background: '#2A2A2A', border: `1px solid ${password ? '#C8A45A' : '#333'}`, color: '#F5F1EA', fontFamily: "'DM Sans', sans-serif", fontSize: '15px', outline: 'none', borderRadius: '2px', boxSizing: 'border-box' as const }} />
               <button type="button" onClick={() => setShowPassword(!showPassword)} style={{ position: 'absolute', right: '14px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', padding: '0', color: '#666', fontSize: '16px', lineHeight: '1' }}>
                 {showPassword ? '🙈' : '👁'}
