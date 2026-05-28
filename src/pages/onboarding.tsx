@@ -72,6 +72,17 @@ const EDITIONS = [
   { id: 'deep', label: 'Deep Dive', desc: 'Complete analysis with facts and expert opinion', icon: '◈' },
 ]
 
+const FEATURES = [
+  { label: 'Top stories', standard: true, personalised: true },
+  { label: 'India news', standard: true, personalised: true },
+  { label: 'Markets', standard: true, personalised: true },
+  { label: 'Your city', standard: false, personalised: true },
+  { label: 'Your industry', standard: false, personalised: true },
+  { label: 'Your interests', standard: false, personalised: true },
+  { label: 'Tone control', standard: false, personalised: true },
+  { label: 'Reading depth', standard: false, personalised: true },
+]
+
 const labelStyle = {
   display: 'block' as const,
   fontFamily: "'DM Mono', monospace",
@@ -274,40 +285,70 @@ export default function Onboarding() {
               <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '11px', letterSpacing: '4px', color: '#C8A45A', textTransform: 'uppercase' }}>WELCOME</div>
             </div>
             <h2 style={{ ...headStyle, textAlign: 'center', marginBottom: '6px' }}>Choose your brief</h2>
-            <p style={{ ...subStyle, textAlign: 'center' }}>Tap a column to select. You can change this later.</p>
+            <p style={{ ...subStyle, textAlign: 'center' }}>Tap a card to select. You can change this later.</p>
 
-            <div style={{ border: '1px solid #2A2A2A', borderRadius: '4px', overflow: 'hidden', marginBottom: '24px' }}>
-              <div style={{ display: 'flex', borderBottom: '2px solid #2A2A2A' }}>
-                <div style={{ width: '110px', flexShrink: 0, borderRight: '1px solid #2A2A2A', padding: '14px 12px', fontFamily: "'DM Mono', monospace", fontSize: '8px', letterSpacing: '1px', color: '#444' }}>FEATURE</div>
-                <button type="button" onClick={() => setBriefType('standard')} style={{ flex: 1, padding: '14px 8px', background: briefType === 'standard' ? 'rgba(200,164,90,0.1)' : '#1E1E1E', borderRight: '1px solid #2A2A2A', borderTop: 'none', borderLeft: 'none', borderBottom: briefType === 'standard' ? '2px solid #C8A45A' : '2px solid transparent', cursor: 'pointer', textAlign: 'center' as const }}>
-                  <div style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: '14px', fontWeight: '700', color: briefType === 'standard' ? '#C8A45A' : '#F5F1EA', marginBottom: '4px' }}>Standard</div>
-                  <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '8px', letterSpacing: '1px', color: '#555' }}>NO SETUP</div>
-                </button>
-                <button type="button" onClick={() => setBriefType('personalised')} style={{ flex: 1, padding: '14px 8px', background: briefType === 'personalised' ? 'rgba(200,164,90,0.1)' : '#1E1E1E', borderTop: 'none', borderLeft: 'none', borderRight: 'none', borderBottom: briefType === 'personalised' ? '2px solid #C8A45A' : '2px solid transparent', cursor: 'pointer', textAlign: 'center' as const }}>
-                  <div style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: '14px', fontWeight: '700', color: briefType === 'personalised' ? '#C8A45A' : '#F5F1EA', marginBottom: '4px' }}>Personalised</div>
-                  <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '8px', letterSpacing: '1px', color: '#555' }}>3 MIN SETUP</div>
-                </button>
-              </div>
-
+            {/* Two column cards */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '24px' }}>
               {[
-                { label: 'Top stories', standard: '✓', personalised: '✓' },
-                { label: 'India news', standard: '✓', personalised: '✓' },
-                { label: 'Markets', standard: '✓', personalised: '✓' },
-                { label: 'Your city', standard: '—', personalised: '✓' },
-                { label: 'Your industry', standard: '—', personalised: '✓' },
-                { label: 'Your interests', standard: '—', personalised: '✓' },
-                { label: 'Tone control', standard: '—', personalised: '✓' },
-                { label: 'Reading depth', standard: '—', personalised: '✓' },
-              ].map((r, i, arr) => (
-                <div key={r.label} style={{ display: 'flex', borderBottom: i < arr.length - 1 ? '1px solid #222' : 'none', background: i % 2 === 0 ? '#1A1A1A' : '#1C1C1C' }}>
-                  <div style={{ width: '110px', flexShrink: 0, padding: '11px 12px', borderRight: '1px solid #2A2A2A', fontFamily: "'DM Sans', sans-serif", fontSize: '12px', color: '#666', display: 'flex', alignItems: 'center' }}>{r.label}</div>
-                  <div onClick={() => setBriefType('standard')} style={{ flex: 1, padding: '11px 8px', borderRight: '1px solid #2A2A2A', background: briefType === 'standard' ? 'rgba(200,164,90,0.05)' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
-                    <span style={{ fontFamily: "'DM Mono', monospace", fontSize: '13px', color: r.standard === '✓' ? '#C8A45A' : '#333', fontWeight: r.standard === '✓' ? '700' : '400' }}>{r.standard}</span>
+                { id: 'standard', label: 'Standard', sub: 'No setup' },
+                { id: 'personalised', label: 'Personalised', sub: '3 min setup' },
+              ].map(col => (
+                <button
+                  key={col.id}
+                  type="button"
+                  onClick={() => setBriefType(col.id as 'standard' | 'personalised')}
+                  style={{
+                    background: briefType === col.id ? 'rgba(200,164,90,0.1)' : '#1E1E1E',
+                    border: `1px solid ${briefType === col.id ? '#C8A45A' : '#2A2A2A'}`,
+                    borderTop: `3px solid ${briefType === col.id ? '#C8A45A' : '#2A2A2A'}`,
+                    borderRadius: '4px', cursor: 'pointer',
+                    padding: '0', overflow: 'hidden',
+                    textAlign: 'left' as const
+                  }}
+                >
+                  {/* Card header */}
+                  <div style={{ padding: '16px 14px 12px' }}>
+                    <div style={{
+                      fontFamily: "'Playfair Display', Georgia, serif",
+                      fontSize: '16px', fontWeight: '700',
+                      color: briefType === col.id ? '#C8A45A' : '#F5F1EA',
+                      marginBottom: '4px'
+                    }}>{col.label}</div>
+                    <div style={{
+                      fontFamily: "'DM Mono', monospace",
+                      fontSize: '9px', letterSpacing: '1px',
+                      color: '#888'
+                    }}>{col.sub.toUpperCase()}</div>
                   </div>
-                  <div onClick={() => setBriefType('personalised')} style={{ flex: 1, padding: '11px 8px', background: briefType === 'personalised' ? 'rgba(200,164,90,0.05)' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
-                    <span style={{ fontFamily: "'DM Mono', monospace", fontSize: '13px', color: r.personalised === '✓' ? '#C8A45A' : '#333', fontWeight: r.personalised === '✓' ? '700' : '400' }}>{r.personalised}</span>
+
+                  {/* Divider */}
+                  <div style={{ height: '1px', background: briefType === col.id ? 'rgba(200,164,90,0.2)' : '#2A2A2A' }} />
+
+                  {/* Feature list */}
+                  <div style={{ padding: '12px 14px' }}>
+                    {FEATURES.map(f => {
+                      const included = col.id === 'standard' ? f.standard : f.personalised
+                      return (
+                        <div key={f.label} style={{
+                          display: 'flex', alignItems: 'center', gap: '8px',
+                          padding: '5px 0',
+                          borderBottom: '1px solid rgba(255,255,255,0.03)'
+                        }}>
+                          <span style={{
+                            fontSize: '11px', fontWeight: '700',
+                            color: included ? '#C8A45A' : '#333',
+                            flexShrink: 0, width: '12px'
+                          }}>{included ? '✓' : '—'}</span>
+                          <span style={{
+                            fontFamily: "'DM Sans', sans-serif",
+                            fontSize: '12px',
+                            color: included ? '#888' : '#444'
+                          }}>{f.label}</span>
+                        </div>
+                      )
+                    })}
                   </div>
-                </div>
+                </button>
               ))}
             </div>
 
@@ -501,4 +542,4 @@ export default function Onboarding() {
       </div>
     </div>
   )
-} 
+}
