@@ -71,13 +71,13 @@ export default function Landing() {
           animation: 'fadeUp 0.5s 0.3s ease forwards', opacity: 0
         }}>
           <Link href="/signup" style={{
-            display: 'block', width: '100%', padding: '16px 24px',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            width: '100%', padding: '16px 24px',
             background: '#C8A45A', color: '#1A1A1A',
             fontFamily: "'DM Sans', sans-serif", fontSize: '14px',
             fontWeight: '600', letterSpacing: '1px',
             textTransform: 'uppercase', textAlign: 'center',
-            textDecoration: 'none', minHeight: '52px',
-            display: 'flex', alignItems: 'center', justifyContent: 'center'
+            textDecoration: 'none', minHeight: '52px'
           }}>Start Reading Free</Link>
 
           <Link href="/login" style={{
