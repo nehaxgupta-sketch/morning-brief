@@ -137,23 +137,31 @@ export default function Signup() {
       alignItems: 'center', justifyContent: 'center', padding: '24px'
     }}>
       <div style={{ width: '100%', maxWidth: '360px' }}>
+
+        {/* Header */}
         <div style={{ textAlign: 'center', marginBottom: '40px' }}>
           <div style={{
-            fontFamily: "'DM Mono', monospace", fontSize: '9px',
-            letterSpacing: '3px', color: '#C8A45A', marginBottom: '8px'
-          }}>MORNING BRIEF</div>
+            fontFamily: "'Playfair Display', Georgia, serif",
+            fontSize: 'clamp(28px, 8vw, 38px)', fontWeight: '900',
+            color: '#F5F1EA', letterSpacing: '-0.5px',
+            lineHeight: '1', marginBottom: '4px'
+          }}>Morning</div>
+          <div style={{
+            fontFamily: "'Playfair Display', Georgia, serif",
+            fontSize: 'clamp(28px, 8vw, 38px)', fontWeight: '900',
+            fontStyle: 'italic', color: '#C8A45A',
+            letterSpacing: '-0.5px', lineHeight: '1',
+            marginBottom: '20px'
+          }}>Brief</div>
           <h1 style={{
             fontFamily: "'Playfair Display', Georgia, serif",
-            fontSize: '28px', fontWeight: '700',
-            fontStyle: 'italic', color: '#F5F1EA'
+            fontSize: '22px', fontWeight: '700',
+            fontStyle: 'italic', color: '#F5F1EA',
+            marginBottom: '0'
           }}>Create your account</h1>
-          <p style={{
-            fontFamily: "'DM Sans', sans-serif",
-            fontSize: '13px', color: '#555',
-            marginTop: '8px', lineHeight: '1.5'
-          }}>Your brief will be ready tomorrow at 7 AM.</p>
         </div>
 
+        {/* Form fields */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
           <div>
             <label style={labelStyle}>Your name</label>
@@ -174,6 +182,15 @@ export default function Signup() {
               placeholder="8+ characters"
               onKeyDown={e => e.key === 'Enter' && handleSignup()}
               style={inputStyle(password.length >= 8)} />
+          </div>
+
+          {/* Forgot password link */}
+          <div style={{ textAlign: 'right', marginTop: '-8px' }}>
+            <Link href="/forgot-password" style={{
+              fontFamily: "'DM Sans', sans-serif",
+              fontSize: '12px', color: '#666',
+              textDecoration: 'none'
+            }}>Forgot password?</Link>
           </div>
 
           {error && (
