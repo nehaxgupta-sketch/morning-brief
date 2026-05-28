@@ -542,4 +542,9 @@ export default function Onboarding() {
               {saving ? 'Saving...' : (step === personalisedSteps || step === 6) ? 'Build My Brief →' : 'Continue →'}
             </button>
           )}
-        </div>
+ </div>
+
+      </div>
+    </div>
+  )
+}
