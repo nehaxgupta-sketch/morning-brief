@@ -72,15 +72,12 @@ const EDITIONS = [
   { id: 'deep', label: 'Deep Dive', desc: 'Complete analysis with facts and expert opinion', icon: '◈' },
 ]
 
-const FEATURES = [
-  { label: 'Top stories', standard: true, personalised: true },
-  { label: 'India news', standard: true, personalised: true },
-  { label: 'Markets', standard: true, personalised: true },
-  { label: 'Your city', standard: false, personalised: true },
-  { label: 'Your industry', standard: false, personalised: true },
-  { label: 'Your interests', standard: false, personalised: true },
-  { label: 'Tone control', standard: false, personalised: true },
-  { label: 'Reading depth', standard: false, personalised: true },
+const FEATURES_STANDARD = [
+  'Top stories', 'India news', 'World news', 'Trends', 'Reading depth'
+]
+
+const FEATURES_PERSONALISED = [
+  'Top stories', 'India news', 'World news', 'Your city & profession', 'Tone control', 'Reading depth'
 ]
 
 const labelStyle = {
@@ -236,8 +233,8 @@ export default function Onboarding() {
     window.location.href = '/home'
   }
 
-  const next = () => {
-    if (briefType === 'standard') { handleFinish() }
+ const next = () => {
+    if (briefType === 'standard') { setStep(6) }
     else { setStep(s => s + 1) }
   }
 
@@ -326,27 +323,12 @@ export default function Onboarding() {
 
                   {/* Feature list */}
                   <div style={{ padding: '12px 14px' }}>
-                    {FEATURES.map(f => {
-                      const included = col.id === 'standard' ? f.standard : f.personalised
-                      return (
-                        <div key={f.label} style={{
-                          display: 'flex', alignItems: 'center', gap: '8px',
-                          padding: '5px 0',
-                          borderBottom: '1px solid rgba(255,255,255,0.03)'
-                        }}>
-                          <span style={{
-                            fontSize: '11px', fontWeight: '700',
-                            color: included ? '#C8A45A' : '#333',
-                            flexShrink: 0, width: '12px'
-                          }}>{included ? '✓' : '—'}</span>
-                          <span style={{
-                            fontFamily: "'DM Sans', sans-serif",
-                            fontSize: '12px',
-                            color: included ? '#888' : '#444'
-                          }}>{f.label}</span>
-                        </div>
-                      )
-                    })}
+                    {(col.id === 'standard' ? FEATURES_STANDARD : FEATURES_PERSONALISED).map(f => (
+                      <div key={f} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '5px 0', borderBottom: '1px solid rgba(255,255,255,0.03)' }}>
+                        <span style={{ fontSize: '11px', fontWeight: '700', color: '#C8A45A', flexShrink: 0, width: '12px' }}>✓</span>
+                        <span style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '12px', color: '#888' }}>{f}</span>
+                      </div>
+                    ))}
                   </div>
                 </button>
               ))}
@@ -527,19 +509,37 @@ export default function Onboarding() {
           </div>
         )}
 
+{step === 6 && briefType === 'standard' && (
+  <div>
+    <Wordmark size="small" />
+    <h2 style={headStyle}>How long is your morning?</h2>
+    <p style={subStyle}>Pick your default reading depth. You can change this any time.</p>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+      {EDITIONS.map(e => (
+        <button type="button" key={e.id} onClick={() => setEdition(e.id)} style={{ padding: '16px', background: edition === e.id ? 'rgba(200,164,90,0.1)' : '#2A2A2A', border: `1px solid ${edition === e.id ? '#C8A45A' : '#333'}`, borderRadius: '2px', cursor: 'pointer', textAlign: 'left', display: 'flex', gap: '12px', alignItems: 'flex-start', minHeight: '44px' }}>
+          <span style={{ fontSize: '18px', flexShrink: 0, color: '#C8A45A' }}>{e.icon}</span>
+          <div>
+            <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '14px', fontWeight: '600', color: edition === e.id ? '#C8A45A' : '#F5F1EA', marginBottom: '2px' }}>{e.label}</div>
+            <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '12px', color: '#666', lineHeight: '1.4' }}>{e.desc}</div>
+          </div>
+        </button>
+      ))}
+    </div>
+  </div>
+)}
+
         {/* Navigation */}
         <div style={{ display: 'flex', gap: '12px', marginTop: '36px', paddingBottom: '48px' }}>
           {step > 0 && (
-            <button type="button" onClick={back} style={{ padding: '16px 20px', background: 'transparent', color: '#555', fontFamily: "'DM Sans', sans-serif", fontSize: '14px', border: '1px solid #2A2A2A', cursor: 'pointer', borderRadius: '2px', minHeight: '52px' }}>← Back</button>
+            <button type="button" onClick={() => step === 6 ? setStep(0) : back()} style={{ padding: '16px 20px', background: 'transparent', color: '#555', fontFamily: "'DM Sans', sans-serif", fontSize: '14px', border: '1px solid #2A2A2A', cursor: 'pointer', borderRadius: '2px', minHeight: '52px' }}>← Back</button>
           )}
           {step > 0 && (
-            <button type="button" onClick={() => { if (step < personalisedSteps) { setStep(s => s + 1) } else { handleFinish() } }} disabled={saving} style={btnPrimary}>
-              {saving ? 'Saving...' : step === personalisedSteps ? 'Build My Brief →' : 'Continue →'}
+            <button type="button" onClick={() => {
+              if (step === 6) { handleFinish() }
+              else if (step < personalisedSteps) { setStep(s => s + 1) }
+              else { handleFinish() }
+            }} disabled={saving} style={btnPrimary}>
+              {saving ? 'Saving...' : (step === personalisedSteps || step === 6) ? 'Build My Brief →' : 'Continue →'}
             </button>
           )}
         </div>
-
-      </div>
-    </div>
-  )
-}
