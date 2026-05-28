@@ -41,15 +41,21 @@ export default function Login() {
         {/* Header */}
         <div style={{ textAlign: 'center', marginBottom: '40px' }}>
           <div style={{
-            fontFamily: "'DM Mono', monospace",
-            fontSize: '9px',
-            letterSpacing: '3px',
-            color: '#C8A45A',
-            marginBottom: '8px'
-          }}>MORNING BRIEF</div>
+            fontFamily: "'Playfair Display', Georgia, serif",
+            fontSize: 'clamp(28px, 8vw, 38px)', fontWeight: '900',
+            color: '#F5F1EA', letterSpacing: '-0.5px',
+            lineHeight: '1', marginBottom: '4px'
+          }}>Morning</div>
+          <div style={{
+            fontFamily: "'Playfair Display', Georgia, serif",
+            fontSize: 'clamp(28px, 8vw, 38px)', fontWeight: '900',
+            fontStyle: 'italic', color: '#C8A45A',
+            letterSpacing: '-0.5px', lineHeight: '1',
+            marginBottom: '20px'
+          }}>Brief</div>
           <h1 style={{
             fontFamily: "'Playfair Display', Georgia, serif",
-            fontSize: '28px',
+            fontSize: '22px',
             fontWeight: '700',
             color: '#F5F1EA',
             fontStyle: 'italic'
@@ -66,7 +72,7 @@ export default function Login() {
               letterSpacing: '2px',
               color: '#888',
               marginBottom: '8px',
-              textTransform: 'uppercase'
+              textTransform: 'uppercase' as const
             }}>Email</label>
             <input
               type="email"
@@ -77,7 +83,7 @@ export default function Login() {
                 width: '100%',
                 padding: '14px 16px',
                 background: '#2A2A2A',
-                border: '1px solid #333',
+                border: `1px solid ${email ? '#C8A45A' : '#333'}`,
                 color: '#F5F1EA',
                 fontFamily: "'DM Sans', sans-serif",
                 fontSize: '15px',
@@ -95,7 +101,7 @@ export default function Login() {
               letterSpacing: '2px',
               color: '#888',
               marginBottom: '8px',
-              textTransform: 'uppercase'
+              textTransform: 'uppercase' as const
             }}>Password</label>
             <input
               type="password"
@@ -107,7 +113,7 @@ export default function Login() {
                 width: '100%',
                 padding: '14px 16px',
                 background: '#2A2A2A',
-                border: '1px solid #333',
+                border: `1px solid ${password ? '#C8A45A' : '#333'}`,
                 color: '#F5F1EA',
                 fontFamily: "'DM Sans', sans-serif",
                 fontSize: '15px',
@@ -115,6 +121,16 @@ export default function Login() {
                 borderRadius: '2px'
               }}
             />
+          </div>
+
+          {/* Forgot password */}
+          <div style={{ textAlign: 'right', marginTop: '-8px' }}>
+            <Link href="/forgot-password" style={{
+              fontFamily: "'DM Sans', sans-serif",
+              fontSize: '12px',
+              color: '#666',
+              textDecoration: 'none'
+            }}>Forgot password?</Link>
           </div>
 
           {error && (
@@ -149,7 +165,7 @@ export default function Login() {
               minHeight: '52px'
             }}
           >
-            {loading ? 'Signing in...' : 'Sign In'}
+            {loading ? 'Signing in...' : 'Sign In →'}
           </button>
         </div>
 
