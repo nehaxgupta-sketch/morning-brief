@@ -45,7 +45,7 @@ export default function Landing() {
         <h1 style={{
           fontFamily: "'Playfair Display', Georgia, serif",
           fontSize: 'clamp(56px, 15vw, 88px)', fontWeight: '900',
-          fontStyle: 'italic', color: '#C8A45A',
+          color: '#C8A45A',
           lineHeight: '0.95', letterSpacing: '-1px',
           textAlign: 'center', marginBottom: '32px',
           animation: 'fadeUp 0.5s 0.15s ease forwards', opacity: 0
@@ -58,8 +58,8 @@ export default function Landing() {
         }} />
 
         <p style={{
-          fontFamily: "'Playfair Display', Georgia, serif",
-          fontSize: '16px', fontStyle: 'italic', color: '#B0A898',
+          fontFamily: "'DM Sans', sans-serif",
+          fontSize: '16px', color: '#B0A898',
           textAlign: 'center', lineHeight: '1.6',
           maxWidth: '280px', marginBottom: '48px',
           animation: 'fadeUp 0.5s 0.25s ease forwards', opacity: 0
@@ -78,7 +78,7 @@ export default function Landing() {
             fontWeight: '600', letterSpacing: '1px',
             textTransform: 'uppercase', textAlign: 'center',
             textDecoration: 'none', minHeight: '52px'
-          }}>Start Reading Free</Link>
+          }}>Create Your Account</Link>
 
           <Link href="/login" style={{
             display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -97,7 +97,7 @@ export default function Landing() {
           justifyContent: 'center', marginTop: '48px', maxWidth: '320px',
           animation: 'fadeUp 0.5s 0.4s ease forwards', opacity: 0
         }}>
-          {['World · India · Your City', '3 reading depths', 'Personalised for you', 'Daily habit tracker'].map(f => (
+          {['World · India · Your City', '3 reading depths', 'Personalised for you', 'Your reading lens'].map(f => (
             <span key={f} style={{
               fontFamily: "'DM Mono', monospace", fontSize: '9px',
               letterSpacing: '1px', color: '#999',
