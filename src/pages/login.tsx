@@ -125,7 +125,7 @@ export default function Login() {
               fontSize: '12px',
               color: '#666',
               textDecoration: 'none'
-            }}>Forgot password?</Link>
+            }}>Forgot Password?</Link>
           </div>
 
           {error && (
@@ -173,7 +173,7 @@ export default function Login() {
         }}>
           No account yet?{' '}
           <Link href="/signup" style={{ color: '#C8A45A', textDecoration: 'none' }}>
-            Create one free
+            Sign up
           </Link>
         </div>
       </div>
