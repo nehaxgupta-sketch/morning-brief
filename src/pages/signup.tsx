@@ -1,32 +1,48 @@
 import { useState } from 'react'
-import { useRouter } from 'next/router'
 import Link from 'next/link'
 import { supabase } from '@/lib/supabase'
 
+type Stage = 'form' | 'verify'
+
 export default function Signup() {
-  const router = useRouter()
+  const [stage, setStage] = useState<Stage>('form')
+  const [name, setName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  const [name, setName] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
+  const inputStyle = (filled: boolean) => ({
+    width: '100%', padding: '14px 16px',
+    background: '#2A2A2A',
+    border: `1px solid ${filled ? '#C8A45A' : '#333'}`,
+    color: '#F5F1EA',
+    fontFamily: "'DM Sans', sans-serif",
+    fontSize: '15px', outline: 'none', borderRadius: '2px'
+  })
+
+  const labelStyle = {
+    display: 'block',
+    fontFamily: "'DM Mono', monospace",
+    fontSize: '9px', letterSpacing: '2px',
+    color: '#666', marginBottom: '8px',
+    textTransform: 'uppercase' as const
+  }
+
   const handleSignup = async () => {
-    if (!email || !password || !name) {
-      setError('Please fill in all fields')
-      return
-    }
-    if (password.length < 8) {
-      setError('Password must be at least 8 characters')
-      return
-    }
+    if (!name.trim()) { setError('Please enter your name'); return }
+    if (!email.trim()) { setError('Please enter your email'); return }
+    if (password.length < 8) { setError('Password must be at least 8 characters'); return }
     setLoading(true)
     setError('')
 
     const { data, error } = await supabase.auth.signUp({
-      email,
+      email: email.trim(),
       password,
-      options: { data: { full_name: name } }
+      options: {
+        data: { full_name: name.trim() },
+        emailRedirectTo: `${window.location.origin}/onboarding`
+      }
     })
 
     if (error) {
@@ -36,88 +52,129 @@ export default function Signup() {
     }
 
     if (data.user) {
-      // Update profile with name
-      await supabase
-        .from('profiles')
-        .update({ full_name: name })
-        .eq('id', data.user.id)
-
-      router.push('/onboarding')
+      await supabase.from('profiles').upsert({
+        id: data.user.id,
+        email: email.trim(),
+        full_name: name.trim()
+      })
+      setStage('verify')
     }
+    setLoading(false)
   }
 
+  // ── Verify screen ──────────────────────────────────────────────────
+  if (stage === 'verify') {
+    return (
+      <div style={{
+        minHeight: '100vh', background: '#1A1A1A',
+        display: 'flex', flexDirection: 'column',
+        alignItems: 'center', justifyContent: 'center',
+        padding: '32px 24px', textAlign: 'center'
+      }}>
+        <div style={{ fontSize: '48px', marginBottom: '24px' }}>✉️</div>
+        <div style={{
+          fontFamily: "'DM Mono', monospace", fontSize: '9px',
+          letterSpacing: '3px', color: '#C8A45A', marginBottom: '12px'
+        }}>CHECK YOUR EMAIL</div>
+        <h1 style={{
+          fontFamily: "'Playfair Display', Georgia, serif",
+          fontSize: '26px', fontWeight: '700',
+          fontStyle: 'italic', color: '#F5F1EA',
+          marginBottom: '16px', lineHeight: '1.2'
+        }}>One more step</h1>
+        <p style={{
+          fontFamily: "'DM Sans', sans-serif",
+          fontSize: '14px', color: '#666',
+          lineHeight: '1.7', maxWidth: '300px', marginBottom: '32px'
+        }}>
+          We've sent a verification link to<br />
+          <span style={{ color: '#C8A45A' }}>{email}</span><br /><br />
+          Click the link in that email to verify your account and continue setting up your brief.
+        </p>
+        <div style={{
+          background: '#2A2A2A', border: '1px solid #333',
+          padding: '16px 20px', borderRadius: '2px',
+          maxWidth: '300px', width: '100%', marginBottom: '24px'
+        }}>
+          <div style={{
+            fontFamily: "'DM Mono', monospace", fontSize: '9px',
+            letterSpacing: '1px', color: '#555', marginBottom: '8px'
+          }}>CAN'T FIND IT?</div>
+          <div style={{
+            fontFamily: "'DM Sans', sans-serif",
+            fontSize: '13px', color: '#666', lineHeight: '1.5'
+          }}>Check your spam or junk folder. The email comes from noreply@supabase.io</div>
+        </div>
+        <button
+          onClick={async () => {
+            await supabase.auth.resend({ type: 'signup', email })
+            setError('Resent! Check your inbox.')
+          }}
+          style={{
+            background: 'none', border: 'none',
+            fontFamily: "'DM Mono', monospace",
+            fontSize: '10px', letterSpacing: '1px',
+            color: '#C8A45A', cursor: 'pointer',
+            textDecoration: 'underline', minHeight: '44px'
+          }}
+        >Resend verification email</button>
+        {error && (
+          <div style={{
+            marginTop: '12px',
+            fontFamily: "'DM Sans', sans-serif",
+            fontSize: '13px', color: '#C8A45A'
+          }}>{error}</div>
+        )}
+      </div>
+    )
+  }
+
+  // ── Signup form ────────────────────────────────────────────────────
   return (
     <div style={{
-      minHeight: '100vh',
-      background: '#1A1A1A',
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      justifyContent: 'center',
-      padding: '24px'
+      minHeight: '100vh', background: '#1A1A1A',
+      display: 'flex', flexDirection: 'column',
+      alignItems: 'center', justifyContent: 'center', padding: '24px'
     }}>
       <div style={{ width: '100%', maxWidth: '360px' }}>
-
         <div style={{ textAlign: 'center', marginBottom: '40px' }}>
           <div style={{
-            fontFamily: "'DM Mono', monospace",
-            fontSize: '9px',
-            letterSpacing: '3px',
-            color: '#C8A45A',
-            marginBottom: '8px'
+            fontFamily: "'DM Mono', monospace", fontSize: '9px',
+            letterSpacing: '3px', color: '#C8A45A', marginBottom: '8px'
           }}>MORNING BRIEF</div>
           <h1 style={{
             fontFamily: "'Playfair Display', Georgia, serif",
-            fontSize: '28px',
-            fontWeight: '700',
-            color: '#F5F1EA',
-            fontStyle: 'italic'
+            fontSize: '28px', fontWeight: '700',
+            fontStyle: 'italic', color: '#F5F1EA'
           }}>Create your account</h1>
           <p style={{
             fontFamily: "'DM Sans', sans-serif",
-            fontSize: '13px',
-            color: '#666',
-            marginTop: '8px',
-            lineHeight: '1.5'
-          }}>Takes 2 minutes. Your brief will be ready tomorrow at 7 AM.</p>
+            fontSize: '13px', color: '#555',
+            marginTop: '8px', lineHeight: '1.5'
+          }}>Your brief will be ready tomorrow at 7 AM.</p>
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-
-          {[
-            { label: 'Your name', value: name, setter: setName, type: 'text', placeholder: 'Priya' },
-            { label: 'Email', value: email, setter: setEmail, type: 'email', placeholder: 'priya@email.com' },
-            { label: 'Password', value: password, setter: setPassword, type: 'password', placeholder: '8+ characters' },
-          ].map(({ label, value, setter, type, placeholder }) => (
-            <div key={label}>
-              <label style={{
-                display: 'block',
-                fontFamily: "'DM Mono', monospace",
-                fontSize: '9px',
-                letterSpacing: '2px',
-                color: '#888',
-                marginBottom: '8px',
-                textTransform: 'uppercase'
-              }}>{label}</label>
-              <input
-                type={type}
-                value={value}
-                onChange={e => setter(e.target.value)}
-                placeholder={placeholder}
-                style={{
-                  width: '100%',
-                  padding: '14px 16px',
-                  background: '#2A2A2A',
-                  border: '1px solid #333',
-                  color: '#F5F1EA',
-                  fontFamily: "'DM Sans', sans-serif",
-                  fontSize: '15px',
-                  outline: 'none',
-                  borderRadius: '2px'
-                }}
-              />
-            </div>
-          ))}
+          <div>
+            <label style={labelStyle}>Your name</label>
+            <input type="text" value={name}
+              onChange={e => setName(e.target.value)}
+              placeholder="Priya" style={inputStyle(!!name)} />
+          </div>
+          <div>
+            <label style={labelStyle}>Email address</label>
+            <input type="email" value={email}
+              onChange={e => setEmail(e.target.value)}
+              placeholder="priya@email.com" style={inputStyle(!!email)} />
+          </div>
+          <div>
+            <label style={labelStyle}>Password</label>
+            <input type="password" value={password}
+              onChange={e => setPassword(e.target.value)}
+              placeholder="8+ characters"
+              onKeyDown={e => e.key === 'Enter' && handleSignup()}
+              style={inputStyle(password.length >= 8)} />
+          </div>
 
           {error && (
             <div style={{
@@ -126,46 +183,31 @@ export default function Signup() {
               border: '1px solid rgba(200,16,46,0.3)',
               color: '#ff6b6b',
               fontFamily: "'DM Sans', sans-serif",
-              fontSize: '13px',
-              borderRadius: '2px'
+              fontSize: '13px', borderRadius: '2px'
             }}>{error}</div>
           )}
 
-          <button
-            onClick={handleSignup}
-            disabled={loading}
-            style={{
-              width: '100%',
-              padding: '16px',
-              background: loading ? '#555' : '#C8A45A',
-              color: '#1A1A1A',
-              fontFamily: "'DM Sans', sans-serif",
-              fontSize: '14px',
-              fontWeight: '600',
-              letterSpacing: '1px',
-              textTransform: 'uppercase',
-              border: 'none',
-              cursor: loading ? 'not-allowed' : 'pointer',
-              marginTop: '8px',
-              borderRadius: '2px',
-              minHeight: '52px'
-            }}
-          >
+          <button onClick={handleSignup} disabled={loading} style={{
+            width: '100%', padding: '16px',
+            background: loading ? '#333' : '#C8A45A',
+            color: loading ? '#666' : '#1A1A1A',
+            fontFamily: "'DM Sans', sans-serif",
+            fontSize: '14px', fontWeight: '600',
+            letterSpacing: '1px', textTransform: 'uppercase',
+            border: 'none', cursor: loading ? 'not-allowed' : 'pointer',
+            borderRadius: '2px', minHeight: '52px', marginTop: '8px'
+          }}>
             {loading ? 'Creating account...' : 'Create Account →'}
           </button>
         </div>
 
         <div style={{
-          textAlign: 'center',
-          marginTop: '24px',
+          textAlign: 'center', marginTop: '24px',
           fontFamily: "'DM Sans', sans-serif",
-          fontSize: '13px',
-          color: '#555'
+          fontSize: '13px', color: '#444'
         }}>
           Already have an account?{' '}
-          <Link href="/login" style={{ color: '#C8A45A', textDecoration: 'none' }}>
-            Sign in
-          </Link>
+          <Link href="/login" style={{ color: '#C8A45A', textDecoration: 'none' }}>Sign in</Link>
         </div>
       </div>
     </div>
