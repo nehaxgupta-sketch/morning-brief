@@ -68,7 +68,7 @@ export default function Login() {
 
           {error && <div style={{ padding: '12px 16px', background: 'rgba(200,16,46,0.1)', border: '1px solid rgba(200,16,46,0.3)', color: '#ff6b6b', fontFamily: "'DM Sans', sans-serif", fontSize: '13px', borderRadius: '2px' }}>{error}</div>}
 
-          <button onClick={handleLogin} disabled={loading} style={{ width: '100%', padding: '16px', background: loading ? '#555' : '#C8A45A', color: '#1A1A1A', fontFamily: "'DM Sans', sans-serif", fontSize: '14px', fontWeight: '600', letterSpacing: '1px', textTransform: 'uppercase', border: 'none', cursor: loading ? 'not-allowed' : 'pointer', marginTop: '8px', borderRadius: '2px', minHeight: '52px' }}>
+          <button onClick={() => { alert('clicked'); handleLogin(); }} disabled={loading} style={{ width: '100%', padding: '16px', background: loading ? '#555' : '#C8A45A', color: '#1A1A1A', fontFamily: "'DM Sans', sans-serif", fontSize: '14px', fontWeight: '600', letterSpacing: '1px', textTransform: 'uppercase', border: 'none', cursor: loading ? 'not-allowed' : 'pointer', marginTop: '8px', borderRadius: '2px', minHeight: '52px' }}>
             {loading ? 'Signing in...' : 'Sign In →'}
           </button>
         </div>
