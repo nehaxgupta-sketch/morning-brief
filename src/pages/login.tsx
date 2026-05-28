@@ -23,7 +23,6 @@ export default function Login() {
       setError('Incorrect email or password. Please try again.')
       setLoading(false)
     }
-    // on success, _app.tsx handles redirect
   }
 
   return (
@@ -38,31 +37,28 @@ export default function Login() {
     }}>
       <div style={{ width: '100%', maxWidth: '360px' }}>
 
-        {/* Header */}
         <div style={{ textAlign: 'center', marginBottom: '40px' }}>
           <div style={{
             fontFamily: "'Playfair Display', Georgia, serif",
-            fontSize: 'clamp(28px, 8vw, 38px)', fontWeight: '900',
+            fontSize: 'clamp(36px, 10vw, 52px)', fontWeight: '900',
             color: '#F5F1EA', letterSpacing: '-0.5px',
             lineHeight: '1', marginBottom: '4px'
           }}>Morning</div>
           <div style={{
             fontFamily: "'Playfair Display', Georgia, serif",
-            fontSize: 'clamp(28px, 8vw, 38px)', fontWeight: '900',
-            fontStyle: 'italic', color: '#C8A45A',
+            fontSize: 'clamp(36px, 10vw, 52px)', fontWeight: '900',
+            color: '#C8A45A',
             letterSpacing: '-0.5px', lineHeight: '1',
             marginBottom: '20px'
           }}>Brief</div>
           <h1 style={{
-            fontFamily: "'Playfair Display', Georgia, serif",
-            fontSize: '22px',
-            fontWeight: '700',
-            color: '#F5F1EA',
-            fontStyle: 'italic'
+            fontFamily: "'DM Sans', sans-serif",
+            fontSize: '18px',
+            fontWeight: '400',
+            color: '#B0A898',
           }}>Welcome back</h1>
         </div>
 
-        {/* Form */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
           <div>
             <label style={{
@@ -70,7 +66,7 @@ export default function Login() {
               fontFamily: "'DM Mono', monospace",
               fontSize: '9px',
               letterSpacing: '2px',
-              color: '#888',
+              color: '#999',
               marginBottom: '8px',
               textTransform: 'uppercase' as const
             }}>Email</label>
@@ -99,7 +95,7 @@ export default function Login() {
               fontFamily: "'DM Mono', monospace",
               fontSize: '9px',
               letterSpacing: '2px',
-              color: '#888',
+              color: '#999',
               marginBottom: '8px',
               textTransform: 'uppercase' as const
             }}>Password</label>
@@ -123,8 +119,7 @@ export default function Login() {
             />
           </div>
 
-          {/* Forgot password */}
-          <div style={{ textAlign: 'right', marginTop: '-8px' }}>
+          <div style={{ textAlign: 'right', marginTop: '-12px' }}>
             <Link href="/forgot-password" style={{
               fontFamily: "'DM Sans', sans-serif",
               fontSize: '12px',
@@ -174,7 +169,7 @@ export default function Login() {
           marginTop: '24px',
           fontFamily: "'DM Sans', sans-serif",
           fontSize: '13px',
-          color: '#555'
+          color: '#888'
         }}>
           No account yet?{' '}
           <Link href="/signup" style={{ color: '#C8A45A', textDecoration: 'none' }}>
