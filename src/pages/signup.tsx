@@ -139,13 +139,13 @@ export default function Signup() {
         <div style={{ textAlign: 'center', marginBottom: '40px' }}>
           <div style={{
             fontFamily: "'Playfair Display', Georgia, serif",
-            fontSize: 'clamp(28px, 8vw, 38px)', fontWeight: '900',
+            fontSize: 'clamp(36px, 10vw, 52px)', fontWeight: '900',
             color: '#F5F1EA', letterSpacing: '-0.5px',
             lineHeight: '1', marginBottom: '4px'
           }}>Morning</div>
           <div style={{
             fontFamily: "'Playfair Display', Georgia, serif",
-            fontSize: 'clamp(28px, 8vw, 38px)', fontWeight: '900',
+            fontSize: 'clamp(36px, 10vw, 52px)', fontWeight: '900',
             color: '#C8A45A',
             letterSpacing: '-0.5px', lineHeight: '1',
             marginBottom: '20px'
