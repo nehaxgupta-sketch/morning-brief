@@ -97,7 +97,7 @@ export default function Landing() {
           justifyContent: 'center', marginTop: '48px', maxWidth: '320px',
           animation: 'fadeUp 0.5s 0.4s ease forwards', opacity: 0
         }}>
-          {['World · India · Your City', '3 reading depths', 'Personalised for you', 'Your reading lens'].map(f => (
+          {['World · India · Your City', '3 reading depths', 'Personalised for you', 'Your tone, your lens'].map(f => (
             <span key={f} style={{
               fontFamily: "'DM Mono', monospace", fontSize: '9px',
               letterSpacing: '1px', color: '#999',
