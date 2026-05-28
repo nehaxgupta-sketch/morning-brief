@@ -56,7 +56,7 @@ export default function Home() {
       <div style={{ background: '#1A1A1A', padding: '16px 20px 20px' }}>
         <div style={{
           fontFamily: "'DM Mono', monospace", fontSize: '8px',
-          letterSpacing: '2px', color: '#444', marginBottom: '4px'
+          letterSpacing: '2px', color: '#888', marginBottom: '4px'
         }}>{today.toUpperCase()}</div>
         <div style={{
           fontFamily: "'Playfair Display', Georgia, serif",
