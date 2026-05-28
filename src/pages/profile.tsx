@@ -128,7 +128,7 @@ export default function ProfilePage() {
         </div>
 
         {/* Work details */}
-        {(profile.life_stage || profile.profession || profile.industry) && (
+        {((profile as any).life_stage || profile.industry) && (
           <div style={{
             background: '#FDFCF9', border: '1px solid #E2DBD0',
             padding: '20px', marginBottom: '14px'
@@ -194,7 +194,11 @@ export default function ProfilePage() {
           <div style={{ marginBottom: '20px' }}>
             <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '9px', letterSpacing: '1px', color: '#aaa', marginBottom: '10px' }}>DEFAULT DEPTH</div>
             <div style={{ display: 'flex', gap: '8px' }}>
-              {[{ id: 'ultra', label: '5 Min' }, { id: 'standard', label: '10 Min' }, { id: 'deep', label: 'Deep' }].map(e => (
+              {[
+                { id: 'ultra', label: '5 Min' },
+                { id: 'standard', label: '10 Min' },
+                { id: 'deep', label: 'Deep' }
+              ].map(e => (
                 <button key={e.id} onClick={() => setEdition(e.id)} style={{
                   flex: 1, padding: '11px 6px',
                   background: edition === e.id ? 'rgba(200,164,90,0.1)' : '#F5F1EA',
@@ -237,7 +241,7 @@ export default function ProfilePage() {
           Edit Full Profile →
         </Link>
 
-        {/* Sign out — prominent */}
+        {/* Sign out */}
         <button
           onClick={handleSignOut}
           disabled={signingOut}
@@ -259,8 +263,9 @@ export default function ProfilePage() {
       {/* Bottom nav */}
       <div style={{
         position: 'fixed', bottom: 0, left: 0, right: 0,
-        background: '#1A1A1A', borderTop: '1px solid #222',
-        display: 'flex', height: '60px'
+        background: '#1A1A1A', borderTop: '1px solid #2A2A2A',
+        display: 'flex', height: '60px',
+        paddingBottom: 'env(safe-area-inset-bottom)'
       }}>
         {[
           { href: '/home', label: 'Brief', icon: '◆', active: false },
@@ -271,25 +276,27 @@ export default function ProfilePage() {
             alignItems: 'center', justifyContent: 'center',
             gap: '3px', textDecoration: 'none', minHeight: '60px'
           }}>
-            <span style={{ fontSize: '16px', color: active ? '#C8A45A' : '#3A3A3A' }}>{icon}</span>
+            <span style={{ fontSize: '16px', color: active ? '#C8A45A' : '#666' }}>{icon}</span>
             <span style={{
               fontFamily: "'DM Mono', monospace", fontSize: '8px',
-              letterSpacing: '1px', color: active ? '#C8A45A' : '#3A3A3A'
+              letterSpacing: '1px', color: active ? '#C8A45A' : '#666'
             }}>{label.toUpperCase()}</span>
           </Link>
         ))}
       </div>
+
     </div>
   )
 }
 
 const LIFE_STAGE_LABELS: Record<string, string> = {
-  professional: 'Working Professional',
   student: 'Student',
+  early_career: 'Early Career (0–5 yrs)',
+  mid_career: 'Mid Career (5–15 yrs)',
+  senior: 'Senior Professional (15+ yrs)',
   business: 'Business Owner',
-  homemaker: 'Homemaker',
   freelancer: 'Freelancer / Consultant',
+  homemaker: 'Homemaker',
   retired: 'Retired',
-  between: 'Between Jobs',
-  other: 'Other'
+  prefer_not: 'Prefer not to say'
 }
