@@ -250,7 +250,7 @@ export default function Onboarding() {
       updated_at: new Date().toISOString()
     }).eq('id', user.id)
 
-    router.push('/home')
+    window.location.href = '/home'
   }
 
   const next = () => {
