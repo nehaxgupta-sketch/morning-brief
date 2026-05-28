@@ -286,25 +286,22 @@ export default function Onboarding() {
 
             {/* Two column cards */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '24px' }}>
-              {[
-                { id: 'standard', label: 'Standard', sub: 'No setup' },
-                { id: 'personalised', label: 'Personalised', sub: '3 min setup' },
-              ].map(col => (
-                <button
+              {([
+                { id: 'standard' as const, label: 'Standard', sub: 'No setup', features: FEATURES_STANDARD },
+                { id: 'personalised' as const, label: 'Personalised', sub: 'Only 3 min setup', features: FEATURES_PERSONALISED },
+              ]).map(col => (
+                <div
                   key={col.id}
-                  type="button"
-                  onClick={() => setBriefType(col.id as 'standard' | 'personalised')}
+                  onClick={() => setBriefType(col.id)}
                   style={{
-                    background: briefType === col.id ? 'rgba(200,164,90,0.1)' : '#1E1E1E',
+                    background: briefType === col.id ? 'rgba(200,164,90,0.08)' : '#1E1E1E',
                     border: `1px solid ${briefType === col.id ? '#C8A45A' : '#2A2A2A'}`,
-                    borderTop: `3px solid ${briefType === col.id ? '#C8A45A' : '#2A2A2A'}`,
+                    borderTop: `3px solid ${briefType === col.id ? '#C8A45A' : '#333'}`,
                     borderRadius: '4px', cursor: 'pointer',
-                    padding: '0', overflow: 'hidden',
-                    textAlign: 'left' as const
+                    display: 'flex', flexDirection: 'column'
                   }}
                 >
-                  {/* Card header */}
-                  <div style={{ padding: '16px 14px 12px' }}>
+                  <div style={{ padding: '14px 12px 10px' }}>
                     <div style={{
                       fontFamily: "'Playfair Display', Georgia, serif",
                       fontSize: '16px', fontWeight: '700',
@@ -313,24 +310,19 @@ export default function Onboarding() {
                     }}>{col.label}</div>
                     <div style={{
                       fontFamily: "'DM Mono', monospace",
-                      fontSize: '9px', letterSpacing: '1px',
-                      color: '#888'
+                      fontSize: '9px', letterSpacing: '1px', color: '#888'
                     }}>{col.sub.toUpperCase()}</div>
                   </div>
-
-                  {/* Divider */}
                   <div style={{ height: '1px', background: briefType === col.id ? 'rgba(200,164,90,0.2)' : '#2A2A2A' }} />
-
-                  {/* Feature list */}
-                  <div style={{ padding: '12px 14px' }}>
-                    {(col.id === 'standard' ? FEATURES_STANDARD : FEATURES_PERSONALISED).map(f => (
-                      <div key={f} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '5px 0', borderBottom: '1px solid rgba(255,255,255,0.03)' }}>
-                        <span style={{ fontSize: '11px', fontWeight: '700', color: '#C8A45A', flexShrink: 0, width: '12px' }}>✓</span>
-                        <span style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '12px', color: '#888' }}>{f}</span>
+                  <div style={{ padding: '10px 12px' }}>
+                    {col.features.map(f => (
+                      <div key={f} style={{ display: 'flex', alignItems: 'flex-start', gap: '6px', padding: '4px 0' }}>
+                        <span style={{ color: '#C8A45A', fontSize: '10px', fontWeight: '700', marginTop: '2px', flexShrink: 0 }}>✓</span>
+                        <span style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '11px', color: '#888', lineHeight: '1.4' }}>{f}</span>
                       </div>
                     ))}
                   </div>
-                </button>
+                </div>
               ))}
             </div>
 
