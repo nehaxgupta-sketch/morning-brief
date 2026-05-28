@@ -25,7 +25,7 @@ export default function Signup() {
     display: 'block',
     fontFamily: "'DM Mono', monospace",
     fontSize: '9px', letterSpacing: '2px',
-    color: '#666', marginBottom: '8px',
+    color: '#999', marginBottom: '8px',
     textTransform: 'uppercase' as const
   }
 
@@ -62,7 +62,6 @@ export default function Signup() {
     setLoading(false)
   }
 
-  // ── Verify screen ──────────────────────────────────────────────────
   if (stage === 'verify') {
     return (
       <div style={{
@@ -79,12 +78,12 @@ export default function Signup() {
         <h1 style={{
           fontFamily: "'Playfair Display', Georgia, serif",
           fontSize: '26px', fontWeight: '700',
-          fontStyle: 'italic', color: '#F5F1EA',
+          color: '#F5F1EA',
           marginBottom: '16px', lineHeight: '1.2'
         }}>One more step</h1>
         <p style={{
           fontFamily: "'DM Sans', sans-serif",
-          fontSize: '14px', color: '#666',
+          fontSize: '14px', color: '#888',
           lineHeight: '1.7', maxWidth: '300px', marginBottom: '32px'
         }}>
           We've sent a verification link to<br />
@@ -98,11 +97,11 @@ export default function Signup() {
         }}>
           <div style={{
             fontFamily: "'DM Mono', monospace", fontSize: '9px',
-            letterSpacing: '1px', color: '#555', marginBottom: '8px'
+            letterSpacing: '1px', color: '#999', marginBottom: '8px'
           }}>CAN'T FIND IT?</div>
           <div style={{
             fontFamily: "'DM Sans', sans-serif",
-            fontSize: '13px', color: '#666', lineHeight: '1.5'
+            fontSize: '13px', color: '#888', lineHeight: '1.5'
           }}>Check your spam or junk folder. The email comes from noreply@supabase.io</div>
         </div>
         <button
@@ -129,7 +128,6 @@ export default function Signup() {
     )
   }
 
-  // ── Signup form ────────────────────────────────────────────────────
   return (
     <div style={{
       minHeight: '100vh', background: '#1A1A1A',
@@ -138,7 +136,6 @@ export default function Signup() {
     }}>
       <div style={{ width: '100%', maxWidth: '360px' }}>
 
-        {/* Header */}
         <div style={{ textAlign: 'center', marginBottom: '40px' }}>
           <div style={{
             fontFamily: "'Playfair Display', Georgia, serif",
@@ -149,19 +146,17 @@ export default function Signup() {
           <div style={{
             fontFamily: "'Playfair Display', Georgia, serif",
             fontSize: 'clamp(28px, 8vw, 38px)', fontWeight: '900',
-            fontStyle: 'italic', color: '#C8A45A',
+            color: '#C8A45A',
             letterSpacing: '-0.5px', lineHeight: '1',
             marginBottom: '20px'
           }}>Brief</div>
           <h1 style={{
-            fontFamily: "'Playfair Display', Georgia, serif",
-            fontSize: '22px', fontWeight: '700',
-            fontStyle: 'italic', color: '#F5F1EA',
-            marginBottom: '0'
+            fontFamily: "'DM Sans', sans-serif",
+            fontSize: '18px', fontWeight: '400',
+            color: '#B0A898', marginBottom: '0'
           }}>Create your account</h1>
         </div>
 
-        {/* Form fields */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
           <div>
             <label style={labelStyle}>Your name</label>
@@ -182,15 +177,6 @@ export default function Signup() {
               placeholder="8+ characters"
               onKeyDown={e => e.key === 'Enter' && handleSignup()}
               style={inputStyle(password.length >= 8)} />
-          </div>
-
-          {/* Forgot password link */}
-          <div style={{ textAlign: 'right', marginTop: '-8px' }}>
-            <Link href="/forgot-password" style={{
-              fontFamily: "'DM Sans', sans-serif",
-              fontSize: '12px', color: '#666',
-              textDecoration: 'none'
-            }}>Forgot password?</Link>
           </div>
 
           {error && (
@@ -221,7 +207,7 @@ export default function Signup() {
         <div style={{
           textAlign: 'center', marginTop: '24px',
           fontFamily: "'DM Sans', sans-serif",
-          fontSize: '13px', color: '#444'
+          fontSize: '13px', color: '#888'
         }}>
           Already have an account?{' '}
           <Link href="/login" style={{ color: '#C8A45A', textDecoration: 'none' }}>Sign in</Link>
