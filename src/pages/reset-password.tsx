@@ -11,7 +11,6 @@ export default function ResetPassword() {
   const [ready, setReady] = useState(false)
 
   useEffect(() => {
-    // Supabase puts the session in the URL hash after redirect
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session) setReady(true)
       else setError('Invalid or expired reset link. Please request a new one.')
