@@ -21,7 +21,7 @@ export default function App({ Component, pageProps }: AppProps) {
                 autoPrompt: true,
                 text: {
                   actionMessage:
-                    'Get your Morning Brief delivered the moment it's ready — every day at 7 AM.',
+                    "Get your Morning Brief the moment it is ready — every day at 7 AM.",
                   acceptButton: 'Allow',
                   cancelButton: 'Not now',
                 },
