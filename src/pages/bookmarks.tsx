@@ -1,48 +1,259 @@
- import Link from 'next/link'
+import { useEffect, useState } from 'react'
+import { useRouter } from 'next/router'
+import Head from 'next/head'
+import { supabase } from '@/lib/supabase'
 
-export default function Bookmarks() {
+type Bookmark = {
+  id: string
+  brief_date: string
+  edition: string
+  section: string
+  headline: string
+  body: string
+  source: string | null
+  created_at: string
+}
+
+const sectionEmoji: Record<string, string> = {
+  world: '🌍',
+  india: '🇮🇳',
+  markets: '📈',
+  sport: '🏏',
+  culture: '🎭',
+}
+
+export default function BookmarksPage() {
+  const router = useRouter()
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>([])
+  const [loading, setLoading] = useState(true)
+  const [removing, setRemoving] = useState<string | null>(null)
+
+  useEffect(() => {
+    checkAuthAndLoad()
+  }, [])
+
+  async function checkAuthAndLoad() {
+    const { data: { session } } = await supabase.auth.getSession()
+    if (!session) {
+      window.location.href = '/login'
+      return
+    }
+    loadBookmarks(session.user.id)
+  }
+
+  async function loadBookmarks(userId: string) {
+    setLoading(true)
+    const { data, error } = await supabase
+      .from('bookmarks')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+
+    if (!error && data) setBookmarks(data)
+    setLoading(false)
+  }
+
+  async function removeBookmark(id: string) {
+    setRemoving(id)
+    await supabase.from('bookmarks').delete().eq('id', id)
+    setBookmarks(prev => prev.filter(b => b.id !== id))
+    setRemoving(null)
+  }
+
+  function formatDate(dateStr: string) {
+    return new Date(dateStr).toLocaleDateString('en-IN', {
+      weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
+    })
+  }
+
+  // Group bookmarks by date
+  const grouped = bookmarks.reduce<Record<string, Bookmark[]>>((acc, b) => {
+    const key = b.brief_date
+    if (!acc[key]) acc[key] = []
+    acc[key].push(b)
+    return acc
+  }, {})
+
   return (
-    <div style={{ minHeight: '100vh', background: '#F5F1EA' }}>
-      <div style={{
-        background: '#1A1A1A', borderBottom: '2px solid #C8A45A',
-        padding: '0 20px', display: 'flex', alignItems: 'center',
-        gap: '16px', height: '52px'
-      }}>
-        <Link href="/home" style={{ color: '#888', textDecoration: 'none', fontSize: '18px', minHeight: '44px', display: 'flex', alignItems: 'center' }}>←</Link>
-        <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '10px', letterSpacing: '2px', color: '#888' }}>SAVED STORIES</div>
-      </div>
+    <>
+      <Head>
+        <title>Saved — Morning Brief</title>
+      </Head>
 
-      <div style={{ padding: '48px 20px', textAlign: 'center' }}>
-        <div style={{ fontSize: '32px', marginBottom: '16px' }}>◈</div>
-        <div style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: '22px', fontStyle: 'italic', color: '#1A1A1A', marginBottom: '8px' }}>
-          Saved Stories
-        </div>
-        <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '14px', color: '#888', lineHeight: '1.6', maxWidth: '260px', margin: '0 auto' }}>
-          Bookmark stories and follow them as they develop. News memory coming in the next build.
-        </div>
-      </div>
+      <div style={{ background: '#1A1A1A', minHeight: '100vh', paddingBottom: '80px' }}>
 
-      <div style={{
-        position: 'fixed', bottom: 0, left: 0, right: 0,
-        background: '#1A1A1A', borderTop: '1px solid #2A2A2A',
-        display: 'flex', height: '60px'
-      }}>
-        {[
-          { href: '/home', label: 'Brief', icon: '◆', active: false },
-          { href: '/habits', label: 'Habits', icon: '◎', active: false },
-          { href: '/bookmarks', label: 'Saved', icon: '◈', active: true },
-          { href: '/profile', label: 'Profile', icon: '◑', active: false },
-        ].map(({ href, label, icon, active }) => (
-          <Link key={href} href={href} style={{
-            flex: 1, display: 'flex', flexDirection: 'column',
-            alignItems: 'center', justifyContent: 'center',
-            gap: '2px', textDecoration: 'none', minHeight: '60px'
-          }}>
-            <span style={{ fontSize: '16px', color: active ? '#C8A45A' : '#444' }}>{icon}</span>
-            <span style={{ fontFamily: "'DM Mono', monospace", fontSize: '8px', letterSpacing: '1px', color: active ? '#C8A45A' : '#444' }}>{label.toUpperCase()}</span>
-          </Link>
-        ))}
+        {/* Header */}
+        <div style={{
+          padding: '48px 24px 24px',
+          borderBottom: '1px solid #2A2A2A',
+        }}>
+          <p style={{ fontFamily: 'DM Mono, monospace', fontSize: '11px', color: '#888', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: '8px' }}>
+            Your collection
+          </p>
+          <h1 style={{ fontFamily: 'Playfair Display, serif', fontSize: '32px', fontWeight: 900, color: '#F5F1EA', margin: 0 }}>
+            Saved Stories
+          </h1>
+          {!loading && bookmarks.length > 0 && (
+            <p style={{ fontFamily: 'DM Sans, sans-serif', fontSize: '14px', color: '#888', marginTop: '8px' }}>
+              {bookmarks.length} {bookmarks.length === 1 ? 'story' : 'stories'} saved
+            </p>
+          )}
+        </div>
+
+        {/* Content */}
+        <div style={{ padding: '24px 24px 0' }}>
+
+          {loading && (
+            <div style={{ textAlign: 'center', paddingTop: '80px' }}>
+              <div style={{
+                width: '32px', height: '32px', border: '2px solid #333',
+                borderTopColor: '#C8A45A', borderRadius: '50%',
+                animation: 'spin 0.8s linear infinite', margin: '0 auto',
+              }} />
+              <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+            </div>
+          )}
+
+          {!loading && bookmarks.length === 0 && (
+            <div style={{ textAlign: 'center', paddingTop: '80px' }}>
+              <div style={{ fontSize: '48px', marginBottom: '16px' }}>🔖</div>
+              <p style={{ fontFamily: 'Playfair Display, serif', fontSize: '20px', color: '#F5F1EA', marginBottom: '8px' }}>
+                Nothing saved yet
+              </p>
+              <p style={{ fontFamily: 'DM Sans, sans-serif', fontSize: '15px', color: '#888', marginBottom: '32px' }}>
+                Tap the bookmark icon on any story while reading your brief.
+              </p>
+              <button
+                onClick={() => window.location.href = '/brief'}
+                style={{
+                  background: '#C8A45A', color: '#1A1A1A', border: 'none',
+                  borderRadius: '12px', padding: '14px 28px',
+                  fontFamily: 'DM Sans, sans-serif', fontSize: '15px', fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                Read Today's Brief
+              </button>
+            </div>
+          )}
+
+          {!loading && Object.entries(grouped).map(([date, items]) => (
+            <div key={date} style={{ marginBottom: '40px' }}>
+              {/* Date group header */}
+              <p style={{
+                fontFamily: 'DM Mono, monospace', fontSize: '11px', color: '#C8A45A',
+                letterSpacing: '0.1em', textTransform: 'uppercase',
+                marginBottom: '16px', marginTop: '0',
+              }}>
+                {formatDate(date)}
+              </p>
+
+              {items.map(bookmark => (
+                <div
+                  key={bookmark.id}
+                  style={{
+                    background: '#242424',
+                    borderRadius: '16px',
+                    padding: '20px',
+                    marginBottom: '12px',
+                    border: '1px solid #2E2E2E',
+                    position: 'relative',
+                  }}
+                >
+                  {/* Section pill */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
+                    <span style={{ fontSize: '14px' }}>
+                      {sectionEmoji[bookmark.section] || '📰'}
+                    </span>
+                    <span style={{
+                      fontFamily: 'DM Mono, monospace', fontSize: '10px',
+                      color: '#888', textTransform: 'uppercase', letterSpacing: '0.08em',
+                    }}>
+                      {bookmark.section} · {bookmark.edition}
+                    </span>
+                  </div>
+
+                  {/* Headline */}
+                  <p style={{
+                    fontFamily: 'Playfair Display, serif', fontSize: '18px',
+                    fontWeight: 700, color: '#F5F1EA', margin: '0 0 10px',
+                    lineHeight: 1.35,
+                  }}>
+                    {bookmark.headline}
+                  </p>
+
+                  {/* Body */}
+                  <p style={{
+                    fontFamily: 'DM Sans, sans-serif', fontSize: '15px',
+                    color: '#C0B9AF', lineHeight: 1.6, margin: '0 0 12px',
+                  }}>
+                    {bookmark.body}
+                  </p>
+
+                  {/* Footer row */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    {bookmark.source && (
+                      <span style={{
+                        fontFamily: 'DM Mono, monospace', fontSize: '11px', color: '#666',
+                      }}>
+                        {bookmark.source}
+                      </span>
+                    )}
+                    <button
+                      onClick={() => removeBookmark(bookmark.id)}
+                      disabled={removing === bookmark.id}
+                      style={{
+                        background: 'none', border: 'none', cursor: 'pointer',
+                        fontFamily: 'DM Sans, sans-serif', fontSize: '13px',
+                        color: removing === bookmark.id ? '#555' : '#E05C5C',
+                        padding: '4px 0', marginLeft: 'auto',
+                      }}
+                    >
+                      {removing === bookmark.id ? 'Removing…' : 'Remove'}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+
+        {/* Bottom nav */}
+        <nav style={{
+          position: 'fixed', bottom: 0, left: 0, right: 0,
+          background: '#1A1A1A', borderTop: '1px solid #2A2A2A',
+          display: 'flex', justifyContent: 'space-around', padding: '12px 0 20px',
+          zIndex: 100,
+        }}>
+          {[
+            { label: 'Brief', icon: '📰', href: '/brief' },
+            { label: 'Saved', icon: '🔖', href: '/bookmarks' },
+            { label: 'Profile', icon: '👤', href: '/profile' },
+          ].map(item => {
+            const active = item.href === '/bookmarks'
+            return (
+              <button
+                key={item.href}
+                onClick={() => window.location.href = item.href}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px',
+                  padding: '0 24px',
+                }}
+              >
+                <span style={{ fontSize: '20px' }}>{item.icon}</span>
+                <span style={{
+                  fontFamily: 'DM Mono, monospace', fontSize: '10px',
+                  color: active ? '#C8A45A' : '#888',
+                  textTransform: 'uppercase', letterSpacing: '0.06em',
+                }}>
+                  {item.label}
+                </span>
+              </button>
+            )
+          })}
+        </nav>
       </div>
-    </div>
+    </>
   )
 }
