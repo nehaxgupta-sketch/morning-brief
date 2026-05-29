@@ -56,6 +56,47 @@ interface BriefContent {
   culture: { headline: string; body: string; source: string };
 }
 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+// Extract the first complete JSON object from a string, tolerating prose
+// before/after and minor trailing junk. Throws with a helpful message on fail.
+function extractJsonObject(text: string): any {
+  const cleaned = text.replace(/```json|```/g, '').trim();
+
+  // Find first '{' and try to balance braces to locate matching '}'.
+  const start = cleaned.indexOf('{');
+  if (start === -1) throw new Error('No JSON object found in response');
+
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let end = -1;
+
+  for (let i = start; i < cleaned.length; i++) {
+    const ch = cleaned[i];
+    if (escape) { escape = false; continue; }
+    if (ch === '\\') { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) { end = i; break; }
+    }
+  }
+
+  if (end === -1) {
+    throw new Error(`JSON appears truncated. Length=${cleaned.length}, last 200 chars: ${cleaned.slice(-200)}`);
+  }
+
+  const candidate = cleaned.slice(start, end + 1);
+  try {
+    return JSON.parse(candidate);
+  } catch (e: any) {
+    throw new Error(`JSON parse failed: ${e.message}. Snippet around error: ${candidate.slice(Math.max(0, candidate.length - 300))}`);
+  }
+}
+
 // ─── Step 2: Fetch news via OpenAI ──────────────────────────────────────────
 
 async function fetchNewsFromOpenAI(): Promise<RawStories> {
@@ -72,23 +113,24 @@ For EVERY story, you MUST include:
 
 Rules:
 - Use only real stories from the last 24-36 hours. Prefer original publishers (Reuters, AP, Bloomberg, The Hindu, Indian Express, BBC, FT) over aggregators.
-- Every source_url must be a real, specific article URL. If you don't have a real URL for a story, do not include the story.
+- Every source_url must be a real, specific article URL. If you don't have a real URL, do not include the story.
 - Be factual and neutral. No opinion.
-- For Bengaluru and Delhi, only include stories if there is genuine material news (civic, mobility, weather, safety, policy, business). Do not fill with filler. Returning fewer stories than the target is OK if real news is thin.
+- For Bengaluru and Delhi, only include stories if there is genuine material news. Returning fewer stories than the target is OK if real news is thin.
+- Keep each body to 2-3 sentences. Do not exceed this — long bodies will cause failure.
 
 Return this exact structure:
 {
   "world": [
     { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
-    // 5 stories total: wars, diplomacy, elections, global economy, major incidents
+    // 5 stories: wars, diplomacy, elections, global economy, major incidents
   ],
   "india": [
     { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
-    // 5 stories total: politics, policy, regulation, courts, governance
+    // 5 stories: politics, policy, regulation, courts, governance
   ],
   "bengaluru": [
     { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
-    // 0-3 stories: only if material civic/mobility/weather/safety/business news exists
+    // 0-3 stories: only if material news exists
   ],
   "delhi": [
     { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
@@ -105,21 +147,21 @@ Return this exact structure:
   },
   "business": [
     { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
-    // 3 stories: major companies, deals, macro/inflation/currency, consumer demand
+    // 3 stories
   ],
   "technology": [
     { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
-    // 2 stories: AI, platforms, cybersecurity, startups, regulation, science
+    // 2 stories
   ],
   "climate_health": [
     { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
-    // 1-2 stories: weather, pollution, disease, disasters, public health
+    // 1-2 stories
   ],
   "sport": { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." },
   "culture": { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
 }
 
-Use real markets data from today if available; otherwise neutral best estimates. All other fields must be real news with verifiable URLs.`;
+Use real markets data from today if available; otherwise neutral best estimates. Keep response complete and well under 10000 tokens.`;
 
   const response = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
@@ -131,16 +173,17 @@ Use real markets data from today if available; otherwise neutral best estimates.
       model: 'gpt-4o-mini',
       tools: [{ type: 'web_search_preview' }],
       input: prompt,
+      max_output_tokens: 12000,
     }),
   });
 
   const data = await response.json();
-  console.log('OpenAI raw response (first 500 chars):', JSON.stringify(data).slice(0, 500));
+  console.log('OpenAI status:', response.status, 'output items:', data.output?.length);
   const text = data.output?.find((o: any) => o.type === 'message')?.content?.[0]?.text;
-  if (!text) throw new Error(`No response from OpenAI. Raw: ${JSON.stringify(data)}`);
+  if (!text) throw new Error(`No response from OpenAI. Raw: ${JSON.stringify(data).slice(0, 800)}`);
+  console.log('OpenAI text length:', text.length);
 
-  const cleaned = text.replace(/```json|```/g, '').trim();
-  return JSON.parse(cleaned);
+  return extractJsonObject(text);
 }
 
 // ─── Step 3: Write brief with Claude ────────────────────────────────────────
@@ -203,7 +246,7 @@ Keep all source names exactly as they appear in the raw data. Only rewrite headl
     },
     body: JSON.stringify({
       model: 'claude-opus-4-5',
-      max_tokens: 4096,
+      max_tokens: 8000,
       messages: [
         { role: 'user', content: prompt }
       ],
@@ -211,13 +254,12 @@ Keep all source names exactly as they appear in the raw data. Only rewrite headl
   });
 
   const data = await response.json();
-  console.log('Claude raw response:', JSON.stringify(data).slice(0, 500));
+  console.log('Claude status:', response.status);
 
   const text = data.content?.[0]?.text;
-  if (!text) throw new Error(`No response from Claude. Raw: ${JSON.stringify(data)}`);
+  if (!text) throw new Error(`No response from Claude. Raw: ${JSON.stringify(data).slice(0, 800)}`);
 
-  const cleaned = text.replace(/```json|```/g, '').trim();
-  return JSON.parse(cleaned);
+  return extractJsonObject(text);
 }
 
 // ─── Step 4: Save to Supabase ────────────────────────────────────────────────
@@ -244,7 +286,7 @@ async function saveBriefToSupabase(
     );
 
   if (error) throw new Error(`Supabase save failed: ${error.message}`);
-  console.log(`Brief saved to Supabase — ${edition} edition for ${today}`);
+  console.log(`Brief saved — ${edition} for ${today}`);
 }
 
 // ─── Step 6: Send OneSignal push notification ────────────────────────────────
@@ -267,12 +309,8 @@ async function sendPushNotification(topHeadline: string) {
   });
 
   const data = await response.json();
-
-  if (data.errors) {
-    throw new Error(`OneSignal error: ${JSON.stringify(data.errors)}`);
-  }
-
-  console.log(`Push notification sent. Recipients: ${data.recipients ?? 'unknown'}, ID: ${data.id}`);
+  if (data.errors) throw new Error(`OneSignal error: ${JSON.stringify(data.errors)}`);
+  console.log(`Push sent. Recipients: ${data.recipients ?? 'unknown'}, ID: ${data.id}`);
   return data;
 }
 
@@ -287,37 +325,28 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     console.log('Fetching news from OpenAI...');
     const rawStories = await fetchNewsFromOpenAI();
-    console.log('News fetched successfully');
+    console.log('News fetched.');
 
     const results: Record<string, any> = {};
 
     for (const ed of editions) {
-      console.log(`Writing ${ed} brief with Claude...`);
+      console.log(`Writing ${ed}...`);
       const content = await writeBriefWithClaude(rawStories, ed);
-      console.log(`${ed} brief written`);
-
-      console.log(`Saving ${ed} brief to Supabase...`);
+      console.log(`${ed} written. Saving...`);
       await saveBriefToSupabase(ed, rawStories, content);
-
       results[ed] = content;
     }
 
     if (!skipPush) {
-      console.log('Sending push notification...');
       const topHeadline = results['5min']?.world?.[0]?.headline
         ?? results['10min']?.world?.[0]?.headline
         ?? 'Today\'s stories are waiting for you.';
       await sendPushNotification(topHeadline);
-      console.log('Push notification sent');
     } else {
-      console.log('Push notification skipped (skipPush: true)');
+      console.log('Push skipped (skipPush: true)');
     }
 
-    return res.status(200).json({
-      success: true,
-      editions,
-      results,
-    });
+    return res.status(200).json({ success: true, editions, results });
 
   } catch (error: any) {
     console.error('Error:', error.message);
