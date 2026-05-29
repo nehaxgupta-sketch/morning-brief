@@ -1,4 +1,3 @@
-
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/router'
 import Link from 'next/link'
@@ -501,11 +500,14 @@ export default function BriefPage() {
 
   // ── Save / unsave a story ──────────────────────────────────────────
   const toggleBookmark = async (section: string, index: number, story: Story) => {
-    if (!userId) return
+    if (!userId) {
+      alert('Your session was not found — please log in again.')
+      return
+    }
     const key = `${todayISO}-${activeEdition}-${section}-${index}`
     const currentlySaved = savedKeys.has(key)
 
-    // Update the screen immediately (optimistic), then save to the database
+    // Update the screen immediately (optimistic)
     setSavedKeys(prev => {
       const next = new Set(prev)
       if (currentlySaved) next.delete(key)
@@ -513,8 +515,18 @@ export default function BriefPage() {
       return next
     })
 
+    // Undo the screen change if the database call fails
+    const revert = () => {
+      setSavedKeys(prev => {
+        const next = new Set(prev)
+        if (currentlySaved) next.add(key)
+        else next.delete(key)
+        return next
+      })
+    }
+
     if (currentlySaved) {
-      await supabase
+      const { error } = await supabase
         .from('bookmarks')
         .delete()
         .eq('user_id', userId)
@@ -522,22 +534,27 @@ export default function BriefPage() {
         .eq('edition', activeEdition)
         .eq('section', section)
         .eq('story_index', index)
+      if (error) {
+        revert()
+        alert('Could not remove bookmark: ' + error.message)
+      }
     } else {
-      await supabase
+      const { error } = await supabase
         .from('bookmarks')
-        .upsert(
-          {
-            user_id: userId,
-            brief_date: todayISO,
-            edition: activeEdition,
-            section,
-            story_index: index,
-            headline: story.headline,
-            body: story.body,
-            source: story.source,
-          },
-          { onConflict: 'user_id,brief_date,edition,section,story_index' }
-        )
+        .insert({
+          user_id: userId,
+          brief_date: todayISO,
+          edition: activeEdition,
+          section,
+          story_index: index,
+          headline: story.headline,
+          body: story.body,
+          source: story.source,
+        })
+      if (error) {
+        revert()
+        alert('Could not save bookmark: ' + error.message)
+      }
     }
   }
 
