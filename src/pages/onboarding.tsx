@@ -62,7 +62,7 @@ const INTERESTS = [
 
 const MOODS = [
   { id: 'neutral', label: 'Neutral', desc: 'Balanced, objective framing. Facts first.', icon: '◎' },
-  { id: 'optimistic', label: 'Optimistic', desc: 'Same facts, forward-looking lens. What could go right.', icon: '◑' },
+  { id: 'optimistic', label: 'Hopeful', desc: 'Same facts, forward-looking lens. What could go right.', icon: '◑' },
   { id: 'critical', label: 'Critical', desc: 'Sharper analysis. Questions assumptions.', icon: '◐' },
 ]
 
@@ -468,29 +468,32 @@ export default function Onboarding() {
         )}
 
         {/* STEP 5 */}
+        {/* STEP 5 */}
         {step === 5 && briefType === 'personalised' && (
           <div>
             <Wordmark size="small" />
             <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '9px', letterSpacing: '2px', color: '#C8A45A', marginBottom: '12px' }}>STEP 5 OF {personalisedSteps}</div>
             <h2 style={headStyle}>How do you like your news?</h2>
             <p style={subStyle}>You can change these any time from your profile.</p>
-            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '9px', letterSpacing: '2px', color: '#888', marginBottom: '12px', textTransform: 'uppercase' }}>Analysis tone</div>
+
+            <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '13px', fontWeight: '600', color: '#B0A898', marginBottom: '12px', letterSpacing: '0.5px' }}>Analysis tone</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '32px' }}>
               {MOODS.map(m => (
-                <button type="button" key={m.id} onClick={() => setMood(m.id)} style={{ padding: '16px', background: mood === m.id ? 'rgba(200,164,90,0.1)' : '#2A2A2A', border: `1px solid ${mood === m.id ? '#C8A45A' : '#333'}`, borderRadius: '2px', cursor: 'pointer', textAlign: 'left', display: 'flex', gap: '12px', alignItems: 'flex-start', minHeight: '44px' }}>
-                  <span style={{ fontSize: '18px', flexShrink: 0, color: '#C8A45A' }}>{m.icon}</span>
+                <button type="button" key={m.id} onClick={() => setMood(m.id)} style={{ padding: '16px', background: mood === m.id ? 'rgba(200,164,90,0.1)' : '#2A2A2A', border: `1px solid ${mood === m.id ? '#C8A45A' : '#333'}`, borderRadius: '2px', cursor: 'pointer', textAlign: 'left', display: 'flex', gap: '12px', alignItems: 'center', minHeight: '44px' }}>
+                  <span style={{ fontSize: '20px', flexShrink: 0, color: '#C8A45A', width: '24px', textAlign: 'center' }}>{m.icon}</span>
                   <div>
-                    <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '14px', fontWeight: '600', color: mood === m.id ? '#C8A45A' : '#F5F1EA', marginBottom: '2px' }}>{m.label}</div>
+                    <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '14px', fontWeight: '600', color: mood === m.id ? '#C8A45A' : '#F5F1EA', marginBottom: '2px' }}>{m.id === 'optimistic' ? 'Hopeful' : m.label}</div>
                     <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '12px', color: '#666', lineHeight: '1.4' }}>{m.desc}</div>
                   </div>
                 </button>
               ))}
             </div>
-            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '9px', letterSpacing: '2px', color: '#888', marginBottom: '12px', textTransform: 'uppercase' }}>Default reading depth</div>
+
+            <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '13px', fontWeight: '600', color: '#B0A898', marginBottom: '12px', letterSpacing: '0.5px' }}>Default reading depth</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
               {EDITIONS.map(e => (
-                <button type="button" key={e.id} onClick={() => setEdition(e.id)} style={{ padding: '16px', background: edition === e.id ? 'rgba(200,164,90,0.1)' : '#2A2A2A', border: `1px solid ${edition === e.id ? '#C8A45A' : '#333'}`, borderRadius: '2px', cursor: 'pointer', textAlign: 'left', display: 'flex', gap: '12px', alignItems: 'flex-start', minHeight: '44px' }}>
-                  <span style={{ fontSize: '18px', flexShrink: 0, color: '#C8A45A' }}>{e.icon}</span>
+                <button type="button" key={e.id} onClick={() => setEdition(e.id)} style={{ padding: '16px', background: edition === e.id ? 'rgba(200,164,90,0.1)' : '#2A2A2A', border: `1px solid ${edition === e.id ? '#C8A45A' : '#333'}`, borderRadius: '2px', cursor: 'pointer', textAlign: 'left', display: 'flex', gap: '12px', alignItems: 'center', minHeight: '44px' }}>
+                  <span style={{ fontSize: '20px', flexShrink: 0, color: '#C8A45A', width: '24px', textAlign: 'center' }}>{e.icon}</span>
                   <div>
                     <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '14px', fontWeight: '600', color: edition === e.id ? '#C8A45A' : '#F5F1EA', marginBottom: '2px' }}>{e.label}</div>
                     <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '12px', color: '#666', lineHeight: '1.4' }}>{e.desc}</div>
