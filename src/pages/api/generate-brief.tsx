@@ -21,6 +21,8 @@ interface Story {
   headline: string;
   body: string;
   source: string;
+  source_url: string;
+  published_at: string;
 }
 
 interface MarketIndex {
@@ -31,10 +33,15 @@ interface MarketIndex {
 interface RawStories {
   world: Story[];
   india: Story[];
+  bengaluru: Story[];
+  delhi: Story[];
   markets: {
     summary: string;
     indices: MarketIndex[];
   };
+  business: Story[];
+  technology: Story[];
+  climate_health: Story[];
   sport: Story;
   culture: Story;
 }
@@ -52,21 +59,40 @@ interface BriefContent {
 // ─── Step 2: Fetch news via OpenAI ──────────────────────────────────────────
 
 async function fetchNewsFromOpenAI(): Promise<RawStories> {
-  const prompt = `You are a news editor. Search the web and summarise today's top stories across these categories. Return ONLY a JSON object, no markdown, no backticks, no extra text.
+  const today = new Date().toISOString().split('T')[0];
+
+  const prompt = `You are a news editor for an India-based daily brief. Search the web for today's (${today}) most consequential stories across the categories below. Return ONLY a JSON object — no markdown, no backticks, no commentary.
+
+For EVERY story, you MUST include:
+- "headline": clear, factual headline (max 120 chars)
+- "body": 2-3 sentence factual summary
+- "source": publication name only (e.g. "Reuters", "The Hindu") — no URLs in this field
+- "source_url": full direct URL to the actual article (must start with https://, must be a real working link to the specific story, not a homepage)
+- "published_at": ISO date or datetime if available, otherwise today's date (${today})
+
+Rules:
+- Use only real stories from the last 24-36 hours. Prefer original publishers (Reuters, AP, Bloomberg, The Hindu, Indian Express, BBC, FT) over aggregators.
+- Every source_url must be a real, specific article URL. If you don't have a real URL for a story, do not include the story.
+- Be factual and neutral. No opinion.
+- For Bengaluru and Delhi, only include stories if there is genuine material news (civic, mobility, weather, safety, policy, business). Do not fill with filler. Returning fewer stories than the target is OK if real news is thin.
 
 Return this exact structure:
 {
   "world": [
-    { "headline": "...", "body": "2-3 sentence summary", "source": "publication name" },
-    { "headline": "...", "body": "2-3 sentence summary", "source": "publication name" },
-    { "headline": "...", "body": "2-3 sentence summary", "source": "publication name" },
-    { "headline": "...", "body": "2-3 sentence summary", "source": "publication name" },
-    { "headline": "...", "body": "2-3 sentence summary", "source": "publication name" }
+    { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
+    // 5 stories total: wars, diplomacy, elections, global economy, major incidents
   ],
   "india": [
-    { "headline": "...", "body": "2-3 sentence summary", "source": "publication name" },
-    { "headline": "...", "body": "2-3 sentence summary", "source": "publication name" },
-    { "headline": "...", "body": "2-3 sentence summary", "source": "publication name" }
+    { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
+    // 5 stories total: politics, policy, regulation, courts, governance
+  ],
+  "bengaluru": [
+    { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
+    // 0-3 stories: only if material civic/mobility/weather/safety/business news exists
+  ],
+  "delhi": [
+    { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
+    // 0-2 stories: only if material news exists
   ],
   "markets": {
     "summary": "2-3 sentence overview of markets today",
@@ -77,11 +103,23 @@ Return this exact structure:
       { "name": "Nasdaq", "change": "+1.1%" }
     ]
   },
-  "sport": { "headline": "...", "body": "2-3 sentence summary", "source": "publication name" },
-  "culture": { "headline": "...", "body": "2-3 sentence summary", "source": "publication name" }
+  "business": [
+    { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
+    // 3 stories: major companies, deals, macro/inflation/currency, consumer demand
+  ],
+  "technology": [
+    { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
+    // 2 stories: AI, platforms, cybersecurity, startups, regulation, science
+  ],
+  "climate_health": [
+    { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
+    // 1-2 stories: weather, pollution, disease, disasters, public health
+  ],
+  "sport": { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." },
+  "culture": { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
 }
 
-Use only real news from today. Be factual and neutral.`;
+Use real markets data from today if available; otherwise neutral best estimates. All other fields must be real news with verifiable URLs.`;
 
   const response = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
@@ -97,7 +135,7 @@ Use only real news from today. Be factual and neutral.`;
   });
 
   const data = await response.json();
-  console.log('OpenAI raw response:', JSON.stringify(data));
+  console.log('OpenAI raw response (first 500 chars):', JSON.stringify(data).slice(0, 500));
   const text = data.output?.find((o: any) => o.type === 'message')?.content?.[0]?.text;
   if (!text) throw new Error(`No response from OpenAI. Raw: ${JSON.stringify(data)}`);
 
@@ -220,17 +258,11 @@ async function sendPushNotification(topHeadline: string) {
     },
     body: JSON.stringify({
       app_id: ONESIGNAL_APP_ID,
-      // Send to all subscribed users
       included_segments: ['All'],
-      // Notification content
       headings: { en: '☕ Your Morning Brief is ready' },
       contents: { en: topHeadline },
-      // Deep link into the brief page on tap
       url: 'https://morning-brief-liart.vercel.app/brief',
-      // Small icon for Android
       small_icon: 'ic_stat_onesignal_default',
-      // Delivery timing — send immediately when this function is called
-      // (cron-job.org handles the 6:45 AM IST schedule)
     }),
   });
 
@@ -253,7 +285,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const editions: Edition[] = edition ? [edition] : ['5min', '10min', 'deep'];
 
   try {
-    // Step 2: Fetch news once — reuse for all editions
     console.log('Fetching news from OpenAI...');
     const rawStories = await fetchNewsFromOpenAI();
     console.log('News fetched successfully');
@@ -271,9 +302,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       results[ed] = content;
     }
 
-    // Step 6: Send push notification once all briefs are saved
-    // Use the top world headline from the 5min brief as the notification preview
-    // Skip if testing (pass { skipPush: true } in request body)
     if (!skipPush) {
       console.log('Sending push notification...');
       const topHeadline = results['5min']?.world?.[0]?.headline
