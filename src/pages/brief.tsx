@@ -9,6 +9,7 @@ interface Story {
   headline: string
   body: string
   source: string
+  source_url?: string
 }
 
 interface MarketIndex {
@@ -21,6 +22,11 @@ interface BriefContent {
   date: string
   world: Story[]
   india: Story[]
+  bengaluru: Story[]
+  delhi: Story[]
+  business: Story[]
+  technology: Story[]
+  climate_health: Story[]
   markets: {
     summary: string
     indices: MarketIndex[]
@@ -44,6 +50,48 @@ function marketColor(change: string) {
   return '#aaa'
 }
 
+// ─── Section catalogue ───────────────────────────────────────────────────────
+// The order here is the order they appear on screen and in the sidebar.
+// Sections with no content for the day are filtered out before render.
+
+type SectionKind = 'list' | 'single' | 'markets'
+
+interface SectionDef {
+  id: string
+  label: string
+  icon: string
+  kind: SectionKind
+}
+
+const ALL_SECTIONS: SectionDef[] = [
+  { id: 'world',          label: 'World',    icon: '🌍', kind: 'list' },
+  { id: 'india',          label: 'India',    icon: '🇮🇳', kind: 'list' },
+  { id: 'bengaluru',      label: 'Bengaluru',icon: '🏙️', kind: 'list' },
+  { id: 'delhi',          label: 'Delhi',    icon: '🏛️', kind: 'list' },
+  { id: 'business',       label: 'Business', icon: '💼', kind: 'list' },
+  { id: 'markets',        label: 'Markets',  icon: '📈', kind: 'markets' },
+  { id: 'technology',     label: 'Tech',     icon: '💻', kind: 'list' },
+  { id: 'climate_health', label: 'Climate',  icon: '🌱', kind: 'list' },
+  { id: 'sport',          label: 'Sport',    icon: '🏏', kind: 'single' },
+  { id: 'culture',        label: 'Culture',  icon: '🎭', kind: 'single' },
+]
+
+// Decide whether a given section has anything to show for this brief.
+function sectionHasContent(section: SectionDef, brief: BriefContent): boolean {
+  if (section.kind === 'list') {
+    const arr = (brief as any)[section.id] as Story[] | undefined
+    return Array.isArray(arr) && arr.length > 0
+  }
+  if (section.kind === 'single') {
+    const s = (brief as any)[section.id] as Story | undefined
+    return !!(s && s.headline)
+  }
+  if (section.kind === 'markets') {
+    return !!(brief.markets && (brief.markets.summary || (brief.markets.indices?.length ?? 0) > 0))
+  }
+  return false
+}
+
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
@@ -60,6 +108,29 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
       gap: '10px',
     }}>{children}</div>
   )
+}
+
+function SourceLine({ story }: { story: Story }) {
+  const sharedStyle: React.CSSProperties = {
+    fontFamily: "'DM Mono', monospace",
+    fontSize: '11px',
+    letterSpacing: '1px',
+    color: '#888',
+    textDecoration: 'none',
+  }
+  if (story.source_url) {
+    return (
+      <a
+        href={story.source_url}
+        target="_blank"
+        rel="noopener noreferrer"
+        style={sharedStyle}
+      >
+        via {story.source} ↗
+      </a>
+    )
+  }
+  return <div style={{ ...sharedStyle, color: '#666' }}>via {story.source}</div>
 }
 
 function StoryCard({
@@ -98,12 +169,7 @@ function StoryCard({
         alignItems: 'center',
         justifyContent: 'space-between',
       }}>
-        <div style={{
-          fontFamily: "'DM Mono', monospace",
-          fontSize: '11px',
-          letterSpacing: '1px',
-          color: '#666',
-        }}>via {story.source}</div>
+        <SourceLine story={story} />
 
         <button
           onClick={onToggle}
@@ -223,17 +289,15 @@ function NoBrief({ profile }: { profile: Profile | null }) {
   )
 }
 
-// ─── Brief renderer ───────────────────────────────────────────────────────────
+// ─── Sidebar nav ──────────────────────────────────────────────────────────────
 
-const SECTIONS = [
-  { id: 'world',   label: 'World',   icon: '🌍' },
-  { id: 'india',   label: 'India',   icon: '🇮🇳' },
-  { id: 'markets', label: 'Markets', icon: '📈' },
-  { id: 'sport',   label: 'Sport',   icon: '🏏' },
-  { id: 'culture', label: 'Culture', icon: '🎭' },
-]
-
-function SidebarNav({ activeSection }: { activeSection: string }) {
+function SidebarNav({
+  sections,
+  activeSection,
+}: {
+  sections: SectionDef[]
+  activeSection: string
+}) {
   const scrollTo = (id: string) => {
     const el = document.getElementById(id)
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -251,8 +315,10 @@ function SidebarNav({ activeSection }: { activeSection: string }) {
       padding: '8px 0',
       background: '#111',
       borderRight: '1px solid #2A2A2A',
+      maxHeight: '90vh',
+      overflowY: 'auto',
     }}>
-      {SECTIONS.map(({ id, label, icon }) => {
+      {sections.map(({ id, label, icon }) => {
         const isActive = activeSection === id
         return (
           <button
@@ -262,16 +328,16 @@ function SidebarNav({ activeSection }: { activeSection: string }) {
               background: 'none',
               border: 'none',
               borderLeft: isActive ? '2px solid #C8A45A' : '2px solid transparent',
-              padding: '10px 12px',
+              padding: '9px 10px',
               cursor: 'pointer',
               display: 'flex',
               flexDirection: 'column',
               alignItems: 'center',
-              gap: '4px',
+              gap: '3px',
               width: '52px',
             }}
           >
-            <span style={{ fontSize: '16px', lineHeight: '1' }}>{icon}</span>
+            <span style={{ fontSize: '15px', lineHeight: '1' }}>{icon}</span>
             <span style={{
               fontFamily: "'DM Mono', monospace",
               fontSize: '7px',
@@ -286,6 +352,8 @@ function SidebarNav({ activeSection }: { activeSection: string }) {
   )
 }
 
+// ─── Brief renderer ──────────────────────────────────────────────────────────
+
 function BriefRenderer({
   brief,
   activeEdition,
@@ -299,114 +367,114 @@ function BriefRenderer({
   savedKeys: Set<string>
   onToggle: (section: string, index: number, story: Story) => void
 }) {
-  const [activeSection, setActiveSection] = useState('world')
+  // Only sections that have content today
+  const visibleSections = ALL_SECTIONS.filter(s => sectionHasContent(s, brief))
+
+  const [activeSection, setActiveSection] = useState(visibleSections[0]?.id ?? 'world')
 
   useEffect(() => {
     const handleScroll = () => {
-      for (const { id } of [...SECTIONS].reverse()) {
+      for (const { id } of [...visibleSections].reverse()) {
         const el = document.getElementById(id)
         if (el && el.getBoundingClientRect().top <= 120) {
           setActiveSection(id)
           return
         }
       }
-      setActiveSection('world')
+      if (visibleSections[0]) setActiveSection(visibleSections[0].id)
     }
     window.addEventListener('scroll', handleScroll, { passive: true })
     return () => window.removeEventListener('scroll', handleScroll)
-  }, [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [brief])
 
   // Builds the unique key for a story so we know if it's saved
   const keyFor = (section: string, index: number) =>
     `${todayISO}-${activeEdition}-${section}-${index}`
 
+  // ── Renderers per section kind ──────────────────────────────────────
+  const renderList = (sectionId: string, stories: Story[]) => (
+    stories.map((story, i) => (
+      <StoryCard
+        key={i}
+        story={story}
+        isSaved={savedKeys.has(keyFor(sectionId, i))}
+        onToggle={() => onToggle(sectionId, i, story)}
+      />
+    ))
+  )
+
+  const renderMarkets = () => (
+    <>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: '1fr 1fr',
+        gap: '10px',
+        margin: '18px 0',
+      }}>
+        {brief.markets.indices?.map((idx) => (
+          <div key={idx.name} style={{
+            background: '#1E1E1E',
+            border: '1px solid #2A2A2A',
+            padding: '14px 16px',
+          }}>
+            <div style={{
+              fontFamily: "'DM Mono', monospace",
+              fontSize: '11px',
+              letterSpacing: '1px',
+              color: '#666',
+              marginBottom: '8px',
+            }}>{idx.name}</div>
+            <div style={{
+              fontFamily: "'DM Mono', monospace",
+              fontSize: '20px',
+              fontWeight: '700',
+              color: marketColor(idx.change),
+            }}>{idx.change}</div>
+          </div>
+        ))}
+      </div>
+      {brief.markets.summary && (
+        <div style={{
+          fontFamily: "'DM Sans', sans-serif",
+          fontSize: '17px',
+          color: '#C0B9AF',
+          lineHeight: '1.8',
+        }}>{brief.markets.summary}</div>
+      )}
+    </>
+  )
+
   return (
     <div style={{ position: 'relative' }}>
-      <SidebarNav activeSection={activeSection} />
+      <SidebarNav sections={visibleSections} activeSection={activeSection} />
 
       {/* Content offset for sidebar */}
       <div style={{ padding: '0 20px 40px 68px' }}>
+        {visibleSections.map((section, idx) => (
+          <div
+            key={section.id}
+            id={section.id}
+            style={{ paddingTop: idx === 0 ? '32px' : '40px' }}
+          >
+            <SectionLabel>{section.icon} {section.label}</SectionLabel>
 
-        <div id="world" style={{ paddingTop: '32px' }}>
-          <SectionLabel>🌍 World</SectionLabel>
-          {brief.world.map((story, i) => (
-            <StoryCard
-              key={i}
-              story={story}
-              isSaved={savedKeys.has(keyFor('world', i))}
-              onToggle={() => onToggle('world', i, story)}
-            />
-          ))}
-        </div>
+            {section.kind === 'list' &&
+              renderList(section.id, (brief as any)[section.id] as Story[])}
 
-        <div id="india" style={{ paddingTop: '40px' }}>
-          <SectionLabel>🇮🇳 India</SectionLabel>
-          {brief.india.map((story, i) => (
-            <StoryCard
-              key={i}
-              story={story}
-              isSaved={savedKeys.has(keyFor('india', i))}
-              onToggle={() => onToggle('india', i, story)}
-            />
-          ))}
-        </div>
+            {section.kind === 'single' && (
+              <StoryCard
+                story={(brief as any)[section.id] as Story}
+                isSaved={savedKeys.has(keyFor(section.id, 0))}
+                onToggle={() =>
+                  onToggle(section.id, 0, (brief as any)[section.id] as Story)
+                }
+              />
+            )}
 
-        <div id="markets" style={{ paddingTop: '40px' }}>
-          <SectionLabel>📈 Markets</SectionLabel>
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: '1fr 1fr',
-            gap: '10px',
-            margin: '18px 0',
-          }}>
-            {brief.markets.indices.map((idx) => (
-              <div key={idx.name} style={{
-                background: '#1E1E1E',
-                border: '1px solid #2A2A2A',
-                padding: '14px 16px',
-              }}>
-                <div style={{
-                  fontFamily: "'DM Mono', monospace",
-                  fontSize: '11px',
-                  letterSpacing: '1px',
-                  color: '#666',
-                  marginBottom: '8px',
-                }}>{idx.name}</div>
-                <div style={{
-                  fontFamily: "'DM Mono', monospace",
-                  fontSize: '20px',
-                  fontWeight: '700',
-                  color: marketColor(idx.change),
-                }}>{idx.change}</div>
-              </div>
-            ))}
+            {section.kind === 'markets' && renderMarkets()}
           </div>
-          <div style={{
-            fontFamily: "'DM Sans', sans-serif",
-            fontSize: '17px',
-            color: '#C0B9AF',
-            lineHeight: '1.8',
-          }}>{brief.markets.summary}</div>
-        </div>
-
-        <div id="sport" style={{ paddingTop: '40px' }}>
-          <SectionLabel>🏏 Sport</SectionLabel>
-          <StoryCard
-            story={brief.sport}
-            isSaved={savedKeys.has(keyFor('sport', 0))}
-            onToggle={() => onToggle('sport', 0, brief.sport)}
-          />
-        </div>
-
-        <div id="culture" style={{ paddingTop: '40px' }}>
-          <SectionLabel>🎭 Culture</SectionLabel>
-          <StoryCard
-            story={brief.culture}
-            isSaved={savedKeys.has(keyFor('culture', 0))}
-            onToggle={() => onToggle('culture', 0, brief.culture)}
-          />
-        </div>
-
+        ))}
       </div>
     </div>
   )
