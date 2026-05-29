@@ -11,15 +11,26 @@ type Bookmark = {
   headline: string
   body: string
   source: string | null
+  source_url: string | null
   created_at: string
 }
 
 const sectionEmoji: Record<string, string> = {
   world: '🌍',
   india: '🇮🇳',
+  bengaluru: '🏙️',
+  delhi: '🏛️',
+  business: '💼',
   markets: '📈',
+  technology: '💻',
+  climate_health: '🌱',
   sport: '🏏',
   culture: '🎭',
+}
+
+const sectionLabel: Record<string, string> = {
+  climate_health: 'climate',
+  technology: 'tech',
 }
 
 export default function BookmarksPage() {
@@ -169,7 +180,7 @@ export default function BookmarksPage() {
                       fontFamily: 'DM Mono, monospace', fontSize: '10px',
                       color: '#888', textTransform: 'uppercase', letterSpacing: '0.08em',
                     }}>
-                      {bookmark.section} · {bookmark.edition}
+                      {(sectionLabel[bookmark.section] || bookmark.section)} · {bookmark.edition}
                     </span>
                   </div>
 
@@ -191,13 +202,27 @@ export default function BookmarksPage() {
                   </p>
 
                   {/* Footer row */}
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
                     {bookmark.source && (
-                      <span style={{
-                        fontFamily: 'DM Mono, monospace', fontSize: '11px', color: '#666',
-                      }}>
-                        {bookmark.source}
-                      </span>
+                      bookmark.source_url ? (
+                        <a
+                          href={bookmark.source_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{
+                            fontFamily: 'DM Mono, monospace', fontSize: '11px',
+                            color: '#888', textDecoration: 'none',
+                          }}
+                        >
+                          {bookmark.source} ↗
+                        </a>
+                      ) : (
+                        <span style={{
+                          fontFamily: 'DM Mono, monospace', fontSize: '11px', color: '#666',
+                        }}>
+                          {bookmark.source}
+                        </span>
+                      )
                     )}
                     <button
                       onClick={() => removeBookmark(bookmark.id)}
