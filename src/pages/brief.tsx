@@ -187,68 +187,151 @@ function NoBrief({ profile }: { profile: Profile | null }) {
 
 // ─── Brief renderer ───────────────────────────────────────────────────────────
 
-function BriefRenderer({ brief }: { brief: BriefContent }) {
+const SECTIONS = [
+  { id: 'world',   label: 'World',   icon: '🌍' },
+  { id: 'india',   label: 'India',   icon: '🇮🇳' },
+  { id: 'markets', label: 'Markets', icon: '📈' },
+  { id: 'sport',   label: 'Sport',   icon: '🏏' },
+  { id: 'culture', label: 'Culture', icon: '🎭' },
+]
+
+function SidebarNav({ activeSection }: { activeSection: string }) {
+  const scrollTo = (id: string) => {
+    const el = document.getElementById(id)
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
   return (
-    <div style={{ padding: '0 20px 40px' }}>
+    <div style={{
+      position: 'fixed',
+      left: 0,
+      top: '50%',
+      transform: 'translateY(-50%)',
+      zIndex: 20,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '2px',
+      padding: '8px 0',
+      background: '#111',
+      borderRight: '1px solid #2A2A2A',
+    }}>
+      {SECTIONS.map(({ id, label, icon }) => {
+        const isActive = activeSection === id
+        return (
+          <button
+            key={id}
+            onClick={() => scrollTo(id)}
+            style={{
+              background: 'none',
+              border: 'none',
+              borderLeft: isActive ? '2px solid #C8A45A' : '2px solid transparent',
+              padding: '10px 12px',
+              cursor: 'pointer',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              gap: '4px',
+              width: '52px',
+            }}
+          >
+            <span style={{ fontSize: '16px', lineHeight: '1' }}>{icon}</span>
+            <span style={{
+              fontFamily: "'DM Mono', monospace",
+              fontSize: '7px',
+              letterSpacing: '0.5px',
+              color: isActive ? '#C8A45A' : '#555',
+              lineHeight: '1',
+            }}>{label.toUpperCase()}</span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
 
-      <div style={{ paddingTop: '32px', marginBottom: '8px' }}>
-        <SectionLabel>🌍 World</SectionLabel>
-        {brief.world.map((story, i) => <StoryCard key={i} story={story} />)}
-      </div>
+function BriefRenderer({ brief }: { brief: BriefContent }) {
+  const [activeSection, setActiveSection] = useState('world')
 
-      <div style={{ paddingTop: '32px', marginBottom: '8px' }}>
-        <SectionLabel>🇮🇳 India</SectionLabel>
-        {brief.india.map((story, i) => <StoryCard key={i} story={story} />)}
-      </div>
+  useEffect(() => {
+    const handleScroll = () => {
+      for (const { id } of [...SECTIONS].reverse()) {
+        const el = document.getElementById(id)
+        if (el && el.getBoundingClientRect().top <= 120) {
+          setActiveSection(id)
+          return
+        }
+      }
+      setActiveSection('world')
+    }
+    window.addEventListener('scroll', handleScroll, { passive: true })
+    return () => window.removeEventListener('scroll', handleScroll)
+  }, [])
 
-      <div style={{ paddingTop: '32px', marginBottom: '8px' }}>
-        <SectionLabel>📈 Markets</SectionLabel>
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: '1fr 1fr',
-          gap: '10px',
-          margin: '18px 0',
-        }}>
-          {brief.markets.indices.map((idx) => (
-            <div key={idx.name} style={{
-              background: '#1E1E1E',
-              border: '1px solid #2A2A2A',
-              padding: '14px 16px',
-            }}>
-              <div style={{
-                fontFamily: "'DM Mono', monospace",
-                fontSize: '11px',
-                letterSpacing: '1px',
-                color: '#666',
-                marginBottom: '8px',
-              }}>{idx.name}</div>
-              <div style={{
-                fontFamily: "'DM Mono', monospace",
-                fontSize: '20px',
-                fontWeight: '700',
-                color: marketColor(idx.change),
-              }}>{idx.change}</div>
-            </div>
-          ))}
+  return (
+    <div style={{ position: 'relative' }}>
+      <SidebarNav activeSection={activeSection} />
+
+      {/* Content offset for sidebar */}
+      <div style={{ padding: '0 20px 40px 68px' }}>
+
+        <div id="world" style={{ paddingTop: '32px' }}>
+          <SectionLabel>🌍 World</SectionLabel>
+          {brief.world.map((story, i) => <StoryCard key={i} story={story} />)}
         </div>
-        <div style={{
-          fontFamily: "'DM Sans', sans-serif",
-          fontSize: '17px',
-          color: '#C0B9AF',
-          lineHeight: '1.8',
-        }}>{brief.markets.summary}</div>
-      </div>
 
-      <div style={{ paddingTop: '32px', marginBottom: '8px' }}>
-        <SectionLabel>🏏 Sport</SectionLabel>
-        <StoryCard story={brief.sport} />
-      </div>
+        <div id="india" style={{ paddingTop: '40px' }}>
+          <SectionLabel>🇮🇳 India</SectionLabel>
+          {brief.india.map((story, i) => <StoryCard key={i} story={story} />)}
+        </div>
 
-      <div style={{ paddingTop: '32px' }}>
-        <SectionLabel>🎭 Culture</SectionLabel>
-        <StoryCard story={brief.culture} />
-      </div>
+        <div id="markets" style={{ paddingTop: '40px' }}>
+          <SectionLabel>📈 Markets</SectionLabel>
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: '1fr 1fr',
+            gap: '10px',
+            margin: '18px 0',
+          }}>
+            {brief.markets.indices.map((idx) => (
+              <div key={idx.name} style={{
+                background: '#1E1E1E',
+                border: '1px solid #2A2A2A',
+                padding: '14px 16px',
+              }}>
+                <div style={{
+                  fontFamily: "'DM Mono', monospace",
+                  fontSize: '11px',
+                  letterSpacing: '1px',
+                  color: '#666',
+                  marginBottom: '8px',
+                }}>{idx.name}</div>
+                <div style={{
+                  fontFamily: "'DM Mono', monospace",
+                  fontSize: '20px',
+                  fontWeight: '700',
+                  color: marketColor(idx.change),
+                }}>{idx.change}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{
+            fontFamily: "'DM Sans', sans-serif",
+            fontSize: '17px',
+            color: '#C0B9AF',
+            lineHeight: '1.8',
+          }}>{brief.markets.summary}</div>
+        </div>
 
+        <div id="sport" style={{ paddingTop: '40px' }}>
+          <SectionLabel>🏏 Sport</SectionLabel>
+          <StoryCard story={brief.sport} />
+        </div>
+
+        <div id="culture" style={{ paddingTop: '40px' }}>
+          <SectionLabel>🎭 Culture</SectionLabel>
+          <StoryCard story={brief.culture} />
+        </div>
+
+      </div>
     </div>
   )
 }
