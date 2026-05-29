@@ -183,7 +183,7 @@ function NoBrief({ profile }: { profile: Profile | null }) {
           `📍 Local news for ${profile?.city_current || 'your city'}`,
           '🌍 World affairs & India politics',
           `💼 Markets & business`,
-          `📖 In ${profile?.edition_preference === '5min' ? '5-minute' : profile?.edition_preference === 'deep' ? 'deep dive' : '10-minute'} depth`,
+          `📖 In ${(profile?.edition_preference as string) === '5min' ? '5-minute' : (profile?.edition_preference as string) === 'deep' ? 'deep dive' : '10-minute'} depth`,
         ].map(item => (
           <div key={item} style={{
             fontFamily: "'DM Sans', sans-serif",
