@@ -49,6 +49,19 @@ interface BriefContent {
   culture: { headline: string; body: string; source: string };
 }
 
+// Profile shape we need for personalisation
+interface PersonalisedUser {
+  id: string;
+  full_name: string | null;
+  city_current: string | null;
+  city_home: string | null;
+  profession: string | null;
+  industry: string | null;
+  interests: string[] | null;
+  mood_preference: string | null;
+  edition_preference: string | null;
+}
+
 // ─── Step 2: Fetch news via OpenAI ──────────────────────────────────────────
 
 async function fetchNewsFromOpenAI(): Promise<RawStories> {
@@ -244,12 +257,173 @@ async function sendPushNotification(topHeadline: string) {
   return data;
 }
 
+// ─── Step 7: Personalised briefs ─────────────────────────────────────────────
+//
+// After the shared standard brief is built, we write a custom version for each
+// user who chose "personalised" during onboarding. Each one is a separate Claude
+// call that re-writes the SAME raw news through the lens of that person's city,
+// profession, interests and preferred tone. Results go in the personalised_briefs
+// table, which the frontend reads first (falling back to the standard brief).
+//
+// NOTE: this makes one Claude API call PER personalised user, at their preferred
+// edition only. Cost and time both scale with the number of personalised users.
+
+async function getPersonalisedUsers(): Promise<PersonalisedUser[]> {
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('id, full_name, city_current, city_home, profession, industry, interests, mood_preference, edition_preference')
+    .eq('brief_type', 'personalised')
+    .eq('onboarding_complete', true);
+
+  if (error) throw new Error(`Failed to fetch personalised users: ${error.message}`);
+  return (data as PersonalisedUser[]) ?? [];
+}
+
+async function writePersonalisedBrief(
+  rawStories: RawStories,
+  edition: Edition,
+  user: PersonalisedUser
+): Promise<BriefContent> {
+
+  const depthGuide = {
+    '5min': `Write each story in 2 short sentences — punchy, warm, essential facts only. Markets in 1 sentence.`,
+    '10min': `Write each story in 3–4 sentences — include one piece of context or background. Markets in 2 sentences.`,
+    'deep': `Write each story in 5–6 sentences — context, history, why it matters, what to watch next. Markets in 3–4 sentences with analysis.`,
+  };
+
+  const interestsList = Array.isArray(user.interests) && user.interests.length
+    ? user.interests.join(', ')
+    : 'general news';
+  const firstName = user.full_name?.split(' ')[0] || 'there';
+  const cityLine = user.city_current || user.city_home || 'India';
+
+  const prompt = `You are the voice of Morning Brief — a daily news digest for thoughtful, curious Indian readers. Your tone is warm, intelligent, and conversational — like a well-read friend briefing you over coffee. Never sensational, never dry. Plain English, active voice, no jargon.
+
+You are writing a PERSONALISED edition for one specific reader:
+- Name: ${user.full_name || 'the reader'} (you may greet them as "${firstName}" once, naturally, in the very first world story only)
+- City: ${cityLine}
+- Profession: ${user.profession || 'not specified'}
+- Industry: ${user.industry || 'not specified'}
+- Interests: ${interestsList}
+- Preferred tone lens: ${user.mood_preference || 'Neutral'}
+
+How to personalise (keep it subtle and natural — never robotic):
+- When a story connects to ${user.industry || 'their field'} or their interests (${interestsList}), add one short sentence drawing out why it matters to them.
+- If a story touches ${cityLine} specifically, note the local angle.
+- Apply the tone lens: Hopeful = emphasise progress and opportunity; Critical = surface tensions and who benefits; Neutral = balanced and factual; Calm = steady, reassuring, no alarmism; Curious = lead with the most surprising angle.
+
+Edition: ${edition.toUpperCase()}
+${depthGuide[edition]}
+
+Here are today's raw stories. Rewrite them in the Morning Brief voice, personalised as above. Return ONLY a JSON object — no markdown, no backticks, no extra text.
+
+Raw stories:
+${JSON.stringify(rawStories, null, 2)}
+
+Return this exact JSON structure:
+{
+  "edition": "${edition}",
+  "date": "${new Date().toISOString().split('T')[0]}",
+  "world": [
+    { "headline": "rewritten headline", "body": "rewritten body", "source": "source name" },
+    { "headline": "...", "body": "...", "source": "..." },
+    { "headline": "...", "body": "...", "source": "..." },
+    { "headline": "...", "body": "...", "source": "..." },
+    { "headline": "...", "body": "...", "source": "..." }
+  ],
+  "india": [
+    { "headline": "rewritten headline", "body": "rewritten body", "source": "source name" },
+    { "headline": "...", "body": "...", "source": "..." },
+    { "headline": "...", "body": "...", "source": "..." }
+  ],
+  "markets": {
+    "summary": "rewritten markets summary",
+    "indices": [
+      { "name": "Sensex", "change": "+0.4%" },
+      { "name": "Nifty", "change": "-0.1%" },
+      { "name": "S&P 500", "change": "+0.6%" },
+      { "name": "Nasdaq", "change": "+1.1%" }
+    ]
+  },
+  "sport": { "headline": "rewritten headline", "body": "rewritten body", "source": "source name" },
+  "culture": { "headline": "rewritten headline", "body": "rewritten body", "source": "source name" }
+}
+
+Keep all source names exactly as they appear in the raw data. Keep the market index names and change values exactly as given. Only rewrite headlines, body text, and the markets summary.`;
+
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': ANTHROPIC_API_KEY!,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: 'claude-opus-4-5',
+      max_tokens: 4096,
+      messages: [{ role: 'user', content: prompt }],
+    }),
+  });
+
+  const data = await response.json();
+  const text = data.content?.[0]?.text;
+  if (!text) throw new Error(`No response from Claude (personalised). Raw: ${JSON.stringify(data)}`);
+
+  const cleaned = text.replace(/```json|```/g, '').trim();
+  return JSON.parse(cleaned);
+}
+
+async function savePersonalisedBrief(userId: string, edition: Edition, content: BriefContent) {
+  const today = new Date().toISOString().split('T')[0];
+  const { error } = await supabase
+    .from('personalised_briefs')
+    .upsert(
+      {
+        user_id: userId,
+        date: today,
+        edition,
+        status: 'ready',
+        content,
+        generated_at: new Date().toISOString(),
+      },
+      { onConflict: 'user_id,date,edition' }
+    );
+  if (error) throw new Error(`Personalised save failed for ${userId}: ${error.message}`);
+}
+
+async function generatePersonalisedBriefs(rawStories: RawStories) {
+  const users = await getPersonalisedUsers();
+  console.log(`Personalised users found: ${users.length}`);
+  if (users.length === 0) return { attempted: 0, succeeded: 0, errors: [] as string[] };
+
+  let succeeded = 0;
+  const errors: string[] = [];
+
+  for (const user of users) {
+    const pref = (user.edition_preference || '5min') as string;
+    const edition: Edition = (['5min', '10min', 'deep'].includes(pref) ? pref : '5min') as Edition;
+    try {
+      const content = await writePersonalisedBrief(rawStories, edition, user);
+      await savePersonalisedBrief(user.id, edition, content);
+      succeeded++;
+      console.log(`Personalised brief saved for user ${user.id} (${edition})`);
+    } catch (err: any) {
+      // One user's failure must never break the rest of the pipeline
+      const msg = `User ${user.id}: ${err.message}`;
+      errors.push(msg);
+      console.error('Personalised brief failed —', msg);
+    }
+  }
+
+  return { attempted: users.length, succeeded, errors };
+}
+
 // ─── Handler ─────────────────────────────────────────────────────────────────
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  const { edition, skipPush } = req.body || {};
+  const { edition, skipPush, skipPersonalised } = req.body || {};
   const editions: Edition[] = edition ? [edition] : ['5min', '10min', 'deep'];
 
   try {
@@ -272,8 +446,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     // Step 6: Send push notification once all briefs are saved
-    // Use the top world headline from the 5min brief as the notification preview
-    // Skip if testing (pass { skipPush: true } in request body)
     if (!skipPush) {
       console.log('Sending push notification...');
       const topHeadline = results['5min']?.world?.[0]?.headline
@@ -285,9 +457,26 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       console.log('Push notification skipped (skipPush: true)');
     }
 
+    // Step 7: Generate personalised briefs (after standard + push)
+    // Wrapped so it can never break the core pipeline.
+    let personalised = { attempted: 0, succeeded: 0, errors: [] as string[] };
+    if (!skipPersonalised) {
+      try {
+        console.log('Generating personalised briefs...');
+        personalised = await generatePersonalisedBriefs(rawStories);
+        console.log('Personalised briefs done:', JSON.stringify(personalised));
+      } catch (err: any) {
+        console.error('Personalised generation failed entirely:', err.message);
+        personalised.errors.push(err.message);
+      }
+    } else {
+      console.log('Personalised briefs skipped (skipPersonalised: true)');
+    }
+
     return res.status(200).json({
       success: true,
       editions,
+      personalised,
       results,
     });
 

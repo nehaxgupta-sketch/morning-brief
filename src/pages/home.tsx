@@ -6,6 +6,7 @@ export default function Home() {
   const [profile, setProfile] = useState<Profile | null>(null)
   const [loading, setLoading] = useState(true)
   const [briefReady, setBriefReady] = useState(false)
+  const [briefContent, setBriefContent] = useState<any>(null)
 
   const today = new Date().toLocaleDateString('en-IN', {
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'
@@ -21,20 +22,41 @@ export default function Home() {
       if (data && !data.onboarding_complete) { window.location.href = '/onboarding'; return }
       setProfile(data)
 
-      // Check if today's brief exists in Supabase
+      // Which edition to look for
       const preferredEdition = (data?.edition_preference as string) || '5min'
       const editionToCheck = ['5min', '10min', 'deep'].includes(preferredEdition)
         ? preferredEdition : '5min'
 
-      const { data: briefData } = await supabase
-        .from('briefs')
-        .select('id')
-        .eq('date', todayISO)
-        .eq('edition', editionToCheck)
-        .eq('status', 'ready')
-        .single()
+      const isPersonalised = data?.brief_type === 'personalised'
+      let content: any = null
 
-      setBriefReady(!!briefData)
+      // Personalised users: check for their custom brief first
+      if (isPersonalised) {
+        const { data: personalised } = await supabase
+          .from('personalised_briefs')
+          .select('content')
+          .eq('user_id', user.id)
+          .eq('date', todayISO)
+          .eq('edition', editionToCheck)
+          .eq('status', 'ready')
+          .single()
+        if (personalised?.content) content = personalised.content
+      }
+
+      // Fallback to the shared standard brief
+      if (!content) {
+        const { data: briefData } = await supabase
+          .from('briefs')
+          .select('content')
+          .eq('date', todayISO)
+          .eq('edition', editionToCheck)
+          .eq('status', 'ready')
+          .single()
+        if (briefData?.content) content = briefData.content
+      }
+
+      setBriefReady(!!content)
+      setBriefContent(content)
       setLoading(false)
     }
     load()
@@ -51,6 +73,21 @@ export default function Home() {
     if (pref === '5min') return '5-minute'
     if (pref === 'deep') return 'deep dive'
     return '10-minute'
+  }
+
+  // ── Pull the teaser + counts out of today's brief content ──────────────
+  const topHeadline: string | null = briefContent?.world?.[0]?.headline ?? null
+
+  // Build a short "what's inside" summary line
+  const sectionCounts: string[] = []
+  if (briefContent) {
+    const w = briefContent.world?.length ?? 0
+    const i = briefContent.india?.length ?? 0
+    if (w) sectionCounts.push(`🌍 ${w} world`)
+    if (i) sectionCounts.push(`🇮🇳 ${i} India`)
+    if (briefContent.markets?.indices?.length) sectionCounts.push('📈 Markets')
+    if (briefContent.sport?.headline) sectionCounts.push('🏏 Sport')
+    if (briefContent.culture?.headline) sectionCounts.push('🎭 Culture')
   }
 
   return (
@@ -125,24 +162,54 @@ export default function Home() {
             // ── Brief is ready ──────────────────────────────────────────
             <>
               <div style={{
-                fontFamily: "'Playfair Display', Georgia, serif",
-                fontSize: '18px',
-                fontWeight: '700',
-                color: '#1A1A1A',
-                marginBottom: '8px',
-              }}>Your brief is ready</div>
-              <div style={{
-                fontFamily: "'DM Sans', sans-serif",
-                fontSize: '14px',
-                color: '#666',
-                lineHeight: '1.6',
-                marginBottom: '20px',
+                fontFamily: "'DM Mono', monospace",
+                fontSize: '9px',
+                letterSpacing: '1px',
+                color: '#999',
+                marginBottom: '10px',
               }}>
-                {isPersonalised
-                  ? `Your ${editionLabel(profile?.edition_preference as string || '10min')} personalised brief is live — tailored to ${profile?.city_current || 'your city'} and your interests.`
-                  : `Your ${editionLabel(profile?.edition_preference as string || '10min')} brief covering today's top world and India stories is live.`
-                }
+                YOUR {editionLabel(profile?.edition_preference as string || '10min').toUpperCase()} BRIEF IS READY
+                {isPersonalised ? ' · PERSONALISED' : ''}
               </div>
+
+              {/* Top headline teaser */}
+              {topHeadline ? (
+                <div style={{
+                  fontFamily: "'Playfair Display', Georgia, serif",
+                  fontSize: '20px',
+                  fontWeight: '700',
+                  color: '#1A1A1A',
+                  lineHeight: '1.35',
+                  marginBottom: '12px',
+                }}>{topHeadline}</div>
+              ) : (
+                <div style={{
+                  fontFamily: "'Playfair Display', Georgia, serif",
+                  fontSize: '18px',
+                  fontWeight: '700',
+                  color: '#1A1A1A',
+                  marginBottom: '12px',
+                }}>Your brief is ready</div>
+              )}
+
+              {/* What's inside */}
+              {sectionCounts.length > 0 && (
+                <div style={{
+                  fontFamily: "'DM Sans', sans-serif",
+                  fontSize: '13px',
+                  color: '#777',
+                  lineHeight: '1.6',
+                  marginBottom: '20px',
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  gap: '4px 12px',
+                }}>
+                  {sectionCounts.map((s, i) => (
+                    <span key={i}>{s}</span>
+                  ))}
+                </div>
+              )}
+
               <Link href="/brief" style={{
                 display: 'flex',
                 alignItems: 'center',

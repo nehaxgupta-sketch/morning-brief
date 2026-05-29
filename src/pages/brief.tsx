@@ -62,7 +62,15 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   )
 }
 
-function StoryCard({ story }: { story: Story }) {
+function StoryCard({
+  story,
+  isSaved,
+  onToggle,
+}: {
+  story: Story
+  isSaved: boolean
+  onToggle: () => void
+}) {
   return (
     <div style={{
       padding: '22px 0',
@@ -83,12 +91,42 @@ function StoryCard({ story }: { story: Story }) {
         lineHeight: '1.8',
         marginBottom: '12px',
       }}>{story.body}</div>
+
+      {/* Source + bookmark row */}
       <div style={{
-        fontFamily: "'DM Mono', monospace",
-        fontSize: '11px',
-        letterSpacing: '1px',
-        color: '#666',
-      }}>via {story.source}</div>
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+      }}>
+        <div style={{
+          fontFamily: "'DM Mono', monospace",
+          fontSize: '11px',
+          letterSpacing: '1px',
+          color: '#666',
+        }}>via {story.source}</div>
+
+        <button
+          onClick={onToggle}
+          style={{
+            background: 'none',
+            border: 'none',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '5px',
+            padding: '6px 4px',
+            minHeight: '44px',
+            fontFamily: "'DM Mono', monospace",
+            fontSize: '10px',
+            letterSpacing: '1px',
+            color: isSaved ? '#C8A45A' : '#777',
+          }}
+          title={isSaved ? 'Remove from saved' : 'Save this story'}
+        >
+          <span style={{ fontSize: '14px', opacity: isSaved ? 1 : 0.55 }}>🔖</span>
+          {isSaved ? 'SAVED' : 'SAVE'}
+        </button>
+      </div>
     </div>
   )
 }
@@ -248,7 +286,19 @@ function SidebarNav({ activeSection }: { activeSection: string }) {
   )
 }
 
-function BriefRenderer({ brief }: { brief: BriefContent }) {
+function BriefRenderer({
+  brief,
+  activeEdition,
+  todayISO,
+  savedKeys,
+  onToggle,
+}: {
+  brief: BriefContent
+  activeEdition: string
+  todayISO: string
+  savedKeys: Set<string>
+  onToggle: (section: string, index: number, story: Story) => void
+}) {
   const [activeSection, setActiveSection] = useState('world')
 
   useEffect(() => {
@@ -266,6 +316,10 @@ function BriefRenderer({ brief }: { brief: BriefContent }) {
     return () => window.removeEventListener('scroll', handleScroll)
   }, [])
 
+  // Builds the unique key for a story so we know if it's saved
+  const keyFor = (section: string, index: number) =>
+    `${todayISO}-${activeEdition}-${section}-${index}`
+
   return (
     <div style={{ position: 'relative' }}>
       <SidebarNav activeSection={activeSection} />
@@ -275,12 +329,26 @@ function BriefRenderer({ brief }: { brief: BriefContent }) {
 
         <div id="world" style={{ paddingTop: '32px' }}>
           <SectionLabel>🌍 World</SectionLabel>
-          {brief.world.map((story, i) => <StoryCard key={i} story={story} />)}
+          {brief.world.map((story, i) => (
+            <StoryCard
+              key={i}
+              story={story}
+              isSaved={savedKeys.has(keyFor('world', i))}
+              onToggle={() => onToggle('world', i, story)}
+            />
+          ))}
         </div>
 
         <div id="india" style={{ paddingTop: '40px' }}>
           <SectionLabel>🇮🇳 India</SectionLabel>
-          {brief.india.map((story, i) => <StoryCard key={i} story={story} />)}
+          {brief.india.map((story, i) => (
+            <StoryCard
+              key={i}
+              story={story}
+              isSaved={savedKeys.has(keyFor('india', i))}
+              onToggle={() => onToggle('india', i, story)}
+            />
+          ))}
         </div>
 
         <div id="markets" style={{ paddingTop: '40px' }}>
@@ -323,12 +391,20 @@ function BriefRenderer({ brief }: { brief: BriefContent }) {
 
         <div id="sport" style={{ paddingTop: '40px' }}>
           <SectionLabel>🏏 Sport</SectionLabel>
-          <StoryCard story={brief.sport} />
+          <StoryCard
+            story={brief.sport}
+            isSaved={savedKeys.has(keyFor('sport', 0))}
+            onToggle={() => onToggle('sport', 0, brief.sport)}
+          />
         </div>
 
         <div id="culture" style={{ paddingTop: '40px' }}>
           <SectionLabel>🎭 Culture</SectionLabel>
-          <StoryCard story={brief.culture} />
+          <StoryCard
+            story={brief.culture}
+            isSaved={savedKeys.has(keyFor('culture', 0))}
+            onToggle={() => onToggle('culture', 0, brief.culture)}
+          />
         </div>
 
       </div>
@@ -345,6 +421,10 @@ export default function BriefPage() {
   const [briefs, setBriefs] = useState<Record<string, BriefContent>>({})
   const [activeEdition, setActiveEdition] = useState<'5min' | '10min' | 'deep'>('5min')
 
+  // Bookmark state
+  const [userId, setUserId] = useState<string | null>(null)
+  const [savedKeys, setSavedKeys] = useState<Set<string>>(new Set())
+
   const today = new Date().toLocaleDateString('en-IN', {
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'
   })
@@ -354,6 +434,7 @@ export default function BriefPage() {
     const load = async () => {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) { window.location.href = '/login'; return }
+      setUserId(user.id)
 
       const { data: profileData } = await supabase
         .from('profiles').select('*').eq('id', user.id).single()
@@ -366,22 +447,98 @@ export default function BriefPage() {
         }
       }
 
-      const { data: briefData } = await supabase
-        .from('briefs')
-        .select('edition, content')
-        .eq('date', todayISO)
-        .eq('status', 'ready')
+      // ── Load the brief ──────────────────────────────────────────────
+      // Personalised users get their custom brief first; if none exists
+      // yet, we fall back to the shared standard brief so nothing breaks.
+      const isPersonalised = profileData?.brief_type === 'personalised'
+      const loadedBriefs: Record<string, BriefContent> = {}
 
-      if (briefData && briefData.length > 0) {
-        const mapped: Record<string, BriefContent> = {}
-        briefData.forEach((row: any) => { mapped[row.edition] = row.content })
-        setBriefs(mapped)
+      if (isPersonalised) {
+        const { data: personalised } = await supabase
+          .from('personalised_briefs')
+          .select('edition, content')
+          .eq('user_id', user.id)
+          .eq('date', todayISO)
+          .eq('status', 'ready')
+        if (personalised && personalised.length > 0) {
+          personalised.forEach((row: any) => { loadedBriefs[row.edition] = row.content })
+        }
+      }
+
+      // Fallback to standard briefs if no personalised brief was found
+      if (Object.keys(loadedBriefs).length === 0) {
+        const { data: standard } = await supabase
+          .from('briefs')
+          .select('edition, content')
+          .eq('date', todayISO)
+          .eq('status', 'ready')
+        if (standard && standard.length > 0) {
+          standard.forEach((row: any) => { loadedBriefs[row.edition] = row.content })
+        }
+      }
+
+      setBriefs(loadedBriefs)
+
+      // ── Load which stories this user has already saved today ─────────
+      const { data: bookmarkRows } = await supabase
+        .from('bookmarks')
+        .select('brief_date, edition, section, story_index')
+        .eq('user_id', user.id)
+        .eq('brief_date', todayISO)
+      if (bookmarkRows) {
+        setSavedKeys(new Set(
+          bookmarkRows.map((b: any) =>
+            `${b.brief_date}-${b.edition}-${b.section}-${b.story_index}`
+          )
+        ))
       }
 
       setLoading(false)
     }
     load()
   }, [])
+
+  // ── Save / unsave a story ──────────────────────────────────────────
+  const toggleBookmark = async (section: string, index: number, story: Story) => {
+    if (!userId) return
+    const key = `${todayISO}-${activeEdition}-${section}-${index}`
+    const currentlySaved = savedKeys.has(key)
+
+    // Update the screen immediately (optimistic), then save to the database
+    setSavedKeys(prev => {
+      const next = new Set(prev)
+      if (currentlySaved) next.delete(key)
+      else next.add(key)
+      return next
+    })
+
+    if (currentlySaved) {
+      await supabase
+        .from('bookmarks')
+        .delete()
+        .eq('user_id', userId)
+        .eq('brief_date', todayISO)
+        .eq('edition', activeEdition)
+        .eq('section', section)
+        .eq('story_index', index)
+    } else {
+      await supabase
+        .from('bookmarks')
+        .upsert(
+          {
+            user_id: userId,
+            brief_date: todayISO,
+            edition: activeEdition,
+            section,
+            story_index: index,
+            headline: story.headline,
+            body: story.body,
+            source: story.source,
+          },
+          { onConflict: 'user_id,brief_date,edition,section,story_index' }
+        )
+    }
+  }
 
   const activeBrief = briefs[activeEdition]
   const hasBriefs = Object.keys(briefs).length > 0
@@ -461,7 +618,13 @@ export default function BriefPage() {
         {loading ? (
           <BriefLoading />
         ) : hasBriefs && activeBrief ? (
-          <BriefRenderer brief={activeBrief} />
+          <BriefRenderer
+            brief={activeBrief}
+            activeEdition={activeEdition}
+            todayISO={todayISO}
+            savedKeys={savedKeys}
+            onToggle={toggleBookmark}
+          />
         ) : (
           <NoBrief profile={profile} />
         )}
