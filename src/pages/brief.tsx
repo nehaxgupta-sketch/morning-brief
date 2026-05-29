@@ -88,7 +88,7 @@ function StoryCard({ story }: { story: Story }) {
         fontFamily: "'DM Mono', monospace",
         fontSize: '11px',
         letterSpacing: '1px',
-        color: '#555',
+        color: '#666',
       }}>via {story.source}</div>
     </div>
   )
@@ -109,7 +109,7 @@ function EditionTab({
         fontFamily: "'DM Mono', monospace",
         fontSize: '10px',
         letterSpacing: '2px',
-        color: active ? '#C8A45A' : '#555',
+        color: active ? '#C8A45A' : '#777',
         cursor: 'pointer',
         transition: 'color 0.15s',
       }}
@@ -318,7 +318,7 @@ export default function BriefPage() {
       }}>
         <div style={{ display: 'flex', alignItems: 'center', marginBottom: '12px' }}>
           <Link href="/home" style={{
-            color: '#555', textDecoration: 'none',
+            color: '#888', textDecoration: 'none',
             fontSize: '20px', marginRight: '16px',
             minHeight: '44px', display: 'flex', alignItems: 'center',
           }}>←</Link>
@@ -343,7 +343,7 @@ export default function BriefPage() {
               fontFamily: "'DM Mono', monospace",
               fontSize: '10px',
               letterSpacing: '1px',
-              color: '#555',
+              color: '#888',
               lineHeight: '1.6',
             }}>{today.toUpperCase()}</div>
             {profile && (
@@ -351,7 +351,7 @@ export default function BriefPage() {
                 fontFamily: "'DM Mono', monospace",
                 fontSize: '9px',
                 letterSpacing: '1px',
-                color: '#444',
+                color: '#777',
               }}>{profile.city_current?.toUpperCase()}</div>
             )}
           </div>
@@ -404,11 +404,11 @@ export default function BriefPage() {
             alignItems: 'center', justifyContent: 'center',
             gap: '2px', textDecoration: 'none', minHeight: '60px',
           }}>
-            <span style={{ fontSize: '16px', color: active ? '#C8A45A' : '#444' }}>{icon}</span>
+            <span style={{ fontSize: '16px', color: active ? '#C8A45A' : '#777' }}>{icon}</span>
             <span style={{
               fontFamily: "'DM Mono', monospace",
               fontSize: '8px', letterSpacing: '1px',
-              color: active ? '#C8A45A' : '#444',
+              color: active ? '#C8A45A' : '#777',
             }}>{label.toUpperCase()}</span>
           </Link>
         ))}
