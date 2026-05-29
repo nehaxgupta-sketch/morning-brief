@@ -5,6 +5,8 @@ import { createClient } from '@supabase/supabase-js';
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const ONESIGNAL_APP_ID = process.env.ONESIGNAL_APP_ID;
+const ONESIGNAL_REST_API_KEY = process.env.ONESIGNAL_REST_API_KEY;
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -189,7 +191,6 @@ async function saveBriefToSupabase(
 ) {
   const today = new Date().toISOString().split('T')[0];
 
-  // Upsert — if a brief for this date+edition already exists, overwrite it
   const { error } = await supabase
     .from('briefs')
     .upsert(
@@ -208,13 +209,47 @@ async function saveBriefToSupabase(
   console.log(`Brief saved to Supabase — ${edition} edition for ${today}`);
 }
 
+// ─── Step 6: Send OneSignal push notification ────────────────────────────────
+
+async function sendPushNotification(topHeadline: string) {
+  const response = await fetch('https://onesignal.com/api/v1/notifications', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Basic ${ONESIGNAL_REST_API_KEY}`,
+    },
+    body: JSON.stringify({
+      app_id: ONESIGNAL_APP_ID,
+      // Send to all subscribed users
+      included_segments: ['All'],
+      // Notification content
+      headings: { en: '☕ Your Morning Brief is ready' },
+      contents: { en: topHeadline },
+      // Deep link into the brief page on tap
+      url: 'https://morning-brief-liart.vercel.app/brief',
+      // Small icon for Android
+      small_icon: 'ic_stat_onesignal_default',
+      // Delivery timing — send immediately when this function is called
+      // (cron-job.org handles the 6:45 AM IST schedule)
+    }),
+  });
+
+  const data = await response.json();
+
+  if (data.errors) {
+    throw new Error(`OneSignal error: ${JSON.stringify(data.errors)}`);
+  }
+
+  console.log(`Push notification sent. Recipients: ${data.recipients ?? 'unknown'}, ID: ${data.id}`);
+  return data;
+}
+
 // ─── Handler ─────────────────────────────────────────────────────────────────
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  // Optional: accept edition in request body, default to all three
-  const { edition } = req.body || {};
+  const { edition, skipPush } = req.body || {};
   const editions: Edition[] = edition ? [edition] : ['5min', '10min', 'deep'];
 
   try {
@@ -236,9 +271,23 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       results[ed] = content;
     }
 
+    // Step 6: Send push notification once all briefs are saved
+    // Use the top world headline from the 5min brief as the notification preview
+    // Skip if testing (pass { skipPush: true } in request body)
+    if (!skipPush) {
+      console.log('Sending push notification...');
+      const topHeadline = results['5min']?.world?.[0]?.headline
+        ?? results['10min']?.world?.[0]?.headline
+        ?? 'Today\'s stories are waiting for you.';
+      await sendPushNotification(topHeadline);
+      console.log('Push notification sent');
+    } else {
+      console.log('Push notification skipped (skipPush: true)');
+    }
+
     return res.status(200).json({
       success: true,
-      editions: editions,
+      editions,
       results,
     });
 
