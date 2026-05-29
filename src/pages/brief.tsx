@@ -238,7 +238,7 @@ function SidebarNav({ activeSection }: { activeSection: string }) {
               fontFamily: "'DM Mono', monospace",
               fontSize: '7px',
               letterSpacing: '0.5px',
-              color: isActive ? '#C8A45A' : '#555',
+              color: isActive ? '#C8A45A' : '#888',
               lineHeight: '1',
             }}>{label.toUpperCase()}</span>
           </button>
