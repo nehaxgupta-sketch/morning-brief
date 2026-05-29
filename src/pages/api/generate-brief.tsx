@@ -47,8 +47,9 @@ Use only real news from today. Be factual and neutral.`;
   );
 
   const data = await response.json();
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) throw new Error('No response from Gemini');
+  console.log('Gemini raw response:', JSON.stringify(data));
+const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+if (!text) throw new Error(`No response from Gemini. Raw: ${JSON.stringify(data)}`);
 
   const cleaned = text.replace(/```json|```/g, '').trim();
   return JSON.parse(cleaned);
