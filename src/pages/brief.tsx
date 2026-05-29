@@ -52,7 +52,7 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
       fontFamily: "'Playfair Display', Georgia, serif",
       fontSize: '26px',
       fontWeight: '700',
-      color: '#F5F1EA',
+      color: '#C8A45A',
       marginBottom: '0px',
       paddingBottom: '14px',
       borderBottom: '2px solid #C8A45A',
