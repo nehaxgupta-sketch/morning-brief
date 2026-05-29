@@ -1,4 +1,3 @@
-
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { supabase, Profile } from '@/lib/supabase'
@@ -313,7 +312,7 @@ export default function Home() {
       }}>
         {[
           { href: '/home', label: 'Brief', icon: '◆', active: true },
-          { href: '/bookmarks', label: 'Saved', icon: '◈', active: false },
+          { href: '/bookmarks', label: 'Saved', icon: '★', active: false },
           { href: '/profile', label: 'Profile', icon: '◑', active: false },
         ].map(({ href, label, icon, active }) => (
           <Link key={href} href={href} style={{

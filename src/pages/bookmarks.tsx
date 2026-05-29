@@ -116,12 +116,12 @@ export default function BookmarksPage() {
 
           {!loading && bookmarks.length === 0 && (
             <div style={{ textAlign: 'center', paddingTop: '80px' }}>
-              <div style={{ fontSize: '48px', marginBottom: '16px' }}>🔖</div>
+              <div style={{ fontSize: '48px', marginBottom: '16px', color: '#C8A45A' }}>☆</div>
               <p style={{ fontFamily: 'Playfair Display, serif', fontSize: '20px', color: '#F5F1EA', marginBottom: '8px' }}>
                 Nothing saved yet
               </p>
               <p style={{ fontFamily: 'DM Sans, sans-serif', fontSize: '15px', color: '#888', marginBottom: '32px' }}>
-                Tap the bookmark icon on any story while reading your brief.
+                Tap the ☆ on any story while reading your brief.
               </p>
               <button
                 onClick={() => window.location.href = '/brief'}
@@ -227,7 +227,7 @@ export default function BookmarksPage() {
         }}>
           {[
             { label: 'Brief', icon: '📰', href: '/brief' },
-            { label: 'Saved', icon: '🔖', href: '/bookmarks' },
+            { label: 'Saved', icon: '★', href: '/bookmarks' },
             { label: 'Profile', icon: '👤', href: '/profile' },
           ].map(item => {
             const active = item.href === '/bookmarks'

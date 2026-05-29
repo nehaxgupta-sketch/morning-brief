@@ -119,11 +119,11 @@ function StoryCard({
             fontFamily: "'DM Mono', monospace",
             fontSize: '10px',
             letterSpacing: '1px',
-            color: isSaved ? '#C8A45A' : '#777',
+            color: isSaved ? '#C8A45A' : '#AAA',
           }}
           title={isSaved ? 'Remove from saved' : 'Save this story'}
         >
-          <span style={{ fontSize: '14px', opacity: isSaved ? 1 : 0.55 }}>🔖</span>
+          <span style={{ fontSize: '16px' }}>{isSaved ? '★' : '☆'}</span>
           {isSaved ? 'SAVED' : 'SAVE'}
         </button>
       </div>
@@ -659,7 +659,7 @@ export default function BriefPage() {
       }}>
         {[
           { href: '/home', label: 'Brief', icon: '◆', active: true },
-          { href: '/bookmarks', label: 'Saved', icon: '◈', active: false },
+          { href: '/bookmarks', label: 'Saved', icon: '★', active: false },
           { href: '/profile', label: 'Profile', icon: '◑', active: false },
         ].map(({ href, label, icon, active }) => (
           <Link key={href} href={href} style={{
