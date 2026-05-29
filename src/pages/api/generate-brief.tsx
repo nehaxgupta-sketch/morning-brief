@@ -112,6 +112,8 @@ For EVERY story, you MUST include:
 - "published_at": ISO date or datetime if available, otherwise today's date (${today})
 
 Rules:
+
+- You MUST use the web_search_preview tool to find each story. Do not write any story from memory. If web search does not return a real article for a category, omit that story.
 - Use only real stories from the last 24-36 hours. Prefer original publishers (Reuters, AP, Bloomberg, The Hindu, Indian Express, BBC, FT) over aggregators.
 - Every source_url must be a real, specific article URL. If you don't have a real URL, do not include the story.
 - Be factual and neutral. No opinion.
@@ -170,8 +172,9 @@ Use real markets data from today if available; otherwise neutral best estimates.
       'Authorization': `Bearer ${OPENAI_API_KEY}`,
     },
     body: JSON.stringify({
-      model: 'gpt-4o-mini',
+      model: 'gpt-4o',
       tools: [{ type: 'web_search_preview' }],
+      tool_choice: { type: 'web_search_preview' },
       input: prompt,
       max_output_tokens: 12000,
     }),
