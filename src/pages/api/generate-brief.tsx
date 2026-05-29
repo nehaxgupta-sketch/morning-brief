@@ -68,6 +68,81 @@ interface BriefContent {
   culture: WrittenStory;
 }
 
+// ─── Edition configuration ──────────────────────────────────────────────────
+// Each edition has its own model, selection rules, and depth guidance.
+// JSON output shape is identical across editions — only content differs.
+
+interface EditionConfig {
+  model: string;
+  maxTokens: number;
+  selectionRules: string;
+  depthRules: string;
+  marketsRules: string;
+  readingTime: string;
+}
+
+const EDITION_CONFIG: Record<Edition, EditionConfig> = {
+  '5min': {
+    model: 'claude-haiku-4-5-20251001',
+    maxTokens: 8000,
+    readingTime: '5 minutes',
+    selectionRules: `
+SELECTION (this is the skimmable edition — be ruthless):
+- world: keep TOP 3 most consequential stories only. Drop the rest.
+- india: keep TOP 2 most consequential stories only.
+- bengaluru: keep TOP 1 if any exist, else empty array.
+- delhi: keep TOP 1 if any exist, else empty array.
+- business: keep TOP 2.
+- technology: keep TOP 1.
+- climate_health: keep TOP 1.
+- sport: keep as single story (it's already one).
+- culture: keep as single story (it's already one).
+- markets: keep all 4 indices, summary becomes 1 punchy sentence.
+Total target: ~10 stories. A reader skimming on their commute should finish in 5 minutes.`,
+    depthRules: `
+DEPTH:
+- 2 short sentences per story. Punchy. Essential facts only.
+- No background, no "why it matters", no "what's next". Just the news, warmly written.
+- Headlines stay clear and factual — no clickbait.`,
+    marketsRules: `
+MARKETS: 1 sentence summary capturing the day's direction.`,
+  },
+
+  '10min': {
+    model: 'claude-sonnet-4-6',
+    maxTokens: 16000,
+    readingTime: '10 minutes',
+    selectionRules: `
+SELECTION: Include EVERY story from the raw stories. Do not drop anything.
+If a raw section's array is empty, return an empty array for it.`,
+    depthRules: `
+DEPTH:
+- 3 to 4 sentences per story.
+- Lead with what happened, then add ONE piece of context or background that makes the reader understand why it matters.
+- Avoid generic filler. Be specific.`,
+    marketsRules: `
+MARKETS: 2 sentences. First the numbers/direction, second a brief explanation of what's driving the moves.`,
+  },
+
+  'deep': {
+    model: 'claude-sonnet-4-6',
+    maxTokens: 16000,
+    readingTime: '15 to 20 minutes',
+    selectionRules: `
+SELECTION: Include EVERY story from the raw stories. Do not drop anything.
+If a raw section's array is empty, return an empty array for it.`,
+    depthRules: `
+DEPTH (this is the analytical edition — depth and synthesis matter):
+- 5 to 7 sentences per story, written as flowing prose (no bullet points, no headers within body).
+- Each story should naturally cover: what happened, the relevant background or historical context, why it matters (direct and second-order implications), and what to watch next.
+- Where facts are disputed or outcomes uncertain, use hedged language ("likely", "may", "early signs suggest") rather than presenting speculation as fact.
+- Where helpful, draw connections to broader patterns or related stories — but don't force this.
+- Tone: like an Economist briefing or an FT lex column. Intelligent, calm, sharp. Never academic, never sensational.`,
+    marketsRules: `
+MARKETS: 3 to 4 sentences with genuine analysis. Cover the numbers, the drivers, and what they signal about broader sentiment or upcoming events.`,
+  },
+};
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function extractJsonObject(text: string): any {
@@ -121,6 +196,7 @@ Rules:
 - Be factual and neutral. No opinion.
 - For Bengaluru and Delhi, only include stories if there is genuine material news. Returning fewer stories than the target is OK.
 - Keep each body to 2-3 sentences. Do not exceed.
+- IMPORTANT: Order stories within each array by consequence — most important first. The downstream 5-minute edition will only keep the top 1-3 per section, so the most important story must be at index 0.
 
 Return this exact structure:
 {
@@ -194,24 +270,24 @@ Use real markets data from today if available; otherwise neutral best estimates.
 // ─── Step 3: Write brief with Claude ────────────────────────────────────────
 
 async function writeBriefWithClaude(rawStories: RawStories, edition: Edition): Promise<BriefContent> {
+  const config = EDITION_CONFIG[edition];
 
-  const depthGuide = {
-    '5min': `Write each story in 2 short sentences — punchy, warm, essential facts only. Markets in 1 sentence. Total reading time: 5 minutes.`,
-    '10min': `Write each story in 3–4 sentences — include one piece of context or background. Markets in 2 sentences with brief explanation of what's driving moves. Total reading time: 10 minutes.`,
-    'deep': `Write each story in 5–6 sentences — include context, history, why it matters, and what to watch next. Markets in 3–4 sentences with analysis. Total reading time: 15–20 minutes.`,
-  };
+  const prompt = `You are the voice of Morning Brief — a daily news digest for thoughtful, curious Indian readers. Your tone is warm, intelligent, and conversational — like a well-read friend briefing you over coffee. Never sensational, never dry. Write in plain English. Use active voice. Avoid jargon. Separate fact from interpretation; use hedged language for anything uncertain.
 
-  const prompt = `You are the voice of Morning Brief — a daily news digest for thoughtful, curious Indian readers. Your tone is warm, intelligent, and conversational — like a well-read friend briefing you over coffee. Never sensational, never dry. Write in plain English. Use active voice. Avoid jargon.
+EDITION: ${edition.toUpperCase()} (target reading time: ${config.readingTime})
 
-Edition: ${edition.toUpperCase()}
-${depthGuide[edition]}
+${config.selectionRules}
 
-Here are today's raw stories across 8 sections plus markets. Rewrite EVERY story in the Morning Brief voice. Keep all sections. Return ONLY a JSON object — no markdown, no backticks, no extra text.
+${config.depthRules}
+
+${config.marketsRules}
+
+Here are today's raw stories. Rewrite the selected stories in the Morning Brief voice following the rules above. Return ONLY a JSON object — no markdown, no backticks, no extra text.
 
 Raw stories:
 ${JSON.stringify(rawStories, null, 2)}
 
-Return this exact JSON structure (include EVERY section that has content in the raw stories — if a section's array is empty in the raw stories, return an empty array for it):
+Return this exact JSON structure:
 
 {
   "edition": "${edition}",
@@ -251,9 +327,10 @@ Return this exact JSON structure (include EVERY section that has content in the 
 }
 
 CRITICAL:
-- Include EVERY story from the raw stories. Do not drop sections.
+- Follow the SELECTION rules for this edition — for 5min, drop stories; for 10min and deep, include every raw story.
 - Carry source and source_url through unchanged from the raw data.
-- Only rewrite headline and body. Keep markets indices values exactly as in raw data.`;
+- Keep markets indices values exactly as in raw data.
+- Only rewrite headline, body, and markets summary.`;
 
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -263,8 +340,8 @@ CRITICAL:
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 16000,
+      model: config.model,
+      max_tokens: config.maxTokens,
       messages: [
         { role: 'user', content: prompt }
       ],
@@ -272,10 +349,10 @@ CRITICAL:
   });
 
   const data = await response.json();
-  console.log('Claude status:', response.status);
+  console.log(`Claude (${edition}) status:`, response.status, 'model:', config.model);
 
   const text = data.content?.[0]?.text;
-  if (!text) throw new Error(`No response from Claude. Raw: ${JSON.stringify(data).slice(0, 800)}`);
+  if (!text) throw new Error(`No response from Claude for ${edition}. Raw: ${JSON.stringify(data).slice(0, 800)}`);
 
   return extractJsonObject(text);
 }
