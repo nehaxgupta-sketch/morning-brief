@@ -46,32 +46,36 @@ interface RawStories {
   culture: Story;
 }
 
+interface WrittenStory {
+  headline: string;
+  body: string;
+  source: string;
+  source_url: string;
+}
+
 interface BriefContent {
   edition: Edition;
   date: string;
-  world: { headline: string; body: string; source: string }[];
-  india: { headline: string; body: string; source: string }[];
+  world: WrittenStory[];
+  india: WrittenStory[];
+  bengaluru: WrittenStory[];
+  delhi: WrittenStory[];
   markets: { summary: string; indices: MarketIndex[] };
-  sport: { headline: string; body: string; source: string };
-  culture: { headline: string; body: string; source: string };
+  business: WrittenStory[];
+  technology: WrittenStory[];
+  climate_health: WrittenStory[];
+  sport: WrittenStory;
+  culture: WrittenStory;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-// Extract the first complete JSON object from a string, tolerating prose
-// before/after and minor trailing junk. Throws with a helpful message on fail.
 function extractJsonObject(text: string): any {
   const cleaned = text.replace(/```json|```/g, '').trim();
-
-  // Find first '{' and try to balance braces to locate matching '}'.
   const start = cleaned.indexOf('{');
   if (start === -1) throw new Error('No JSON object found in response');
 
-  let depth = 0;
-  let inString = false;
-  let escape = false;
-  let end = -1;
-
+  let depth = 0, inString = false, escape = false, end = -1;
   for (let i = start; i < cleaned.length; i++) {
     const ch = cleaned[i];
     if (escape) { escape = false; continue; }
@@ -86,14 +90,13 @@ function extractJsonObject(text: string): any {
   }
 
   if (end === -1) {
-    throw new Error(`JSON appears truncated. Length=${cleaned.length}, last 200 chars: ${cleaned.slice(-200)}`);
+    throw new Error(`JSON truncated. Length=${cleaned.length}, last 200: ${cleaned.slice(-200)}`);
   }
-
   const candidate = cleaned.slice(start, end + 1);
   try {
     return JSON.parse(candidate);
   } catch (e: any) {
-    throw new Error(`JSON parse failed: ${e.message}. Snippet around error: ${candidate.slice(Math.max(0, candidate.length - 300))}`);
+    throw new Error(`JSON parse failed: ${e.message}. Near end: ${candidate.slice(-300)}`);
   }
 }
 
@@ -107,18 +110,17 @@ async function fetchNewsFromOpenAI(): Promise<RawStories> {
 For EVERY story, you MUST include:
 - "headline": clear, factual headline (max 120 chars)
 - "body": 2-3 sentence factual summary
-- "source": publication name only (e.g. "Reuters", "The Hindu") — no URLs in this field
-- "source_url": full direct URL to the actual article (must start with https://, must be a real working link to the specific story, not a homepage)
+- "source": publication name only (e.g. "Reuters", "The Hindu")
+- "source_url": full direct URL to the actual article (must start with https://, real working link to the specific story)
 - "published_at": ISO date or datetime if available, otherwise today's date (${today})
 
 Rules:
-
 - You MUST use the web_search_preview tool to find each story. Do not write any story from memory. If web search does not return a real article for a category, omit that story.
 - Use only real stories from the last 24-36 hours. Prefer original publishers (Reuters, AP, Bloomberg, The Hindu, Indian Express, BBC, FT) over aggregators.
-- Every source_url must be a real, specific article URL. If you don't have a real URL, do not include the story.
+- Try to use distinct URLs for distinct stories where possible.
 - Be factual and neutral. No opinion.
-- For Bengaluru and Delhi, only include stories if there is genuine material news. Returning fewer stories than the target is OK if real news is thin.
-- Keep each body to 2-3 sentences. Do not exceed this — long bodies will cause failure.
+- For Bengaluru and Delhi, only include stories if there is genuine material news. Returning fewer stories than the target is OK.
+- Keep each body to 2-3 sentences. Do not exceed.
 
 Return this exact structure:
 {
@@ -132,11 +134,11 @@ Return this exact structure:
   ],
   "bengaluru": [
     { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
-    // 0-3 stories: only if material news exists
+    // 0-3 stories
   ],
   "delhi": [
     { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
-    // 0-2 stories: only if material news exists
+    // 0-2 stories
   ],
   "markets": {
     "summary": "2-3 sentence overview of markets today",
@@ -163,7 +165,7 @@ Return this exact structure:
   "culture": { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
 }
 
-Use real markets data from today if available; otherwise neutral best estimates. Keep response complete and well under 10000 tokens.`;
+Use real markets data from today if available; otherwise neutral best estimates.`;
 
   const response = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
@@ -204,41 +206,54 @@ async function writeBriefWithClaude(rawStories: RawStories, edition: Edition): P
 Edition: ${edition.toUpperCase()}
 ${depthGuide[edition]}
 
-Here are today's raw stories. Rewrite them in the Morning Brief voice. Return ONLY a JSON object — no markdown, no backticks, no extra text.
+Here are today's raw stories across 8 sections plus markets. Rewrite EVERY story in the Morning Brief voice. Keep all sections. Return ONLY a JSON object — no markdown, no backticks, no extra text.
 
 Raw stories:
 ${JSON.stringify(rawStories, null, 2)}
 
-Return this exact JSON structure:
+Return this exact JSON structure (include EVERY section that has content in the raw stories — if a section's array is empty in the raw stories, return an empty array for it):
+
 {
   "edition": "${edition}",
   "date": "${new Date().toISOString().split('T')[0]}",
   "world": [
-    { "headline": "rewritten headline", "body": "rewritten body in Morning Brief voice", "source": "source name" },
-    { "headline": "...", "body": "...", "source": "..." },
-    { "headline": "...", "body": "...", "source": "..." },
-    { "headline": "...", "body": "...", "source": "..." },
-    { "headline": "...", "body": "...", "source": "..." }
+    { "headline": "...", "body": "...", "source": "...", "source_url": "..." }
   ],
   "india": [
-    { "headline": "rewritten headline", "body": "rewritten body", "source": "source name" },
-    { "headline": "...", "body": "...", "source": "..." },
-    { "headline": "...", "body": "...", "source": "..." }
+    { "headline": "...", "body": "...", "source": "...", "source_url": "..." }
+  ],
+  "bengaluru": [
+    { "headline": "...", "body": "...", "source": "...", "source_url": "..." }
+  ],
+  "delhi": [
+    { "headline": "...", "body": "...", "source": "...", "source_url": "..." }
   ],
   "markets": {
     "summary": "rewritten markets summary in Morning Brief voice",
     "indices": [
-      { "name": "Sensex", "change": "+0.4%" },
-      { "name": "Nifty", "change": "-0.1%" },
-      { "name": "S&P 500", "change": "+0.6%" },
-      { "name": "Nasdaq", "change": "+1.1%" }
+      { "name": "Sensex", "change": "..." },
+      { "name": "Nifty", "change": "..." },
+      { "name": "S&P 500", "change": "..." },
+      { "name": "Nasdaq", "change": "..." }
     ]
   },
-  "sport": { "headline": "rewritten headline", "body": "rewritten body", "source": "source name" },
-  "culture": { "headline": "rewritten headline", "body": "rewritten body", "source": "source name" }
+  "business": [
+    { "headline": "...", "body": "...", "source": "...", "source_url": "..." }
+  ],
+  "technology": [
+    { "headline": "...", "body": "...", "source": "...", "source_url": "..." }
+  ],
+  "climate_health": [
+    { "headline": "...", "body": "...", "source": "...", "source_url": "..." }
+  ],
+  "sport": { "headline": "...", "body": "...", "source": "...", "source_url": "..." },
+  "culture": { "headline": "...", "body": "...", "source": "...", "source_url": "..." }
 }
 
-Keep all source names exactly as they appear in the raw data. Only rewrite headlines and body text.`;
+CRITICAL:
+- Include EVERY story from the raw stories. Do not drop sections.
+- Carry source and source_url through unchanged from the raw data.
+- Only rewrite headline and body. Keep markets indices values exactly as in raw data.`;
 
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -248,8 +263,8 @@ Keep all source names exactly as they appear in the raw data. Only rewrite headl
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify({
-      model: 'claude-opus-4-5',
-      max_tokens: 8000,
+      model: 'claude-sonnet-4-6',
+      max_tokens: 16000,
       messages: [
         { role: 'user', content: prompt }
       ],
