@@ -41,7 +41,7 @@ function editionLabel(edition: string) {
 function marketColor(change: string) {
   if (change.startsWith('+')) return '#4CAF7D'
   if (change.startsWith('-')) return '#E05C5C'
-  return '#888'
+  return '#aaa'
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -50,15 +50,15 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
     <div style={{
       fontFamily: "'Playfair Display', Georgia, serif",
-      fontSize: '22px',
+      fontSize: '26px',
       fontWeight: '700',
-      color: '#1A1A1A',
-      marginBottom: '4px',
-      paddingBottom: '12px',
+      color: '#F5F1EA',
+      marginBottom: '0px',
+      paddingBottom: '14px',
       borderBottom: '2px solid #C8A45A',
       display: 'flex',
       alignItems: 'center',
-      gap: '8px',
+      gap: '10px',
     }}>{children}</div>
   )
 }
@@ -66,29 +66,29 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 function StoryCard({ story }: { story: Story }) {
   return (
     <div style={{
-      padding: '20px 0',
-      borderBottom: '1px solid #E2DBD0',
+      padding: '22px 0',
+      borderBottom: '1px solid #2A2A2A',
     }}>
       <div style={{
         fontFamily: "'Playfair Display', Georgia, serif",
-        fontSize: '19px',
+        fontSize: '22px',
         fontWeight: '700',
-        color: '#1A1A1A',
+        color: '#F5F1EA',
         lineHeight: '1.35',
-        marginBottom: '10px',
+        marginBottom: '12px',
       }}>{story.headline}</div>
       <div style={{
         fontFamily: "'DM Sans', sans-serif",
-        fontSize: '15px',
-        color: '#333',
-        lineHeight: '1.75',
-        marginBottom: '10px',
+        fontSize: '17px',
+        color: '#C0B9AF',
+        lineHeight: '1.8',
+        marginBottom: '12px',
       }}>{story.body}</div>
       <div style={{
         fontFamily: "'DM Mono', monospace",
-        fontSize: '10px',
+        fontSize: '11px',
         letterSpacing: '1px',
-        color: '#999',
+        color: '#555',
       }}>via {story.source}</div>
     </div>
   )
@@ -105,11 +105,11 @@ function EditionTab({
         background: 'none',
         border: 'none',
         borderBottom: active ? '2px solid #C8A45A' : '2px solid transparent',
-        padding: '12px 0',
+        padding: '13px 0',
         fontFamily: "'DM Mono', monospace",
-        fontSize: '9px',
+        fontSize: '10px',
         letterSpacing: '2px',
-        color: active ? '#C8A45A' : '#666',
+        color: active ? '#C8A45A' : '#555',
         cursor: 'pointer',
         transition: 'color 0.15s',
       }}
@@ -117,59 +117,52 @@ function EditionTab({
   )
 }
 
-// ─── Loading state ────────────────────────────────────────────────────────────
+// ─── Loading ──────────────────────────────────────────────────────────────────
 
 function BriefLoading() {
   return (
-    <div style={{ padding: '40px 20px', textAlign: 'center' }}>
+    <div style={{ padding: '60px 20px', textAlign: 'center' }}>
       <div style={{
         fontFamily: "'Playfair Display', Georgia, serif",
-        fontSize: '18px',
+        fontSize: '20px',
         fontStyle: 'italic',
-        color: '#888',
-        marginBottom: '8px',
+        color: '#666',
       }}>Fetching your brief…</div>
-      <div style={{
-        fontFamily: "'DM Sans', sans-serif",
-        fontSize: '14px',
-        color: '#AAA',
-      }}>This only takes a moment.</div>
     </div>
   )
 }
 
-// ─── No brief state ───────────────────────────────────────────────────────────
+// ─── No brief ─────────────────────────────────────────────────────────────────
 
 function NoBrief({ profile }: { profile: Profile | null }) {
   return (
-    <div style={{ padding: '24px 20px' }}>
+    <div style={{ padding: '28px 20px' }}>
       <div style={{
-        background: '#FDFCF9',
-        border: '1px solid #E2DBD0',
+        border: '1px solid #2A2A2A',
         borderTop: '2px solid #C8A45A',
-        padding: '20px',
+        padding: '24px',
       }}>
         <div style={{
           fontFamily: "'DM Mono', monospace",
-          fontSize: '9px',
+          fontSize: '10px',
           letterSpacing: '2px',
           color: '#C8A45A',
-          marginBottom: '12px',
+          marginBottom: '14px',
         }}>TODAY'S BRIEF IS BEING PREPARED</div>
         <div style={{
           fontFamily: "'Playfair Display', Georgia, serif",
-          fontSize: '18px',
+          fontSize: '20px',
           fontStyle: 'italic',
-          color: '#333',
-          marginBottom: '10px',
+          color: '#F5F1EA',
+          marginBottom: '12px',
           lineHeight: '1.4',
         }}>Your first brief arrives tomorrow at 6:45 AM.</div>
         <div style={{
           fontFamily: "'DM Sans', sans-serif",
-          fontSize: '14px',
-          color: '#666',
-          lineHeight: '1.65',
-          marginBottom: '16px',
+          fontSize: '16px',
+          color: '#888',
+          lineHeight: '1.7',
+          marginBottom: '20px',
         }}>
           Every morning, Morning Brief fetches the day's news and rewrites it in plain, warm English — no noise, no spin. Tailored to {profile?.city_current || 'your city'} and your interests.
         </div>
@@ -181,10 +174,10 @@ function NoBrief({ profile }: { profile: Profile | null }) {
         ].map(item => (
           <div key={item} style={{
             fontFamily: "'DM Sans', sans-serif",
-            fontSize: '14px',
-            color: '#444',
-            padding: '8px 0',
-            borderBottom: '1px solid #F0EDE6',
+            fontSize: '16px',
+            color: '#888',
+            padding: '10px 0',
+            borderBottom: '1px solid #222',
             lineHeight: '1.4',
           }}>{item}</div>
         ))}
@@ -193,53 +186,46 @@ function NoBrief({ profile }: { profile: Profile | null }) {
   )
 }
 
-// ─── Main brief renderer ──────────────────────────────────────────────────────
+// ─── Brief renderer ───────────────────────────────────────────────────────────
 
 function BriefRenderer({ brief }: { brief: BriefContent }) {
   return (
-    <div style={{ padding: '0 20px 32px' }}>
+    <div style={{ padding: '0 20px 40px' }}>
 
-      {/* World */}
-      <div style={{ paddingTop: '28px', marginBottom: '8px' }}>
+      <div style={{ paddingTop: '32px', marginBottom: '8px' }}>
         <SectionLabel>🌍 World</SectionLabel>
-        {brief.world.map((story, i) => (
-          <StoryCard key={i} story={story} />
-        ))}
+        {brief.world.map((story, i) => <StoryCard key={i} story={story} />)}
       </div>
 
-      {/* India */}
-      <div style={{ paddingTop: '28px', marginBottom: '8px' }}>
+      <div style={{ paddingTop: '32px', marginBottom: '8px' }}>
         <SectionLabel>🇮🇳 India</SectionLabel>
-        {brief.india.map((story, i) => (
-          <StoryCard key={i} story={story} />
-        ))}
+        {brief.india.map((story, i) => <StoryCard key={i} story={story} />)}
       </div>
 
-      {/* Markets */}
-      <div style={{ paddingTop: '28px', marginBottom: '8px' }}>
+      <div style={{ paddingTop: '32px', marginBottom: '8px' }}>
         <SectionLabel>📈 Markets</SectionLabel>
         <div style={{
           display: 'grid',
           gridTemplateColumns: '1fr 1fr',
-          gap: '8px',
-          margin: '16px 0',
+          gap: '10px',
+          margin: '18px 0',
         }}>
           {brief.markets.indices.map((idx) => (
             <div key={idx.name} style={{
-              background: '#FDFCF9',
-              border: '1px solid #E2DBD0',
-              padding: '12px 14px',
+              background: '#1E1E1E',
+              border: '1px solid #2A2A2A',
+              padding: '14px 16px',
             }}>
               <div style={{
                 fontFamily: "'DM Mono', monospace",
-                fontSize: '10px',
+                fontSize: '11px',
                 letterSpacing: '1px',
-                color: '#888',
-                marginBottom: '6px',
+                color: '#666',
+                marginBottom: '8px',
               }}>{idx.name}</div>
               <div style={{
                 fontFamily: "'DM Mono', monospace",
-                fontSize: '17px',
+                fontSize: '20px',
                 fontWeight: '700',
                 color: marketColor(idx.change),
               }}>{idx.change}</div>
@@ -248,20 +234,18 @@ function BriefRenderer({ brief }: { brief: BriefContent }) {
         </div>
         <div style={{
           fontFamily: "'DM Sans', sans-serif",
-          fontSize: '15px',
-          color: '#333',
-          lineHeight: '1.75',
+          fontSize: '17px',
+          color: '#C0B9AF',
+          lineHeight: '1.8',
         }}>{brief.markets.summary}</div>
       </div>
 
-      {/* Sport */}
-      <div style={{ paddingTop: '28px', marginBottom: '8px' }}>
+      <div style={{ paddingTop: '32px', marginBottom: '8px' }}>
         <SectionLabel>🏏 Sport</SectionLabel>
         <StoryCard story={brief.sport} />
       </div>
 
-      {/* Culture */}
-      <div style={{ paddingTop: '28px' }}>
+      <div style={{ paddingTop: '32px' }}>
         <SectionLabel>🎭 Culture</SectionLabel>
         <StoryCard story={brief.culture} />
       </div>
@@ -282,19 +266,15 @@ export default function BriefPage() {
   const today = new Date().toLocaleDateString('en-IN', {
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'
   })
-
   const todayISO = new Date().toISOString().split('T')[0]
 
   useEffect(() => {
     const load = async () => {
       const { data: { user } } = await supabase.auth.getUser()
-      if (!user) { router.push('/login'); return }
+      if (!user) { window.location.href = '/login'; return }
 
       const { data: profileData } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', user.id)
-        .single()
+        .from('profiles').select('*').eq('id', user.id).single()
       setProfile(profileData)
 
       if (profileData?.edition_preference) {
@@ -312,9 +292,7 @@ export default function BriefPage() {
 
       if (briefData && briefData.length > 0) {
         const mapped: Record<string, BriefContent> = {}
-        briefData.forEach((row: any) => {
-          mapped[row.edition] = row.content
-        })
+        briefData.forEach((row: any) => { mapped[row.edition] = row.content })
         setBriefs(mapped)
       }
 
@@ -327,81 +305,74 @@ export default function BriefPage() {
   const hasBriefs = Object.keys(briefs).length > 0
 
   return (
-    <div style={{ minHeight: '100vh', background: '#F5F1EA' }}>
+    <div style={{ minHeight: '100vh', background: '#1A1A1A' }}>
 
-      {/* Header */}
+      {/* Header — matching index page brand treatment */}
       <div style={{
         background: '#1A1A1A',
-        borderBottom: '3px solid #C8A45A',
-        padding: '0 20px',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        height: '52px',
+        borderBottom: '2px solid #C8A45A',
+        padding: '20px 20px 16px',
         position: 'sticky',
         top: 0,
         zIndex: 10,
       }}>
-        <Link href="/home" style={{
-          color: '#888', textDecoration: 'none',
-          fontSize: '18px', minHeight: '44px',
-          display: 'flex', alignItems: 'center',
-        }}>←</Link>
-        <div style={{
-          fontFamily: "'Playfair Display', Georgia, serif",
-          fontSize: '18px',
-          fontWeight: '700',
-          fontStyle: 'italic',
-          color: '#C8A45A',
-        }}>Morning Brief</div>
-        <div style={{ width: '44px' }} />
-      </div>
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: '12px' }}>
+          <Link href="/home" style={{
+            color: '#555', textDecoration: 'none',
+            fontSize: '20px', marginRight: '16px',
+            minHeight: '44px', display: 'flex', alignItems: 'center',
+          }}>←</Link>
+          <div>
+            <div style={{
+              fontFamily: "'Playfair Display', Georgia, serif",
+              fontSize: '28px',
+              fontWeight: '900',
+              color: '#F5F1EA',
+              lineHeight: '1',
+            }}>Morning</div>
+            <div style={{
+              fontFamily: "'Playfair Display', Georgia, serif",
+              fontSize: '28px',
+              fontWeight: '900',
+              color: '#C8A45A',
+              lineHeight: '1',
+            }}>Brief</div>
+          </div>
+          <div style={{ marginLeft: 'auto', textAlign: 'right' }}>
+            <div style={{
+              fontFamily: "'DM Mono', monospace",
+              fontSize: '10px',
+              letterSpacing: '1px',
+              color: '#555',
+              lineHeight: '1.6',
+            }}>{today.toUpperCase()}</div>
+            {profile && (
+              <div style={{
+                fontFamily: "'DM Mono', monospace",
+                fontSize: '9px',
+                letterSpacing: '1px',
+                color: '#444',
+              }}>{profile.city_current?.toUpperCase()}</div>
+            )}
+          </div>
+        </div>
 
-      {/* Masthead */}
-      <div style={{
-        background: '#1A1A1A',
-        padding: '12px 20px 14px',
-        borderBottom: '1px solid #2A2A2A',
-      }}>
-        <div style={{
-          fontFamily: "'DM Mono', monospace",
-          fontSize: '10px',
-          letterSpacing: '2px',
-          color: '#666',
-          marginBottom: '3px',
-        }}>{today.toUpperCase()}</div>
-        {profile && (
-          <div style={{
-            fontFamily: "'DM Mono', monospace",
-            fontSize: '9px',
-            letterSpacing: '1px',
-            color: '#555',
-          }}>
-            {profile.city_current?.toUpperCase()} · {profile.profession?.toUpperCase()}
+        {/* Edition tabs */}
+        {hasBriefs && (
+          <div style={{ display: 'flex', marginTop: '4px' }}>
+            {(['5min', '10min', 'deep'] as const).map(ed =>
+              briefs[ed] ? (
+                <EditionTab
+                  key={ed}
+                  label={editionLabel(ed)}
+                  active={activeEdition === ed}
+                  onClick={() => setActiveEdition(ed)}
+                />
+              ) : null
+            )}
           </div>
         )}
       </div>
-
-      {/* Edition tabs */}
-      {hasBriefs && (
-        <div style={{
-          background: '#1A1A1A',
-          borderBottom: '1px solid #2A2A2A',
-          display: 'flex',
-          padding: '0 20px',
-        }}>
-          {(['5min', '10min', 'deep'] as const).map(ed => (
-            briefs[ed] ? (
-              <EditionTab
-                key={ed}
-                label={editionLabel(ed)}
-                active={activeEdition === ed}
-                onClick={() => setActiveEdition(ed)}
-              />
-            ) : null
-          ))}
-        </div>
-      )}
 
       {/* Content */}
       <div style={{ paddingBottom: '80px' }}>
@@ -414,11 +385,11 @@ export default function BriefPage() {
         )}
       </div>
 
-      {/* Bottom nav — Habits removed until built */}
+      {/* Bottom nav */}
       <div style={{
         position: 'fixed',
         bottom: 0, left: 0, right: 0,
-        background: '#1A1A1A',
+        background: '#111',
         borderTop: '1px solid #2A2A2A',
         display: 'flex',
         height: '60px',
