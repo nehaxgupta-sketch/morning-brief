@@ -527,7 +527,7 @@ export default function BriefPage() {
           .select('edition, content')
           .eq('user_id', user.id)
           .eq('date', todayISO)
-          .eq('status', 'ready')
+          .in('status', ['ready', 'fallback'])
         if (personalised && personalised.length > 0) {
           personalised.forEach((row: any) => { loadedBriefs[row.edition] = row.content })
         }
@@ -539,7 +539,7 @@ export default function BriefPage() {
           .from('briefs')
           .select('edition, content')
           .eq('date', todayISO)
-          .eq('status', 'ready')
+          .in('status', ['ready', 'fallback'])
         if (standard && standard.length > 0) {
           standard.forEach((row: any) => { loadedBriefs[row.edition] = row.content })
         }

@@ -1,5 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { createClient } from '@supabase/supabase-js';
+import { z } from 'zod';
 
 // ─── Clients ────────────────────────────────────────────────────────────────
 
@@ -12,6 +13,16 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SECRET_KEY!
 );
+
+// ─── Date helpers (IST) ─────────────────────────────────────────────────────
+// Vercel runs in UTC. We want the brief's date to be "today in India" because
+// the cron fires at 6:45 AM IST and users read it as their morning paper.
+
+function getISTDate(offsetDays = 0): string {
+  const now = new Date();
+  const istMs = now.getTime() + 5.5 * 60 * 60 * 1000 + offsetDays * 24 * 60 * 60 * 1000;
+  return new Date(istMs).toISOString().split('T')[0];
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -68,9 +79,44 @@ interface BriefContent {
   culture: WrittenStory;
 }
 
+// ─── Zod schemas ────────────────────────────────────────────────────────────
+// These guard against malformed AI output. A brief that fails this schema is
+// not allowed to overwrite today's row — we fall back to yesterday's brief.
+
+const StorySchema = z.object({
+  headline: z.string().min(5).max(200),
+  body: z.string().min(20),
+  source: z.string().min(1),
+  source_url: z.union([
+    z.string().startsWith('https://'),
+    z.literal(''),
+  ]),
+});
+
+const MarketIndexSchema = z.object({
+  name: z.string().min(1),
+  change: z.string().min(1),
+});
+
+const BriefContentSchema = z.object({
+  edition: z.enum(['5min', '10min', 'deep']),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  world: z.array(StorySchema).min(1),
+  india: z.array(StorySchema).min(1),
+  bengaluru: z.array(StorySchema),         // may be empty
+  delhi: z.array(StorySchema),             // may be empty
+  business: z.array(StorySchema).min(1),
+  technology: z.array(StorySchema).min(1),
+  climate_health: z.array(StorySchema),    // may be empty
+  markets: z.object({
+    summary: z.string().min(10),
+    indices: z.array(MarketIndexSchema).length(4),
+  }),
+  sport: StorySchema,
+  culture: StorySchema,
+});
+
 // ─── Edition configuration ──────────────────────────────────────────────────
-// Each edition has its own model, selection rules, and depth guidance.
-// JSON output shape is identical across editions — only content differs.
 
 interface EditionConfig {
   model: string;
@@ -143,7 +189,7 @@ MARKETS: 3 to 4 sentences with genuine analysis. Cover the numbers, the drivers,
   },
 };
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── JSON extraction helper ─────────────────────────────────────────────────
 
 function extractJsonObject(text: string): any {
   const cleaned = text.replace(/```json|```/g, '').trim();
@@ -178,7 +224,7 @@ function extractJsonObject(text: string): any {
 // ─── Step 2: Fetch news via OpenAI ──────────────────────────────────────────
 
 async function fetchNewsFromOpenAI(): Promise<RawStories> {
-  const today = new Date().toISOString().split('T')[0];
+  const today = getISTDate();
 
   const prompt = `You are a news editor for an India-based daily brief. Search the web for today's (${today}) most consequential stories across the categories below. Return ONLY a JSON object — no markdown, no backticks, no commentary.
 
@@ -291,7 +337,7 @@ Return this exact JSON structure:
 
 {
   "edition": "${edition}",
-  "date": "${new Date().toISOString().split('T')[0]}",
+  "date": "${getISTDate()}",
   "world": [
     { "headline": "...", "body": "...", "source": "...", "source_url": "..." }
   ],
@@ -357,14 +403,54 @@ CRITICAL:
   return extractJsonObject(text);
 }
 
+// ─── Validation ─────────────────────────────────────────────────────────────
+
+function validateBrief(content: any, edition: Edition):
+  | { ok: true; data: BriefContent }
+  | { ok: false; errors: string }
+{
+  const result = BriefContentSchema.safeParse(content);
+  if (result.success) {
+    return { ok: true, data: result.data as BriefContent };
+  }
+  const errors = result.error.issues
+    .map(i => `${i.path.join('.')}: ${i.message}`)
+    .join('; ');
+  console.error(`Validation failed for ${edition}: ${errors}`);
+  return { ok: false, errors };
+}
+
+// ─── Fallback fetch ─────────────────────────────────────────────────────────
+// Try yesterday first, then the day before. Returns null if nothing usable.
+
+async function fetchPreviousBrief(edition: Edition): Promise<BriefContent | null> {
+  for (let daysAgo = 1; daysAgo <= 2; daysAgo++) {
+    const date = getISTDate(-daysAgo);
+    const { data, error } = await supabase
+      .from('briefs')
+      .select('content, status')
+      .eq('date', date)
+      .eq('edition', edition)
+      .in('status', ['ready', 'fallback'])
+      .maybeSingle();
+
+    if (!error && data?.content) {
+      console.log(`Fallback: using ${edition} brief from ${date} (was ${data.status})`);
+      return data.content as BriefContent;
+    }
+  }
+  return null;
+}
+
 // ─── Step 4: Save to Supabase ────────────────────────────────────────────────
 
 async function saveBriefToSupabase(
   edition: Edition,
-  rawStories: RawStories,
-  content: BriefContent
+  rawStories: RawStories | null,
+  content: BriefContent | null,
+  status: 'ready' | 'fallback' | 'failed'
 ) {
-  const today = new Date().toISOString().split('T')[0];
+  const today = getISTDate();
 
   const { error } = await supabase
     .from('briefs')
@@ -372,7 +458,7 @@ async function saveBriefToSupabase(
       {
         date: today,
         edition,
-        status: 'ready',
+        status,
         raw_stories: rawStories,
         content,
         generated_at: new Date().toISOString(),
@@ -381,7 +467,7 @@ async function saveBriefToSupabase(
     );
 
   if (error) throw new Error(`Supabase save failed: ${error.message}`);
-  console.log(`Brief saved — ${edition} for ${today}`);
+  console.log(`Brief saved — ${edition} for ${today} (status: ${status})`);
 }
 
 // ─── Step 6: Send OneSignal push notification ────────────────────────────────
@@ -417,26 +503,62 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const { edition, skipPush } = req.body || {};
   const editions: Edition[] = edition ? [edition] : ['5min', '10min', 'deep'];
 
+  const results: Record<string, { status: string; reason?: string }> = {};
+
   try {
     console.log('Fetching news from OpenAI...');
     const rawStories = await fetchNewsFromOpenAI();
     console.log('News fetched.');
 
-    const results: Record<string, any> = {};
+    const writtenBriefs: Record<string, BriefContent> = {};
 
     for (const ed of editions) {
-      console.log(`Writing ${ed}...`);
-      const content = await writeBriefWithClaude(rawStories, ed);
-      console.log(`${ed} written. Saving...`);
-      await saveBriefToSupabase(ed, rawStories, content);
-      results[ed] = content;
+      try {
+        console.log(`Writing ${ed}...`);
+        const content = await writeBriefWithClaude(rawStories, ed);
+
+        const validation = validateBrief(content, ed);
+        if (validation.ok) {
+          await saveBriefToSupabase(ed, rawStories, validation.data, 'ready');
+          writtenBriefs[ed] = validation.data;
+          results[ed] = { status: 'ready' };
+        } else {
+          // Validation failed — fall back to yesterday
+          const previous = await fetchPreviousBrief(ed);
+          if (previous) {
+            await saveBriefToSupabase(ed, rawStories, previous, 'fallback');
+            writtenBriefs[ed] = previous;
+            results[ed] = { status: 'fallback', reason: validation.errors };
+          } else {
+            await saveBriefToSupabase(ed, rawStories, null, 'failed');
+            results[ed] = { status: 'failed', reason: validation.errors };
+          }
+        }
+      } catch (err: any) {
+        console.error(`Error writing ${ed}:`, err.message);
+        // Same fallback path on any per-edition exception
+        const previous = await fetchPreviousBrief(ed);
+        if (previous) {
+          await saveBriefToSupabase(ed, rawStories, previous, 'fallback');
+          writtenBriefs[ed] = previous;
+          results[ed] = { status: 'fallback', reason: err.message };
+        } else {
+          await saveBriefToSupabase(ed, rawStories, null, 'failed');
+          results[ed] = { status: 'failed', reason: err.message };
+        }
+      }
     }
 
-    if (!skipPush) {
-      const topHeadline = results['5min']?.world?.[0]?.headline
-        ?? results['10min']?.world?.[0]?.headline
+    // Send push only if at least one edition is fresh-ready (not a fallback)
+    const anyFresh = Object.values(results).some(r => r.status === 'ready');
+
+    if (!skipPush && anyFresh) {
+      const topHeadline = writtenBriefs['5min']?.world?.[0]?.headline
+        ?? writtenBriefs['10min']?.world?.[0]?.headline
         ?? 'Today\'s stories are waiting for you.';
       await sendPushNotification(topHeadline);
+    } else if (!skipPush && !anyFresh) {
+      console.log('Push skipped — no fresh briefs today (all fallbacks or failed)');
     } else {
       console.log('Push skipped (skipPush: true)');
     }
@@ -444,7 +566,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(200).json({ success: true, editions, results });
 
   } catch (error: any) {
-    console.error('Error:', error.message);
-    return res.status(500).json({ success: false, error: error.message });
+    console.error('Top-level error:', error.message);
+    return res.status(500).json({ success: false, error: error.message, results });
   }
 }
