@@ -49,52 +49,46 @@ function marketColor(change: string) {
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
     <div style={{
-      fontFamily: "'DM Mono', monospace",
-      fontSize: '8px',
-      letterSpacing: '3px',
-      color: '#C8A45A',
-      marginBottom: '12px',
-      paddingBottom: '8px',
-      borderBottom: '1px solid rgba(200,164,90,0.2)',
+      fontFamily: "'Playfair Display', Georgia, serif",
+      fontSize: '22px',
+      fontWeight: '700',
+      color: '#1A1A1A',
+      marginBottom: '4px',
+      paddingBottom: '12px',
+      borderBottom: '2px solid #C8A45A',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '8px',
     }}>{children}</div>
   )
 }
 
-function StoryCard({ story, index }: { story: Story; index?: number }) {
+function StoryCard({ story }: { story: Story }) {
   return (
     <div style={{
-      padding: '16px 0',
-      borderBottom: '1px solid #EAE5DC',
+      padding: '20px 0',
+      borderBottom: '1px solid #E2DBD0',
     }}>
-      {index !== undefined && (
-        <div style={{
-          fontFamily: "'DM Mono', monospace",
-          fontSize: '8px',
-          letterSpacing: '2px',
-          color: '#C8A45A',
-          marginBottom: '6px',
-        }}>{String(index + 1).padStart(2, '0')}</div>
-      )}
       <div style={{
         fontFamily: "'Playfair Display', Georgia, serif",
-        fontSize: '16px',
+        fontSize: '19px',
         fontWeight: '700',
         color: '#1A1A1A',
         lineHeight: '1.35',
-        marginBottom: '8px',
+        marginBottom: '10px',
       }}>{story.headline}</div>
       <div style={{
         fontFamily: "'DM Sans', sans-serif",
-        fontSize: '13px',
-        color: '#555',
-        lineHeight: '1.65',
-        marginBottom: '8px',
+        fontSize: '15px',
+        color: '#333',
+        lineHeight: '1.75',
+        marginBottom: '10px',
       }}>{story.body}</div>
       <div style={{
         fontFamily: "'DM Mono', monospace",
-        fontSize: '8px',
+        fontSize: '10px',
         letterSpacing: '1px',
-        color: '#AAA',
+        color: '#999',
       }}>via {story.source}</div>
     </div>
   )
@@ -111,9 +105,9 @@ function EditionTab({
         background: 'none',
         border: 'none',
         borderBottom: active ? '2px solid #C8A45A' : '2px solid transparent',
-        padding: '10px 0',
+        padding: '12px 0',
         fontFamily: "'DM Mono', monospace",
-        fontSize: '8px',
+        fontSize: '9px',
         letterSpacing: '2px',
         color: active ? '#C8A45A' : '#666',
         cursor: 'pointer',
@@ -137,7 +131,7 @@ function BriefLoading() {
       }}>Fetching your brief…</div>
       <div style={{
         fontFamily: "'DM Sans', sans-serif",
-        fontSize: '13px',
+        fontSize: '14px',
         color: '#AAA',
       }}>This only takes a moment.</div>
     </div>
@@ -157,14 +151,14 @@ function NoBrief({ profile }: { profile: Profile | null }) {
       }}>
         <div style={{
           fontFamily: "'DM Mono', monospace",
-          fontSize: '8px',
+          fontSize: '9px',
           letterSpacing: '2px',
           color: '#C8A45A',
           marginBottom: '12px',
         }}>TODAY'S BRIEF IS BEING PREPARED</div>
         <div style={{
           fontFamily: "'Playfair Display', Georgia, serif",
-          fontSize: '16px',
+          fontSize: '18px',
           fontStyle: 'italic',
           color: '#333',
           marginBottom: '10px',
@@ -172,9 +166,9 @@ function NoBrief({ profile }: { profile: Profile | null }) {
         }}>Your first brief arrives tomorrow at 6:45 AM.</div>
         <div style={{
           fontFamily: "'DM Sans', sans-serif",
-          fontSize: '13px',
-          color: '#777',
-          lineHeight: '1.6',
+          fontSize: '14px',
+          color: '#666',
+          lineHeight: '1.65',
           marginBottom: '16px',
         }}>
           Every morning, Morning Brief fetches the day's news and rewrites it in plain, warm English — no noise, no spin. Tailored to {profile?.city_current || 'your city'} and your interests.
@@ -182,14 +176,14 @@ function NoBrief({ profile }: { profile: Profile | null }) {
         {[
           `📍 Local news for ${profile?.city_current || 'your city'}`,
           '🌍 World affairs & India politics',
-          `💼 Markets & business`,
+          '💼 Markets & business',
           `📖 In ${(profile?.edition_preference as string) === '5min' ? '5-minute' : (profile?.edition_preference as string) === 'deep' ? 'deep dive' : '10-minute'} depth`,
         ].map(item => (
           <div key={item} style={{
             fontFamily: "'DM Sans', sans-serif",
-            fontSize: '13px',
+            fontSize: '14px',
             color: '#444',
-            padding: '7px 0',
+            padding: '8px 0',
             borderBottom: '1px solid #F0EDE6',
             lineHeight: '1.4',
           }}>{item}</div>
@@ -206,46 +200,46 @@ function BriefRenderer({ brief }: { brief: BriefContent }) {
     <div style={{ padding: '0 20px 32px' }}>
 
       {/* World */}
-      <div style={{ paddingTop: '24px', marginBottom: '8px' }}>
-        <SectionLabel>🌍 WORLD</SectionLabel>
+      <div style={{ paddingTop: '28px', marginBottom: '8px' }}>
+        <SectionLabel>🌍 World</SectionLabel>
         {brief.world.map((story, i) => (
-          <StoryCard key={i} story={story} index={i} />
+          <StoryCard key={i} story={story} />
         ))}
       </div>
 
       {/* India */}
-      <div style={{ paddingTop: '24px', marginBottom: '8px' }}>
-        <SectionLabel>🇮🇳 INDIA</SectionLabel>
+      <div style={{ paddingTop: '28px', marginBottom: '8px' }}>
+        <SectionLabel>🇮🇳 India</SectionLabel>
         {brief.india.map((story, i) => (
-          <StoryCard key={i} story={story} index={i} />
+          <StoryCard key={i} story={story} />
         ))}
       </div>
 
       {/* Markets */}
-      <div style={{ paddingTop: '24px', marginBottom: '8px' }}>
-        <SectionLabel>📈 MARKETS</SectionLabel>
+      <div style={{ paddingTop: '28px', marginBottom: '8px' }}>
+        <SectionLabel>📈 Markets</SectionLabel>
         <div style={{
           display: 'grid',
           gridTemplateColumns: '1fr 1fr',
           gap: '8px',
-          marginBottom: '14px',
+          margin: '16px 0',
         }}>
           {brief.markets.indices.map((idx) => (
             <div key={idx.name} style={{
               background: '#FDFCF9',
               border: '1px solid #E2DBD0',
-              padding: '10px 12px',
+              padding: '12px 14px',
             }}>
               <div style={{
                 fontFamily: "'DM Mono', monospace",
-                fontSize: '8px',
+                fontSize: '10px',
                 letterSpacing: '1px',
                 color: '#888',
-                marginBottom: '4px',
+                marginBottom: '6px',
               }}>{idx.name}</div>
               <div style={{
                 fontFamily: "'DM Mono', monospace",
-                fontSize: '15px',
+                fontSize: '17px',
                 fontWeight: '700',
                 color: marketColor(idx.change),
               }}>{idx.change}</div>
@@ -254,21 +248,21 @@ function BriefRenderer({ brief }: { brief: BriefContent }) {
         </div>
         <div style={{
           fontFamily: "'DM Sans', sans-serif",
-          fontSize: '13px',
-          color: '#555',
-          lineHeight: '1.65',
+          fontSize: '15px',
+          color: '#333',
+          lineHeight: '1.75',
         }}>{brief.markets.summary}</div>
       </div>
 
       {/* Sport */}
-      <div style={{ paddingTop: '24px', marginBottom: '8px' }}>
-        <SectionLabel>🏏 SPORT</SectionLabel>
+      <div style={{ paddingTop: '28px', marginBottom: '8px' }}>
+        <SectionLabel>🏏 Sport</SectionLabel>
         <StoryCard story={brief.sport} />
       </div>
 
       {/* Culture */}
-      <div style={{ paddingTop: '24px' }}>
-        <SectionLabel>🎭 CULTURE</SectionLabel>
+      <div style={{ paddingTop: '28px' }}>
+        <SectionLabel>🎭 Culture</SectionLabel>
         <StoryCard story={brief.culture} />
       </div>
 
@@ -293,11 +287,9 @@ export default function BriefPage() {
 
   useEffect(() => {
     const load = async () => {
-      // Auth check
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) { router.push('/login'); return }
 
-      // Load profile
       const { data: profileData } = await supabase
         .from('profiles')
         .select('*')
@@ -305,15 +297,13 @@ export default function BriefPage() {
         .single()
       setProfile(profileData)
 
-      // Set default edition from profile preference
       if (profileData?.edition_preference) {
-        const pref = profileData.edition_preference
+        const pref = profileData.edition_preference as string
         if (pref === '5min' || pref === '10min' || pref === 'deep') {
-          setActiveEdition(pref)
+          setActiveEdition(pref as '5min' | '10min' | 'deep')
         }
       }
 
-      // Load today's briefs
       const { data: briefData } = await supabase
         .from('briefs')
         .select('edition, content')
@@ -375,24 +365,24 @@ export default function BriefPage() {
       }}>
         <div style={{
           fontFamily: "'DM Mono', monospace",
-          fontSize: '8px',
+          fontSize: '10px',
           letterSpacing: '2px',
-          color: '#555',
-          marginBottom: '2px',
+          color: '#666',
+          marginBottom: '3px',
         }}>{today.toUpperCase()}</div>
         {profile && (
           <div style={{
             fontFamily: "'DM Mono', monospace",
-            fontSize: '8px',
+            fontSize: '9px',
             letterSpacing: '1px',
-            color: '#444',
+            color: '#555',
           }}>
             {profile.city_current?.toUpperCase()} · {profile.profession?.toUpperCase()}
           </div>
         )}
       </div>
 
-      {/* Edition tabs — only show if briefs exist */}
+      {/* Edition tabs */}
       {hasBriefs && (
         <div style={{
           background: '#1A1A1A',
@@ -424,7 +414,7 @@ export default function BriefPage() {
         )}
       </div>
 
-      {/* Bottom nav */}
+      {/* Bottom nav — Habits removed until built */}
       <div style={{
         position: 'fixed',
         bottom: 0, left: 0, right: 0,
@@ -435,7 +425,6 @@ export default function BriefPage() {
       }}>
         {[
           { href: '/home', label: 'Brief', icon: '◆', active: true },
-          { href: '/habits', label: 'Habits', icon: '◎', active: false },
           { href: '/bookmarks', label: 'Saved', icon: '◈', active: false },
           { href: '/profile', label: 'Profile', icon: '◑', active: false },
         ].map(({ href, label, icon, active }) => (
