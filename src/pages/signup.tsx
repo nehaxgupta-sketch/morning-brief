@@ -21,10 +21,23 @@ export default function Signup() {
     if (!email.trim()) { setError('Please enter your email'); return }
     if (password.length < 8) { setError('Password must be at least 8 characters'); return }
     setLoading(true); setError('')
-    const { data, error } = await supabase.auth.signUp({ email: email.trim(), password, options: { data: { full_name: name.trim() }, emailRedirectTo: `${window.location.origin}/onboarding` } })
+    const { data, error } = await supabase.auth.signUp({
+      email: email.trim(),
+      password,
+      options: {
+        data: { full_name: name.trim() },
+        emailRedirectTo: `${window.location.origin}/onboarding`
+      }
+    })
     if (error) { setError(error.message); setLoading(false); return }
     if (data.user) {
-      await supabase.from('profiles').upsert({ id: data.user.id, email: email.trim(), full_name: name.trim() })
+      // Write name to both auth metadata AND profiles table
+      // The double-write ensures name persists regardless of email verification timing
+      await supabase.auth.updateUser({ data: { full_name: name.trim() } })
+      await supabase.from('profiles').upsert(
+        { id: data.user.id, email: email.trim(), full_name: name.trim(), updated_at: new Date().toISOString() },
+        { onConflict: 'id' }
+      )
       setStage('verify')
     }
     setLoading(false)
@@ -90,4 +103,4 @@ export default function Signup() {
       </div>
     </div>
   )
-} 
+}

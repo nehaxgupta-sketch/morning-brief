@@ -1,4 +1,4 @@
- import { useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useRouter } from 'next/router'
 import Link from 'next/link'
 import { supabase, Profile } from '@/lib/supabase'
@@ -9,7 +9,7 @@ export default function ProfilePage() {
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [mood, setMood] = useState('neutral')
-  const [edition, setEdition] = useState('standard')
+  const [edition, setEdition] = useState('5min')
   const [signingOut, setSigningOut] = useState(false)
 
   useEffect(() => {
@@ -20,7 +20,11 @@ export default function ProfilePage() {
       if (data) {
         setProfile(data)
         setMood(data.mood_preference || 'neutral')
-        setEdition(data.edition_preference || 'standard')
+        // Normalise any legacy values to the correct IDs
+        const pref = data.edition_preference
+        if (pref === 'ultra' || pref === '5min') setEdition('5min')
+        else if (pref === 'deep') setEdition('deep')
+        else setEdition('10min')
       }
     }
     load()
@@ -32,7 +36,7 @@ export default function ProfilePage() {
     if (!user) return
     await supabase.from('profiles').update({
       mood_preference: mood,
-      edition_preference: edition,
+      edition_preference: edition,   // saves '5min', '10min', or 'deep' — always correct
       updated_at: new Date().toISOString()
     }).eq('id', user.id)
     setSaving(false)
@@ -195,8 +199,8 @@ export default function ProfilePage() {
             <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '9px', letterSpacing: '1px', color: '#aaa', marginBottom: '10px' }}>DEFAULT DEPTH</div>
             <div style={{ display: 'flex', gap: '8px' }}>
               {[
-                { id: 'ultra', label: '5 Min' },
-                { id: 'standard', label: '10 Min' },
+                { id: '5min', label: '5 Min' },
+                { id: '10min', label: '10 Min' },
                 { id: 'deep', label: 'Deep' }
               ].map(e => (
                 <button key={e.id} onClick={() => setEdition(e.id)} style={{
@@ -260,7 +264,7 @@ export default function ProfilePage() {
         </button>
       </div>
 
-      {/* Bottom nav */}
+      {/* Bottom nav — Brief / Saved / Profile */}
       <div style={{
         position: 'fixed', bottom: 0, left: 0, right: 0,
         background: '#1A1A1A', borderTop: '1px solid #2A2A2A',
@@ -268,8 +272,9 @@ export default function ProfilePage() {
         paddingBottom: 'env(safe-area-inset-bottom)'
       }}>
         {[
-          { href: '/home', label: 'Brief', icon: '◆', active: false },
-          { href: '/profile', label: 'Profile', icon: '◑', active: true },
+          { href: '/home',      label: 'Brief',   icon: '◆', active: false },
+          { href: '/bookmarks', label: 'Saved',   icon: '★', active: false },
+          { href: '/profile',   label: 'Profile', icon: '◑', active: true  },
         ].map(({ href, label, icon, active }) => (
           <Link key={href} href={href} style={{
             flex: 1, display: 'flex', flexDirection: 'column',
