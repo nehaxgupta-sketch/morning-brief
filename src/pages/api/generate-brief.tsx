@@ -64,6 +64,12 @@ interface WrittenStory {
   source_url: string;
 }
 
+interface Closer {
+  headlines_to_remember: string[];  // 5
+  things_to_watch: string[];        // 3
+  conversation_insight: string;     // 1
+}
+
 interface BriefContent {
   edition: Edition;
   date: string;
@@ -77,6 +83,7 @@ interface BriefContent {
   climate_health: WrittenStory[];
   sport: WrittenStory;
   culture: WrittenStory;
+  closer?: Closer;
 }
 
 // ─── Zod schemas ────────────────────────────────────────────────────────────
@@ -98,6 +105,13 @@ const MarketIndexSchema = z.object({
   change: z.string().min(1),
 });
 
+// Closer sections (only on 10min and deep editions; 5min stays skimmable)
+const CloserSchema = z.object({
+  headlines_to_remember: z.array(z.string().min(5)).length(5),
+  things_to_watch: z.array(z.string().min(5)).length(3),
+  conversation_insight: z.string().min(20),
+});
+
 const BriefContentSchema = z.object({
   edition: z.enum(['5min', '10min', 'deep']),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -114,7 +128,11 @@ const BriefContentSchema = z.object({
   }),
   sport: StorySchema,
   culture: StorySchema,
-});
+  closer: CloserSchema.optional(),
+}).refine(
+  (b) => b.edition === '5min' || b.closer !== undefined,
+  { message: 'closer is required for 10min and deep editions', path: ['closer'] }
+);
 
 // ─── Edition configuration ──────────────────────────────────────────────────
 
@@ -124,6 +142,7 @@ interface EditionConfig {
   selectionRules: string;
   depthRules: string;
   marketsRules: string;
+  closerRules: string;       // empty string = no closer for this edition
   readingTime: string;
 }
 
@@ -152,6 +171,8 @@ DEPTH:
 - Headlines stay clear and factual — no clickbait.`,
     marketsRules: `
 MARKETS: 1 sentence summary capturing the day's direction.`,
+    closerRules: `
+CLOSER: Do NOT include a closer for the 5-minute edition. Omit the "closer" field from the JSON entirely.`,
   },
 
   '10min': {
@@ -168,6 +189,11 @@ DEPTH:
 - Avoid generic filler. Be specific.`,
     marketsRules: `
 MARKETS: 2 sentences. First the numbers/direction, second a brief explanation of what's driving the moves.`,
+    closerRules: `
+CLOSER: Include a "closer" object at the end with three fields:
+- "headlines_to_remember": EXACTLY 5 single-line memory anchors covering today's most important stories. Each one short, factual, scannable.
+- "things_to_watch": EXACTLY 3 forward-looking developments to track over the coming week. Each one a single sentence.
+- "conversation_insight": ONE sharp, intelligent observation a reader could naturally bring up in conversation — a synthesis or pattern across today's stories, not a restated headline. Two to three sentences. Insightful, not gimmicky.`,
   },
 
   'deep': {
@@ -186,6 +212,11 @@ DEPTH (this is the analytical edition — depth and synthesis matter):
 - Tone: like an Economist briefing or an FT lex column. Intelligent, calm, sharp. Never academic, never sensational.`,
     marketsRules: `
 MARKETS: 3 to 4 sentences with genuine analysis. Cover the numbers, the drivers, and what they signal about broader sentiment or upcoming events.`,
+    closerRules: `
+CLOSER: Include a "closer" object at the end with three fields:
+- "headlines_to_remember": EXACTLY 5 single-line memory anchors covering today's most important stories. Each one short, factual, scannable.
+- "things_to_watch": EXACTLY 3 forward-looking developments to track over the coming week. Each one a single sentence with a brief reason it matters.
+- "conversation_insight": ONE sharp, analytical observation a reader could bring up in informed conversation — a genuine synthesis or pattern across today's news, drawing connections others might miss. Three to four sentences. Should feel like an FT or Economist editor's note, not a recap.`,
   },
 };
 
@@ -328,6 +359,8 @@ ${config.depthRules}
 
 ${config.marketsRules}
 
+${config.closerRules}
+
 Here are today's raw stories. Rewrite the selected stories in the Morning Brief voice following the rules above. Return ONLY a JSON object — no markdown, no backticks, no extra text.
 
 Raw stories:
@@ -369,14 +402,21 @@ Return this exact JSON structure:
     { "headline": "...", "body": "...", "source": "...", "source_url": "..." }
   ],
   "sport": { "headline": "...", "body": "...", "source": "...", "source_url": "..." },
-  "culture": { "headline": "...", "body": "...", "source": "...", "source_url": "..." }
+  "culture": { "headline": "...", "body": "...", "source": "...", "source_url": "..." }${edition === '5min' ? '' : `,
+  "closer": {
+    "headlines_to_remember": ["...", "...", "...", "...", "..."],
+    "things_to_watch": ["...", "...", "..."],
+    "conversation_insight": "..."
+  }`}
 }
 
 CRITICAL:
 - Follow the SELECTION rules for this edition — for 5min, drop stories; for 10min and deep, include every raw story.
 - Carry source and source_url through unchanged from the raw data.
 - Keep markets indices values exactly as in raw data.
-- Only rewrite headline, body, and markets summary.`;
+- Only rewrite headline, body, and markets summary.
+- For 5min: do NOT include a "closer" field.
+- For 10min and deep: the "closer" field is REQUIRED, with exactly 5 headlines_to_remember and exactly 3 things_to_watch.`;
 
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',

@@ -17,6 +17,12 @@ interface MarketIndex {
   change: string
 }
 
+interface Closer {
+  headlines_to_remember: string[]
+  things_to_watch: string[]
+  conversation_insight: string
+}
+
 interface BriefContent {
   edition: string
   date: string
@@ -33,6 +39,7 @@ interface BriefContent {
   }
   sport: Story
   culture: Story
+  closer?: Closer
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -475,6 +482,100 @@ function BriefRenderer({
             {section.kind === 'markets' && renderMarkets()}
           </div>
         ))}
+
+        {brief.closer && <CloserBlock closer={brief.closer} />}
+      </div>
+    </div>
+  )
+}
+
+// ─── Closer block ────────────────────────────────────────────────────────────
+// Renders the "Before you close" section: 5 headlines to remember,
+// 3 things to watch this week, 1 conversation-worthy insight.
+
+function CloserBlock({ closer }: { closer: Closer }) {
+  return (
+    <div style={{ paddingTop: '56px', marginTop: '24px', borderTop: '1px solid #2A2A2A' }}>
+      <div style={{
+        fontFamily: "'DM Mono', monospace",
+        fontSize: '10px',
+        letterSpacing: '2px',
+        color: '#C8A45A',
+        marginBottom: '24px',
+      }}>BEFORE YOU CLOSE</div>
+
+      {/* 5 headlines to remember */}
+      <div style={{ marginBottom: '36px' }}>
+        <div style={{
+          fontFamily: "'Playfair Display', Georgia, serif",
+          fontSize: '20px',
+          fontWeight: '700',
+          color: '#F5F1EA',
+          marginBottom: '14px',
+        }}>5 headlines to remember today</div>
+        {closer.headlines_to_remember.map((line, i) => (
+          <div key={i} style={{
+            display: 'flex',
+            gap: '12px',
+            padding: '10px 0',
+            borderBottom: '1px solid #222',
+            fontFamily: "'DM Sans', sans-serif",
+            fontSize: '15px',
+            color: '#C0B9AF',
+            lineHeight: '1.55',
+          }}>
+            <span style={{ color: '#C8A45A', fontWeight: '700', minWidth: '20px' }}>{i + 1}.</span>
+            <span>{line}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* 3 things to watch */}
+      <div style={{ marginBottom: '36px' }}>
+        <div style={{
+          fontFamily: "'Playfair Display', Georgia, serif",
+          fontSize: '20px',
+          fontWeight: '700',
+          color: '#F5F1EA',
+          marginBottom: '14px',
+        }}>3 things to watch this week</div>
+        {closer.things_to_watch.map((line, i) => (
+          <div key={i} style={{
+            padding: '10px 0',
+            borderBottom: '1px solid #222',
+            fontFamily: "'DM Sans', sans-serif",
+            fontSize: '15px',
+            color: '#C0B9AF',
+            lineHeight: '1.6',
+          }}>
+            <span style={{ color: '#C8A45A', marginRight: '8px' }}>→</span>
+            {line}
+          </div>
+        ))}
+      </div>
+
+      {/* 1 conversation insight */}
+      <div style={{
+        background: '#1E1E1E',
+        border: '1px solid #2A2A2A',
+        borderLeft: '3px solid #C8A45A',
+        padding: '20px',
+        marginBottom: '20px',
+      }}>
+        <div style={{
+          fontFamily: "'DM Mono', monospace",
+          fontSize: '10px',
+          letterSpacing: '1.5px',
+          color: '#C8A45A',
+          marginBottom: '10px',
+        }}>ONE INSIGHT WORTH SHARING</div>
+        <div style={{
+          fontFamily: "'Playfair Display', Georgia, serif",
+          fontSize: '17px',
+          fontStyle: 'italic',
+          color: '#F5F1EA',
+          lineHeight: '1.6',
+        }}>{closer.conversation_insight}</div>
       </div>
     </div>
   )
