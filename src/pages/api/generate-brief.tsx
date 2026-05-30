@@ -2,6 +2,10 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { createClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 
+// Give the function the full Hobby-plan budget. With editions running in
+// parallel below, total wall-time is ~max(OpenAI, Claude) ≈ 30-45s, well under 60.
+export const config = { maxDuration: 60 };
+
 // ─── Clients ────────────────────────────────────────────────────────────────
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -535,6 +539,60 @@ async function sendPushNotification(topHeadline: string) {
   return data;
 }
 
+// ─── Per-edition processor ──────────────────────────────────────────────────
+// Runs the full save path for one edition. If rawStories is null (OpenAI
+// failed earlier), goes straight to yesterday's brief instead of calling Claude.
+
+type EditionOutcome = {
+  status: 'ready' | 'fallback' | 'failed';
+  reason?: string;
+  content?: BriefContent;
+};
+
+async function processEdition(
+  ed: Edition,
+  rawStories: RawStories | null
+): Promise<EditionOutcome> {
+  // No fresh stories → straight to fallback.
+  if (!rawStories) {
+    const previous = await fetchPreviousBrief(ed);
+    if (previous) {
+      await saveBriefToSupabase(ed, null, previous, 'fallback');
+      return { status: 'fallback', reason: 'OpenAI fetch failed', content: previous };
+    }
+    await saveBriefToSupabase(ed, null, null, 'failed');
+    return { status: 'failed', reason: 'OpenAI fetch failed and no previous brief' };
+  }
+
+  try {
+    console.log(`Writing ${ed}...`);
+    const content = await writeBriefWithClaude(rawStories, ed);
+
+    const validation = validateBrief(content, ed);
+    if (validation.ok) {
+      await saveBriefToSupabase(ed, rawStories, validation.data, 'ready');
+      return { status: 'ready', content: validation.data };
+    }
+
+    const previous = await fetchPreviousBrief(ed);
+    if (previous) {
+      await saveBriefToSupabase(ed, rawStories, previous, 'fallback');
+      return { status: 'fallback', reason: validation.errors, content: previous };
+    }
+    await saveBriefToSupabase(ed, rawStories, null, 'failed');
+    return { status: 'failed', reason: validation.errors };
+  } catch (err: any) {
+    console.error(`Error writing ${ed}:`, err.message);
+    const previous = await fetchPreviousBrief(ed);
+    if (previous) {
+      await saveBriefToSupabase(ed, rawStories, previous, 'fallback');
+      return { status: 'fallback', reason: err.message, content: previous };
+    }
+    await saveBriefToSupabase(ed, rawStories, null, 'failed');
+    return { status: 'failed', reason: err.message };
+  }
+}
+
 // ─── Handler ─────────────────────────────────────────────────────────────────
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -546,57 +604,45 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const results: Record<string, { status: string; reason?: string }> = {};
 
   try {
-    console.log('Fetching news from OpenAI...');
-    const rawStories = await fetchNewsFromOpenAI();
-    console.log('News fetched.');
-
-    const writtenBriefs: Record<string, BriefContent> = {};
-
-    for (const ed of editions) {
-      try {
-        console.log(`Writing ${ed}...`);
-        const content = await writeBriefWithClaude(rawStories, ed);
-
-        const validation = validateBrief(content, ed);
-        if (validation.ok) {
-          await saveBriefToSupabase(ed, rawStories, validation.data, 'ready');
-          writtenBriefs[ed] = validation.data;
-          results[ed] = { status: 'ready' };
-        } else {
-          // Validation failed — fall back to yesterday
-          const previous = await fetchPreviousBrief(ed);
-          if (previous) {
-            await saveBriefToSupabase(ed, rawStories, previous, 'fallback');
-            writtenBriefs[ed] = previous;
-            results[ed] = { status: 'fallback', reason: validation.errors };
-          } else {
-            await saveBriefToSupabase(ed, rawStories, null, 'failed');
-            results[ed] = { status: 'failed', reason: validation.errors };
-          }
-        }
-      } catch (err: any) {
-        console.error(`Error writing ${ed}:`, err.message);
-        // Same fallback path on any per-edition exception
-        const previous = await fetchPreviousBrief(ed);
-        if (previous) {
-          await saveBriefToSupabase(ed, rawStories, previous, 'fallback');
-          writtenBriefs[ed] = previous;
-          results[ed] = { status: 'fallback', reason: err.message };
-        } else {
-          await saveBriefToSupabase(ed, rawStories, null, 'failed');
-          results[ed] = { status: 'failed', reason: err.message };
-        }
-      }
+    // Step 1: fetch news. If OpenAI throws, we still serve yesterday's briefs
+    // instead of returning a 500 with nothing saved.
+    let rawStories: RawStories | null = null;
+    try {
+      console.log('Fetching news from OpenAI...');
+      rawStories = await fetchNewsFromOpenAI();
+      console.log('News fetched.');
+    } catch (err: any) {
+      console.error('OpenAI fetch failed:', err.message);
     }
 
-    // Send push only if at least one edition is fresh-ready (not a fallback)
-    const anyFresh = Object.values(results).some(r => r.status === 'ready');
+    // Step 2: process all editions IN PARALLEL.
+    // Sequential was ~70-135s and tripped Vercel's 60s maxDuration on Hobby.
+    // Parallel total ≈ max(any single edition) ≈ 30-45s, comfortably under.
+    const writtenBriefs: Record<string, BriefContent> = {};
+    const editionPairs = await Promise.all(
+      editions.map(async (ed) => {
+        const r = await processEdition(ed, rawStories);
+        if (r.content) writtenBriefs[ed] = r.content;
+        const { content, ...rest } = r;
+        return [ed, rest] as const;
+      })
+    );
+    for (const [ed, r] of editionPairs) results[ed] = r;
+
+    // Step 3: push only if at least one edition is fresh-ready.
+    const anyFresh = Object.values(results).some((r) => r.status === 'ready');
 
     if (!skipPush && anyFresh) {
-      const topHeadline = writtenBriefs['5min']?.world?.[0]?.headline
-        ?? writtenBriefs['10min']?.world?.[0]?.headline
-        ?? 'Today\'s stories are waiting for you.';
-      await sendPushNotification(topHeadline);
+      const topHeadline =
+        writtenBriefs['5min']?.world?.[0]?.headline ??
+        writtenBriefs['10min']?.world?.[0]?.headline ??
+        "Today's stories are waiting for you.";
+      try {
+        await sendPushNotification(topHeadline);
+      } catch (err: any) {
+        // A OneSignal hiccup shouldn't take down the whole job — briefs are already saved.
+        console.error('Push failed (briefs already saved):', err.message);
+      }
     } else if (!skipPush && !anyFresh) {
       console.log('Push skipped — no fresh briefs today (all fallbacks or failed)');
     } else {
@@ -604,7 +650,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     return res.status(200).json({ success: true, editions, results });
-
   } catch (error: any) {
     console.error('Top-level error:', error.message);
     return res.status(500).json({ success: false, error: error.message, results });
