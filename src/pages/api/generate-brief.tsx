@@ -297,8 +297,8 @@ async function loadPersonalisationUniverse(): Promise<Universe> {
     }
   }
   return {
-    industries: [...industries].sort(),
-    interests: [...interests].sort(),
+    industries: Array.from(industries).sort(),
+    interests: Array.from(interests).sort(),
   };
 }
 
