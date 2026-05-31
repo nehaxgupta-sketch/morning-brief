@@ -1,9 +1,21 @@
+// src/pages/api/generate-brief.tsx
+//
+// Daily brief generator. Sprint 7a architecture:
+//   1. Read personalisation universe (unique industries + interests from
+//      profiles where brief_type = 'personalised') BEFORE fetching news,
+//      so OpenAI can tag stories with applicable industries/interests.
+//   2. OpenAI universal fetch — fixed sections only (no city sections).
+//      Includes the new "major_events" section (sustained / trending themes).
+//   3. Claude writes 3 editions in parallel from the same raw stories.
+//   4. Validate (Zod) → save to briefs → push.
+//
+// City news no longer lives here — that moves into personalise-briefs.tsx,
+// where it's fetched per unique city once per run.
+
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { createClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 
-// Give the function the full Hobby-plan budget. With editions running in
-// parallel below, total wall-time is ~max(OpenAI, Claude) ≈ 30-45s, well under 60.
 export const config = { maxDuration: 60 };
 
 // ─── Clients ────────────────────────────────────────────────────────────────
@@ -19,8 +31,6 @@ const supabase = createClient(
 );
 
 // ─── Date helpers (IST) ─────────────────────────────────────────────────────
-// Vercel runs in UTC. We want the brief's date to be "today in India" because
-// the cron fires at 6:45 AM IST and users read it as their morning paper.
 
 function getISTDate(offsetDays = 0): string {
   const now = new Date();
@@ -38,6 +48,8 @@ interface Story {
   source: string;
   source_url: string;
   published_at: string;
+  industries?: string[];
+  interests?: string[];
 }
 
 interface MarketIndex {
@@ -46,14 +58,10 @@ interface MarketIndex {
 }
 
 interface RawStories {
+  major_events: Story[];     // NEW — sustained / trending themes
   world: Story[];
   india: Story[];
-  bengaluru: Story[];
-  delhi: Story[];
-  markets: {
-    summary: string;
-    indices: MarketIndex[];
-  };
+  markets: { summary: string; indices: MarketIndex[] };
   business: Story[];
   technology: Story[];
   climate_health: Story[];
@@ -66,6 +74,8 @@ interface WrittenStory {
   body: string;
   source: string;
   source_url: string;
+  industries?: string[];
+  interests?: string[];
 }
 
 interface Closer {
@@ -77,31 +87,30 @@ interface Closer {
 interface BriefContent {
   edition: Edition;
   date: string;
+  major_events: WrittenStory[];   // NEW
   world: WrittenStory[];
   india: WrittenStory[];
-  bengaluru: WrittenStory[];
-  delhi: WrittenStory[];
   markets: { summary: string; indices: MarketIndex[] };
   business: WrittenStory[];
   technology: WrittenStory[];
   climate_health: WrittenStory[];
   sport: WrittenStory;
   culture: WrittenStory;
+  // Legacy fields — accepted from very old saved briefs but not written by 7a:
+  bengaluru?: WrittenStory[];
+  delhi?: WrittenStory[];
   closer?: Closer;
 }
 
 // ─── Zod schemas ────────────────────────────────────────────────────────────
-// These guard against malformed AI output. A brief that fails this schema is
-// not allowed to overwrite today's row — we fall back to yesterday's brief.
 
 const StorySchema = z.object({
   headline: z.string().min(5).max(200),
   body: z.string().min(20),
   source: z.string().min(1),
-  source_url: z.union([
-    z.string().startsWith('https://'),
-    z.literal(''),
-  ]),
+  source_url: z.union([z.string().startsWith('https://'), z.literal('')]),
+  industries: z.array(z.string()).optional(),
+  interests: z.array(z.string()).optional(),
 });
 
 const MarketIndexSchema = z.object({
@@ -109,7 +118,6 @@ const MarketIndexSchema = z.object({
   change: z.string().min(1),
 });
 
-// Closer sections (only on 10min and deep editions; 5min stays skimmable)
 const CloserSchema = z.object({
   headlines_to_remember: z.array(z.string().min(5)).length(5),
   things_to_watch: z.array(z.string().min(5)).length(3),
@@ -119,19 +127,21 @@ const CloserSchema = z.object({
 const BriefContentSchema = z.object({
   edition: z.enum(['5min', '10min', 'deep']),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  major_events: z.array(StorySchema).min(1),
   world: z.array(StorySchema).min(1),
   india: z.array(StorySchema).min(1),
-  bengaluru: z.array(StorySchema),         // may be empty
-  delhi: z.array(StorySchema),             // may be empty
   business: z.array(StorySchema).min(1),
   technology: z.array(StorySchema).min(1),
-  climate_health: z.array(StorySchema),    // may be empty
+  climate_health: z.array(StorySchema),
   markets: z.object({
     summary: z.string().min(10),
     indices: z.array(MarketIndexSchema).length(4),
   }),
   sport: StorySchema,
   culture: StorySchema,
+  // Tolerated but not required for new writes:
+  bengaluru: z.array(StorySchema).optional(),
+  delhi: z.array(StorySchema).optional(),
   closer: CloserSchema.optional(),
 }).refine(
   (b) => b.edition === '5min' || b.closer !== undefined,
@@ -146,7 +156,7 @@ interface EditionConfig {
   selectionRules: string;
   depthRules: string;
   marketsRules: string;
-  closerRules: string;       // empty string = no closer for this edition
+  closerRules: string;
   readingTime: string;
 }
 
@@ -157,17 +167,16 @@ const EDITION_CONFIG: Record<Edition, EditionConfig> = {
     readingTime: '5 minutes',
     selectionRules: `
 SELECTION (this is the skimmable edition — be ruthless):
-- world: keep TOP 3 most consequential stories only. Drop the rest.
-- india: keep TOP 2 most consequential stories only.
-- bengaluru: keep TOP 1 if any exist, else empty array.
-- delhi: keep TOP 1 if any exist, else empty array.
+- major_events: keep TOP 2 most significant ongoing themes.
+- world: keep TOP 3 most consequential stories.
+- india: keep TOP 2 most consequential stories.
 - business: keep TOP 2.
 - technology: keep TOP 1.
 - climate_health: keep TOP 1.
-- sport: keep as single story (it's already one).
-- culture: keep as single story (it's already one).
+- sport: keep as single story.
+- culture: keep as single story.
 - markets: keep all 4 indices, summary becomes 1 punchy sentence.
-Total target: ~10 stories. A reader skimming on their commute should finish in 5 minutes.`,
+Total target: ~12 stories. A reader skimming on their commute should finish in 5 minutes.`,
     depthRules: `
 DEPTH:
 - 2 short sentences per story. Punchy. Essential facts only.
@@ -230,7 +239,6 @@ function extractJsonObject(text: string): any {
   const cleaned = text.replace(/```json|```/g, '').trim();
   const start = cleaned.indexOf('{');
   if (start === -1) throw new Error('No JSON object found in response');
-
   let depth = 0, inString = false, escape = false, end = -1;
   for (let i = start; i < cleaned.length; i++) {
     const ch = cleaned[i];
@@ -244,7 +252,6 @@ function extractJsonObject(text: string): any {
       if (depth === 0) { end = i; break; }
     }
   }
-
   if (end === -1) {
     throw new Error(`JSON truncated. Length=${cleaned.length}, last 200: ${cleaned.slice(-200)}`);
   }
@@ -256,46 +263,96 @@ function extractJsonObject(text: string): any {
   }
 }
 
+// ─── Step 1: Build personalisation universe ─────────────────────────────────
+// Read every personalised user's industry + interests so OpenAI can tag stories
+// against that exact vocabulary. If the universe is empty (no personalised
+// users yet), we skip tagging entirely — that's fine, the rest still works.
+
+interface Universe {
+  industries: string[];
+  interests: string[];
+}
+
+async function loadPersonalisationUniverse(): Promise<Universe> {
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('industry, interests')
+    .eq('brief_type', 'personalised');
+
+  if (error) {
+    console.warn('Personalisation universe lookup failed:', error.message);
+    return { industries: [], interests: [] };
+  }
+
+  const industries = new Set<string>();
+  const interests = new Set<string>();
+  for (const row of data || []) {
+    const ind = (row as any).industry;
+    const ints = (row as any).interests;
+    if (ind && typeof ind === 'string' && ind.trim()) industries.add(ind.trim());
+    if (Array.isArray(ints)) {
+      for (const i of ints) {
+        if (typeof i === 'string' && i.trim()) interests.add(i.trim());
+      }
+    }
+  }
+  return {
+    industries: [...industries].sort(),
+    interests: [...interests].sort(),
+  };
+}
+
 // ─── Step 2: Fetch news via OpenAI ──────────────────────────────────────────
 
-async function fetchNewsFromOpenAI(): Promise<RawStories> {
+async function fetchNewsFromOpenAI(universe: Universe): Promise<RawStories> {
   const today = getISTDate();
+
+  const taggingBlock = (universe.industries.length || universe.interests.length)
+    ? `
+TAGGING (for downstream personalisation):
+For each story, add two OPTIONAL arrays:
+- "industries": pick zero or more from this vocabulary that the story is materially relevant to. Vocabulary: ${JSON.stringify(universe.industries)}
+- "interests": pick zero or more from this vocabulary the story is materially relevant to. Vocabulary: ${JSON.stringify(universe.interests)}
+Rules:
+- Only tag a story if relevance is real and direct. Better to leave both arrays empty than to over-tag.
+- Use the EXACT spelling from the vocabulary above (case-sensitive).
+- Sport, culture, and markets do not need tags — leave them empty arrays or omit.`
+    : `
+TAGGING: No personalisation vocabulary defined yet. Skip the "industries" and "interests" fields entirely.`;
 
   const prompt = `You are a news editor for an India-based daily brief. Search the web for today's (${today}) most consequential stories across the categories below. Return ONLY a JSON object — no markdown, no backticks, no commentary.
 
-For EVERY story, you MUST include:
+For EVERY story you MUST include:
 - "headline": clear, factual headline (max 120 chars)
 - "body": 2-3 sentence factual summary
 - "source": publication name only (e.g. "Reuters", "The Hindu")
 - "source_url": full direct URL to the actual article (must start with https://, real working link to the specific story)
 - "published_at": ISO date or datetime if available, otherwise today's date (${today})
+${taggingBlock}
 
 Rules:
 - You MUST use the web_search_preview tool to find each story. Do not write any story from memory. If web search does not return a real article for a category, omit that story.
 - Use only real stories from the last 24-36 hours. Prefer original publishers (Reuters, AP, Bloomberg, The Hindu, Indian Express, BBC, FT) over aggregators.
 - Try to use distinct URLs for distinct stories where possible.
 - Be factual and neutral. No opinion.
-- For Bengaluru and Delhi, only include stories if there is genuine material news. Returning fewer stories than the target is OK.
 - Keep each body to 2-3 sentences. Do not exceed.
-- IMPORTANT: Order stories within each array by consequence — most important first. The downstream 5-minute edition will only keep the top 1-3 per section, so the most important story must be at index 0.
+- IMPORTANT: Order stories within each array by consequence — most important first. The downstream 5-minute edition only keeps the top 1-3 per section, so the most important story must be at index 0.
+
+SECTION DEFINITIONS — read carefully, they are different:
+- "major_events": 2 to 4 stories representing SUSTAINED OR TRENDING themes — multi-day developments, ongoing series, or dominant narratives that continue to shape the news cycle this week. Examples: an ongoing IPL or election series, a multi-week geopolitical situation (e.g. ongoing war, summit aftermath), a sustained cultural or social movement. These are DISTINCT from World/India which capture 24-hour breaking news. Do not duplicate World/India headlines here.
+- "world": 5 stories of 24-hour global news — wars, diplomacy, elections, global economy, major incidents.
+- "india": 5 stories of 24-hour national news — politics, policy, regulation, courts, governance. SIGNIFICANT city-level stories (Bengaluru airport, Mumbai bank fraud, Delhi smog policy) BELONG HERE, not in their own section.
 
 Return this exact structure:
 {
+  "major_events": [
+    { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "...", "industries": [], "interests": [] }
+  ],
   "world": [
-    { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
-    // 5 stories: wars, diplomacy, elections, global economy, major incidents
+    { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "...", "industries": [], "interests": [] }
   ],
   "india": [
-    { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
-    // 5 stories: politics, policy, regulation, courts, governance
-  ],
-  "bengaluru": [
-    { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
-    // 0-3 stories
-  ],
-  "delhi": [
-    { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
-    // 0-2 stories
+    { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "...", "industries": [], "interests": [] }
   ],
   "markets": {
     "summary": "2-3 sentence overview of markets today",
@@ -307,16 +364,13 @@ Return this exact structure:
     ]
   },
   "business": [
-    { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
-    // 3 stories
+    { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "...", "industries": [], "interests": [] }
   ],
   "technology": [
-    { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
-    // 2 stories
+    { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "...", "industries": [], "interests": [] }
   ],
   "climate_health": [
-    { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
-    // 1-2 stories
+    { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "...", "industries": [], "interests": [] }
   ],
   "sport": { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." },
   "culture": { "headline": "...", "body": "...", "source": "...", "source_url": "https://...", "published_at": "..." }
@@ -375,17 +429,14 @@ Return this exact JSON structure:
 {
   "edition": "${edition}",
   "date": "${getISTDate()}",
+  "major_events": [
+    { "headline": "...", "body": "...", "source": "...", "source_url": "...", "industries": [], "interests": [] }
+  ],
   "world": [
-    { "headline": "...", "body": "...", "source": "...", "source_url": "..." }
+    { "headline": "...", "body": "...", "source": "...", "source_url": "...", "industries": [], "interests": [] }
   ],
   "india": [
-    { "headline": "...", "body": "...", "source": "...", "source_url": "..." }
-  ],
-  "bengaluru": [
-    { "headline": "...", "body": "...", "source": "...", "source_url": "..." }
-  ],
-  "delhi": [
-    { "headline": "...", "body": "...", "source": "...", "source_url": "..." }
+    { "headline": "...", "body": "...", "source": "...", "source_url": "...", "industries": [], "interests": [] }
   ],
   "markets": {
     "summary": "rewritten markets summary in Morning Brief voice",
@@ -397,13 +448,13 @@ Return this exact JSON structure:
     ]
   },
   "business": [
-    { "headline": "...", "body": "...", "source": "...", "source_url": "..." }
+    { "headline": "...", "body": "...", "source": "...", "source_url": "...", "industries": [], "interests": [] }
   ],
   "technology": [
-    { "headline": "...", "body": "...", "source": "...", "source_url": "..." }
+    { "headline": "...", "body": "...", "source": "...", "source_url": "...", "industries": [], "interests": [] }
   ],
   "climate_health": [
-    { "headline": "...", "body": "...", "source": "...", "source_url": "..." }
+    { "headline": "...", "body": "...", "source": "...", "source_url": "...", "industries": [], "interests": [] }
   ],
   "sport": { "headline": "...", "body": "...", "source": "...", "source_url": "..." },
   "culture": { "headline": "...", "body": "...", "source": "...", "source_url": "..." }${edition === '5min' ? '' : `,
@@ -416,7 +467,7 @@ Return this exact JSON structure:
 
 CRITICAL:
 - Follow the SELECTION rules for this edition — for 5min, drop stories; for 10min and deep, include every raw story.
-- Carry source and source_url through unchanged from the raw data.
+- Carry source, source_url, industries, and interests through unchanged from the raw data for every story you keep.
 - Keep markets indices values exactly as in raw data.
 - Only rewrite headline, body, and markets summary.
 - For 5min: do NOT include a "closer" field.
@@ -432,9 +483,7 @@ CRITICAL:
     body: JSON.stringify({
       model: config.model,
       max_tokens: config.maxTokens,
-      messages: [
-        { role: 'user', content: prompt }
-      ],
+      messages: [{ role: 'user', content: prompt }],
     }),
   });
 
@@ -457,15 +506,12 @@ function validateBrief(content: any, edition: Edition):
   if (result.success) {
     return { ok: true, data: result.data as BriefContent };
   }
-  const errors = result.error.issues
-    .map(i => `${i.path.join('.')}: ${i.message}`)
-    .join('; ');
+  const errors = result.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ');
   console.error(`Validation failed for ${edition}: ${errors}`);
   return { ok: false, errors };
 }
 
 // ─── Fallback fetch ─────────────────────────────────────────────────────────
-// Try yesterday first, then the day before. Returns null if nothing usable.
 
 async function fetchPreviousBrief(edition: Edition): Promise<BriefContent | null> {
   for (let daysAgo = 1; daysAgo <= 2; daysAgo++) {
@@ -486,7 +532,7 @@ async function fetchPreviousBrief(edition: Edition): Promise<BriefContent | null
   return null;
 }
 
-// ─── Step 4: Save to Supabase ────────────────────────────────────────────────
+// ─── Save ────────────────────────────────────────────────────────────────────
 
 async function saveBriefToSupabase(
   edition: Edition,
@@ -495,7 +541,6 @@ async function saveBriefToSupabase(
   status: 'ready' | 'fallback' | 'failed'
 ) {
   const today = getISTDate();
-
   const { error } = await supabase
     .from('briefs')
     .upsert(
@@ -509,12 +554,11 @@ async function saveBriefToSupabase(
       },
       { onConflict: 'date,edition' }
     );
-
   if (error) throw new Error(`Supabase save failed: ${error.message}`);
   console.log(`Brief saved — ${edition} for ${today} (status: ${status})`);
 }
 
-// ─── Step 6: Send OneSignal push notification ────────────────────────────────
+// ─── Push notification ──────────────────────────────────────────────────────
 
 async function sendPushNotification(topHeadline: string) {
   const response = await fetch('https://onesignal.com/api/v1/notifications', {
@@ -540,8 +584,6 @@ async function sendPushNotification(topHeadline: string) {
 }
 
 // ─── Per-edition processor ──────────────────────────────────────────────────
-// Runs the full save path for one edition. If rawStories is null (OpenAI
-// failed earlier), goes straight to yesterday's brief instead of calling Claude.
 
 type EditionOutcome = {
   status: 'ready' | 'fallback' | 'failed';
@@ -553,7 +595,6 @@ async function processEdition(
   ed: Edition,
   rawStories: RawStories | null
 ): Promise<EditionOutcome> {
-  // No fresh stories → straight to fallback.
   if (!rawStories) {
     const previous = await fetchPreviousBrief(ed);
     if (previous) {
@@ -567,13 +608,11 @@ async function processEdition(
   try {
     console.log(`Writing ${ed}...`);
     const content = await writeBriefWithClaude(rawStories, ed);
-
     const validation = validateBrief(content, ed);
     if (validation.ok) {
       await saveBriefToSupabase(ed, rawStories, validation.data, 'ready');
       return { status: 'ready', content: validation.data };
     }
-
     const previous = await fetchPreviousBrief(ed);
     if (previous) {
       await saveBriefToSupabase(ed, rawStories, previous, 'fallback');
@@ -604,20 +643,21 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const results: Record<string, { status: string; reason?: string }> = {};
 
   try {
-    // Step 1: fetch news. If OpenAI throws, we still serve yesterday's briefs
-    // instead of returning a 500 with nothing saved.
+    // Step 1: personalisation universe (cheap — one Supabase select).
+    const universe = await loadPersonalisationUniverse();
+    console.log(`Universe — industries: ${universe.industries.length}, interests: ${universe.interests.length}`);
+
+    // Step 2: fetch news. If OpenAI throws, we still serve yesterday's briefs.
     let rawStories: RawStories | null = null;
     try {
       console.log('Fetching news from OpenAI...');
-      rawStories = await fetchNewsFromOpenAI();
+      rawStories = await fetchNewsFromOpenAI(universe);
       console.log('News fetched.');
     } catch (err: any) {
       console.error('OpenAI fetch failed:', err.message);
     }
 
-    // Step 2: process all editions IN PARALLEL.
-    // Sequential was ~70-135s and tripped Vercel's 60s maxDuration on Hobby.
-    // Parallel total ≈ max(any single edition) ≈ 30-45s, comfortably under.
+    // Step 3: process all editions IN PARALLEL.
     const writtenBriefs: Record<string, BriefContent> = {};
     const editionPairs = await Promise.all(
       editions.map(async (ed) => {
@@ -629,18 +669,17 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     );
     for (const [ed, r] of editionPairs) results[ed] = r;
 
-    // Step 3: push only if at least one edition is fresh-ready.
+    // Step 4: push only if at least one edition is fresh-ready.
     const anyFresh = Object.values(results).some((r) => r.status === 'ready');
-
     if (!skipPush && anyFresh) {
       const topHeadline =
+        writtenBriefs['5min']?.major_events?.[0]?.headline ??
         writtenBriefs['5min']?.world?.[0]?.headline ??
         writtenBriefs['10min']?.world?.[0]?.headline ??
         "Today's stories are waiting for you.";
       try {
         await sendPushNotification(topHeadline);
       } catch (err: any) {
-        // A OneSignal hiccup shouldn't take down the whole job — briefs are already saved.
         console.error('Push failed (briefs already saved):', err.message);
       }
     } else if (!skipPush && !anyFresh) {
@@ -649,7 +688,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       console.log('Push skipped (skipPush: true)');
     }
 
-    return res.status(200).json({ success: true, editions, results });
+    return res.status(200).json({ success: true, editions, universe, results });
   } catch (error: any) {
     console.error('Top-level error:', error.message);
     return res.status(500).json({ success: false, error: error.message, results });

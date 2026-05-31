@@ -1,3 +1,4 @@
+// src/pages/_app.tsx
 import '@/styles/globals.css'
 import type { AppProps } from 'next/app'
 import Head from 'next/head'
@@ -5,14 +6,12 @@ import { useEffect } from 'react'
 
 export default function App({ Component, pageProps }: AppProps) {
   useEffect(() => {
-    // Only run in browser, not during SSR
     if (typeof window === 'undefined') return
 
     window.OneSignalDeferred = window.OneSignalDeferred || []
     window.OneSignalDeferred.push(async function (OneSignal: any) {
       await OneSignal.init({
         appId: process.env.NEXT_PUBLIC_ONESIGNAL_APP_ID!,
-        // Shows the native browser permission prompt automatically
         promptOptions: {
           slidedown: {
             prompts: [
@@ -25,15 +24,11 @@ export default function App({ Component, pageProps }: AppProps) {
                   acceptButton: 'Allow',
                   cancelButton: 'Not now',
                 },
-                delay: {
-                  pageViews: 1,   // show after 1 page view
-                  timeDelay: 5,   // wait 5 seconds before showing
-                },
+                delay: { pageViews: 1, timeDelay: 5 },
               },
             ],
           },
         },
-        // Allows notifications on localhost during development
         allowLocalhostAsSecureOrigin: true,
       })
     })
@@ -42,9 +37,9 @@ export default function App({ Component, pageProps }: AppProps) {
   return (
     <>
       <Head>
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+        <meta name="theme-color" content="#0E0E0E" />
         <link rel="manifest" href="/manifest.json" />
-        {/* OneSignal SDK — loads async, does not block page render */}
         <script
           src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js"
           defer
@@ -55,7 +50,6 @@ export default function App({ Component, pageProps }: AppProps) {
   )
 }
 
-// Extend Window type so TypeScript doesn't complain
 declare global {
   interface Window {
     OneSignalDeferred: any[]

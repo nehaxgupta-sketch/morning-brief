@@ -1,12 +1,37 @@
+// src/pages/onboarding.tsx
+//
+// Multi-step onboarding. Step 0: choose Standard vs Personalised.
+// Personalised path: steps 1-5 (about you → cities → work → interests → mood+edition).
+// Standard path: jumps from step 0 straight to step 6 (edition only).
+//
+// Edition IDs are written in their CANONICAL form ('5min' / '10min' / 'deep') —
+// matches profile.tsx and the briefs/personalised_briefs columns. Legacy values
+// ('ultra' / 'standard') still get normalised at read time but new accounts
+// never produce them.
+
 import { useState } from 'react'
 import { useRouter } from 'next/router'
 import { supabase } from '@/lib/supabase'
+
+const C = {
+  bg: '#0E0E0E',
+  surface: '#161616',
+  surface2: '#1E1E1E',
+  border: '#262626',
+  borderHi: '#3A3A3A',
+  gold: '#C8A45A',
+  goldSoft: 'rgba(200,164,90,0.10)',
+  text: '#F5F1EA',
+  textSoft: '#CFC6B8',
+  textMute: '#8E867B',
+  textDim: '#5E574D',
+}
 
 const CITIES = [
   'Bengaluru', 'Delhi / NCR', 'Mumbai', 'Hyderabad', 'Chennai',
   'Pune', 'Kolkata', 'Ahmedabad', 'Jaipur', 'Lucknow',
   'Chandigarh', 'Kochi', 'Indore', 'Bhopal', 'Nagpur',
-  'Surat', 'Visakhapatnam', 'Coimbatore', 'Vadodara', 'Other'
+  'Surat', 'Visakhapatnam', 'Coimbatore', 'Vadodara', 'Other',
 ]
 
 const LIFE_STAGES = [
@@ -25,7 +50,7 @@ const WORK_AREAS = [
   'Finance & Accounting', 'Technology & Engineering', 'Marketing & Communications',
   'Sales & Business Development', 'Operations & Supply Chain', 'Human Resources',
   'Legal & Compliance', 'Design & Creative', 'Research & Analytics',
-  'Healthcare & Medicine', 'Teaching & Academia', 'Policy & Government', 'Other'
+  'Healthcare & Medicine', 'Teaching & Academia', 'Policy & Government', 'Other',
 ]
 
 const INDUSTRIES = [
@@ -33,18 +58,18 @@ const INDUSTRIES = [
   'Consulting', 'Healthcare & Pharma', 'Media & Entertainment',
   'Education', 'Government & Public Sector', 'Manufacturing',
   'Real Estate', 'Logistics & Supply Chain', 'Energy',
-  'Legal Services', 'FMCG & Consumer Goods', 'Hospitality & Travel', 'Other'
+  'Legal Services', 'FMCG & Consumer Goods', 'Hospitality & Travel', 'Other',
 ]
 
 const STUDY_AREAS = [
   'Engineering & Technology', 'Business & Management', 'Medicine & Healthcare',
   'Law', 'Arts & Humanities', 'Science', 'Commerce & Economics',
-  'Design & Architecture', 'Social Sciences', 'Other'
+  'Design & Architecture', 'Social Sciences', 'Other',
 ]
 
 const STUDY_LEVELS = [
   'School (Class 9–12)', 'Undergraduate', 'Postgraduate / MBA',
-  'PhD / Research', 'Professional Course', 'Other'
+  'PhD / Research', 'Professional Course', 'Other',
 ]
 
 const INTERESTS = [
@@ -57,7 +82,7 @@ const INTERESTS = [
   'History', 'Psychology', 'Education', 'Law & Policy',
   'Parenting', 'Sustainability', 'Gaming',
   'Artificial Intelligence', 'Space & Astronomy', 'Cricket',
-  'Football', 'Formula 1'
+  'Football', 'Formula 1',
 ]
 
 const MOODS = [
@@ -66,58 +91,95 @@ const MOODS = [
   { id: 'critical', label: 'Critical', desc: 'Sharper analysis. Questions assumptions.', icon: '◐' },
 ]
 
+// Canonical edition IDs — written straight into profiles.edition_preference.
 const EDITIONS = [
-  { id: 'ultra', label: '5 Minutes', desc: 'Quick headlines before you start your day', icon: '⚡' },
-  { id: 'standard', label: '10 Minutes', desc: 'Full stories with context, expandable depth', icon: '◆' },
-  { id: 'deep', label: 'Deep Dive', desc: 'Complete analysis with facts and expert opinion', icon: '◈' },
+  { id: '5min',  label: '5 Minutes',  desc: 'Quick headlines before you start your day',         icon: '⚡' },
+  { id: '10min', label: '10 Minutes', desc: 'Full stories with context, expandable depth',       icon: '◆' },
+  { id: 'deep',  label: 'Deep Dive',  desc: 'Complete analysis with facts and expert opinion',   icon: '◈' },
 ]
 
 const FEATURES_STANDARD = [
-  'Top stories', 'India news', 'World news', 'Trends', 'Reading depth'
+  'Top stories', 'India news', 'World news', 'Major events', 'Reading depth',
 ]
 
 const FEATURES_PERSONALISED = [
-  'Top stories', 'India news', 'World news', 'Your city & profession', 'Tone control', 'Reading depth'
+  'Top stories', 'India news', 'World news', 'Your city & profession', 'Tone control', 'Reading depth',
 ]
 
-const labelStyle = {
-  display: 'block' as const,
+// ─── Shared styles ──────────────────────────────────────────────────────────
+
+const labelStyle: React.CSSProperties = {
+  display: 'block',
   fontFamily: "'DM Mono', monospace",
-  fontSize: '9px', letterSpacing: '2px',
-  color: '#888', marginBottom: '10px',
-  textTransform: 'uppercase' as const
+  fontSize: '10px',
+  letterSpacing: '2px',
+  color: C.textMute,
+  marginBottom: '10px',
+  textTransform: 'uppercase' as const,
 }
+
+const headStyle: React.CSSProperties = {
+  fontFamily: "'Playfair Display', Georgia, serif",
+  fontSize: '26px',
+  fontWeight: 700,
+  color: C.text,
+  marginBottom: '10px',
+  lineHeight: '1.2',
+}
+
+const subStyle: React.CSSProperties = {
+  fontFamily: "'DM Sans', sans-serif",
+  fontSize: '14px',
+  color: C.textMute,
+  marginBottom: '28px',
+  lineHeight: '1.6',
+}
+
+// ─── Tiny components ────────────────────────────────────────────────────────
 
 function Chip({ label, selected, onToggle }: { label: string; selected: boolean; onToggle: () => void }) {
   return (
     <button type="button" onClick={onToggle} style={{
-      padding: '9px 14px',
-      background: selected ? '#C8A45A' : '#2A2A2A',
-      color: selected ? '#1A1A1A' : '#999',
+      padding: '10px 14px',
+      background: selected ? C.gold : C.surface2,
+      color: selected ? '#1A1A1A' : C.textSoft,
       fontFamily: "'DM Sans', sans-serif",
-      fontSize: '13px', fontWeight: selected ? '600' : '400',
-      border: `1px solid ${selected ? '#C8A45A' : '#333'}`,
-      borderRadius: '2px', cursor: 'pointer',
-      minHeight: '38px', whiteSpace: 'nowrap' as const
+      fontSize: '13px',
+      fontWeight: selected ? 600 : 400,
+      border: `1px solid ${selected ? C.gold : C.border}`,
+      borderRadius: '3px',
+      cursor: 'pointer',
+      minHeight: '40px',
+      whiteSpace: 'nowrap' as const,
     }}>{label}</button>
   )
 }
 
-function SelectInput({ label, value, onChange, options, placeholder }: {
+function SelectInput({
+  label, value, onChange, options, placeholder,
+}: {
   label: string; value: string; onChange: (v: string) => void; options: string[]; placeholder?: string
 }) {
   return (
     <div>
       {label && <label style={labelStyle}>{label}</label>}
-      <select value={value} onChange={e => onChange(e.target.value)} style={{
-        width: '100%', padding: '14px 16px',
-        background: '#2A2A2A',
-        border: `1px solid ${value ? '#C8A45A' : '#333'}`,
-        color: value ? '#F5F1EA' : '#555',
-        fontFamily: "'DM Sans', sans-serif",
-        fontSize: '15px', outline: 'none',
-        borderRadius: '2px', appearance: 'none' as const, cursor: 'pointer'
-      }}>
+      <select
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        style={{
+          width: '100%',
+          padding: '15px 16px',
+          background: C.surface,
+          border: `1px solid ${value ? C.gold : C.border}`,
+          color: value ? C.text : C.textDim,
+          fontFamily: "'DM Sans', sans-serif",
+          fontSize: '15px',
+          outline: 'none',
+          borderRadius: '3px',
+          appearance: 'none' as const,
+          cursor: 'pointer',
+        }}
+      >
         <option value="">{placeholder || 'Select...'}</option>
         {options.map(o => <option key={o} value={o}>{o}</option>)}
       </select>
@@ -125,33 +187,45 @@ function SelectInput({ label, value, onChange, options, placeholder }: {
   )
 }
 
-function TextInput({ label, value, onChange, placeholder }: {
+function TextInput({
+  label, value, onChange, placeholder,
+}: {
   label: string; value: string; onChange: (v: string) => void; placeholder?: string
 }) {
   return (
     <div>
       {label && <label style={labelStyle}>{label}</label>}
-      <input type="text" value={value} onChange={e => onChange(e.target.value)}
-        placeholder={placeholder} style={{
-          width: '100%', padding: '14px 16px',
-          background: '#2A2A2A',
-          border: `1px solid ${value ? '#C8A45A' : '#333'}`,
-          color: '#F5F1EA', fontFamily: "'DM Sans', sans-serif",
-          fontSize: '15px', outline: 'none', borderRadius: '2px'
-        }} />
+      <input
+        type="text"
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder={placeholder}
+        style={{
+          width: '100%',
+          padding: '15px 16px',
+          background: C.surface,
+          border: `1px solid ${value ? C.gold : C.border}`,
+          color: C.text,
+          fontFamily: "'DM Sans', sans-serif",
+          fontSize: '15px',
+          outline: 'none',
+          borderRadius: '3px',
+        }}
+      />
     </div>
   )
 }
 
 function StepDots({ total, current }: { total: number; current: number }) {
   return (
-    <div style={{ display: 'flex', gap: '6px', justifyContent: 'center', marginBottom: '28px' }}>
+    <div style={{ display: 'flex', gap: '6px', justifyContent: 'center', marginBottom: '32px' }}>
       {Array.from({ length: total }).map((_, i) => (
         <div key={i} style={{
-          width: i === current ? '20px' : '6px', height: '6px',
+          width: i === current ? '22px' : '6px',
+          height: '6px',
           borderRadius: '3px',
-          background: i <= current ? '#C8A45A' : '#2A2A2A',
-          transition: 'all 0.3s ease'
+          background: i <= current ? C.gold : C.border,
+          transition: 'all 0.3s ease',
         }} />
       ))}
     </div>
@@ -159,14 +233,31 @@ function StepDots({ total, current }: { total: number; current: number }) {
 }
 
 function Wordmark({ size = 'large' }: { size?: 'large' | 'small' }) {
-  const fs = size === 'large' ? 'clamp(28px, 8vw, 38px)' : 'clamp(22px, 6vw, 30px)'
+  const fs = size === 'large' ? 'clamp(32px, 9vw, 42px)' : 'clamp(24px, 7vw, 32px)'
   return (
-    <div style={{ marginBottom: '20px' }}>
-      <div style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: fs, fontWeight: '900', color: '#F5F1EA', letterSpacing: '-0.5px', lineHeight: '1', marginBottom: '4px' }}>Morning</div>
-      <div style={{ fontFamily: "'Playfair Display', Georgia, serif", fontSize: fs, fontWeight: '900', color: '#C8A45A', letterSpacing: '-0.5px', lineHeight: '1' }}>Brief</div>
+    <div style={{ marginBottom: '22px' }}>
+      <div style={{
+        fontFamily: "'Playfair Display', Georgia, serif",
+        fontSize: fs,
+        fontWeight: 900,
+        color: C.text,
+        letterSpacing: '-0.5px',
+        lineHeight: '1',
+        marginBottom: '2px',
+      }}>Morning</div>
+      <div style={{
+        fontFamily: "'Playfair Display', Georgia, serif",
+        fontSize: fs,
+        fontWeight: 900,
+        color: C.gold,
+        letterSpacing: '-0.5px',
+        lineHeight: '1',
+      }}>Brief</div>
     </div>
   )
 }
+
+// ─── Page ───────────────────────────────────────────────────────────────────
 
 export default function Onboarding() {
   const router = useRouter()
@@ -192,7 +283,7 @@ export default function Onboarding() {
   const [studyLevelOther, setStudyLevelOther] = useState('')
   const [interests, setInterests] = useState<string[]>([])
   const [mood, setMood] = useState('neutral')
-  const [edition, setEdition] = useState('standard')
+  const [edition, setEdition] = useState('10min')
 
   const personalisedSteps = 5
   const isWorkingPro = ['early_career', 'mid_career', 'senior'].includes(lifeStage)
@@ -225,15 +316,15 @@ export default function Onboarding() {
       study_level: studyLevel === 'Other' ? studyLevelOther : (studyLevel || null),
       interests,
       mood_preference: mood,
-      edition_preference: edition,
+      edition_preference: edition,                  // canonical: 5min / 10min / deep
       brief_type: briefType || 'standard',
       onboarding_complete: true,
-      updated_at: new Date().toISOString()
+      updated_at: new Date().toISOString(),
     }).eq('id', user.id)
     window.location.href = '/home'
   }
 
- const next = () => {
+  const next = () => {
     if (briefType === 'standard') { setStep(6) }
     else { setStep(s => s + 1) }
   }
@@ -241,51 +332,65 @@ export default function Onboarding() {
   const back = () => setStep(s => s - 1)
 
   const containerStyle: React.CSSProperties = {
-    minHeight: '100vh', background: '#1A1A1A',
-    display: 'flex', flexDirection: 'column',
-    padding: '24px', paddingTop: '40px'
-  }
-
-  const headStyle: React.CSSProperties = {
-    fontFamily: "'Playfair Display', Georgia, serif",
-    fontSize: '24px', fontWeight: '700',
-    color: '#F5F1EA', marginBottom: '8px', lineHeight: '1.2'
-  }
-
-  const subStyle: React.CSSProperties = {
-    fontFamily: "'DM Sans', sans-serif",
-    fontSize: '13px', color: '#555',
-    marginBottom: '28px', lineHeight: '1.6'
+    minHeight: '100vh',
+    background: C.bg,
+    display: 'flex',
+    flexDirection: 'column',
+    padding: '32px 24px 24px',
   }
 
   const btnPrimary: React.CSSProperties = {
-    flex: 1, padding: '16px',
-    background: '#C8A45A', color: '#1A1A1A',
+    flex: 1,
+    padding: '17px',
+    background: C.gold,
+    color: '#1A1A1A',
     fontFamily: "'DM Sans', sans-serif",
-    fontSize: '14px', fontWeight: '600',
-    letterSpacing: '1px', textTransform: 'uppercase',
-    border: 'none', cursor: 'pointer',
-    borderRadius: '2px', minHeight: '52px'
+    fontSize: '14px',
+    fontWeight: 700,
+    letterSpacing: '1.5px',
+    textTransform: 'uppercase',
+    border: 'none',
+    cursor: 'pointer',
+    borderRadius: '3px',
+    minHeight: '54px',
+  }
+
+  const btnSecondary: React.CSSProperties = {
+    padding: '17px 22px',
+    background: 'transparent',
+    color: C.textMute,
+    fontFamily: "'DM Sans', sans-serif",
+    fontSize: '14px',
+    fontWeight: 500,
+    border: `1px solid ${C.border}`,
+    cursor: 'pointer',
+    borderRadius: '3px',
+    minHeight: '54px',
   }
 
   return (
     <div style={containerStyle}>
-      <div style={{ maxWidth: '400px', width: '100%', margin: '0 auto', flex: 1 }}>
+      <div style={{ maxWidth: '420px', width: '100%', margin: '0 auto', flex: 1 }}>
 
-        {briefType && step > 0 && <StepDots total={personalisedSteps} current={step - 1} />}
+        {briefType && step > 0 && step !== 6 && <StepDots total={personalisedSteps} current={step - 1} />}
 
         {/* STEP 0 */}
         {step === 0 && (
           <div>
-            <div style={{ textAlign: 'center', marginBottom: '28px' }}>
+            <div style={{ textAlign: 'center', marginBottom: '32px' }}>
               <Wordmark size="large" />
-              <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '11px', letterSpacing: '4px', color: '#C8A45A', textTransform: 'uppercase' }}>WELCOME</div>
+              <div style={{
+                fontFamily: "'DM Mono', monospace",
+                fontSize: '11px',
+                letterSpacing: '4px',
+                color: C.gold,
+                textTransform: 'uppercase',
+              }}>WELCOME</div>
             </div>
-            <h2 style={{ ...headStyle, textAlign: 'center', marginBottom: '6px' }}>Choose your brief</h2>
+            <h2 style={{ ...headStyle, textAlign: 'center', marginBottom: '8px' }}>Choose your brief</h2>
             <p style={{ ...subStyle, textAlign: 'center' }}>Tap a card to select. You can change this later.</p>
 
-            {/* Two column cards */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '24px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '28px' }}>
               {([
                 { id: 'standard' as const, label: 'Standard', sub: 'No setup', features: FEATURES_STANDARD },
                 { id: 'personalised' as const, label: 'Personalised', sub: 'Only 3 min setup', features: FEATURES_PERSONALISED },
@@ -294,31 +399,41 @@ export default function Onboarding() {
                   key={col.id}
                   onClick={() => setBriefType(col.id)}
                   style={{
-                    background: briefType === col.id ? 'rgba(200,164,90,0.08)' : '#1E1E1E',
-                    border: `1px solid ${briefType === col.id ? '#C8A45A' : '#2A2A2A'}`,
-                    borderTop: `3px solid ${briefType === col.id ? '#C8A45A' : '#333'}`,
-                    borderRadius: '4px', cursor: 'pointer',
-                    display: 'flex', flexDirection: 'column'
+                    background: briefType === col.id ? C.goldSoft : C.surface,
+                    border: `1px solid ${briefType === col.id ? C.gold : C.border}`,
+                    borderTop: `3px solid ${briefType === col.id ? C.gold : C.borderHi}`,
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    flexDirection: 'column',
                   }}
                 >
-                  <div style={{ padding: '14px 12px 10px' }}>
+                  <div style={{ padding: '16px 14px 12px' }}>
                     <div style={{
                       fontFamily: "'Playfair Display', Georgia, serif",
-                      fontSize: '16px', fontWeight: '700',
-                      color: briefType === col.id ? '#C8A45A' : '#F5F1EA',
-                      marginBottom: '4px'
+                      fontSize: '18px',
+                      fontWeight: 700,
+                      color: briefType === col.id ? C.gold : C.text,
+                      marginBottom: '4px',
                     }}>{col.label}</div>
                     <div style={{
                       fontFamily: "'DM Mono', monospace",
-                      fontSize: '9px', letterSpacing: '1px', color: '#888'
+                      fontSize: '10px',
+                      letterSpacing: '1.5px',
+                      color: C.textMute,
                     }}>{col.sub.toUpperCase()}</div>
                   </div>
-                  <div style={{ height: '1px', background: briefType === col.id ? 'rgba(200,164,90,0.2)' : '#2A2A2A' }} />
-                  <div style={{ padding: '10px 12px' }}>
+                  <div style={{ height: '1px', background: briefType === col.id ? 'rgba(200,164,90,0.2)' : C.border }} />
+                  <div style={{ padding: '12px 14px' }}>
                     {col.features.map(f => (
-                      <div key={f} style={{ display: 'flex', alignItems: 'flex-start', gap: '6px', padding: '4px 0' }}>
-                        <span style={{ color: '#C8A45A', fontSize: '10px', fontWeight: '700', marginTop: '2px', flexShrink: 0 }}>✓</span>
-                        <span style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '11px', color: '#888', lineHeight: '1.4' }}>{f}</span>
+                      <div key={f} style={{ display: 'flex', alignItems: 'flex-start', gap: '7px', padding: '4px 0' }}>
+                        <span style={{ color: C.gold, fontSize: '11px', fontWeight: 700, marginTop: '2px', flexShrink: 0 }}>✓</span>
+                        <span style={{
+                          fontFamily: "'DM Sans', sans-serif",
+                          fontSize: '12px',
+                          color: C.textSoft,
+                          lineHeight: '1.4',
+                        }}>{f}</span>
                       </div>
                     ))}
                   </div>
@@ -334,21 +449,39 @@ export default function Onboarding() {
           </div>
         )}
 
-        {/* STEP 1 */}
+        {/* STEP 1 — about you */}
         {step === 1 && briefType === 'personalised' && (
           <div>
             <Wordmark size="small" />
-            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '9px', letterSpacing: '2px', color: '#C8A45A', marginBottom: '12px' }}>STEP 1 OF {personalisedSteps}</div>
+            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '10px', letterSpacing: '2px', color: C.gold, marginBottom: '14px' }}>STEP 1 OF {personalisedSteps}</div>
             <h2 style={headStyle}>A little about you</h2>
             <p style={subStyle}>All optional — helps us frame stories for your perspective.</p>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
               <div>
                 <label style={labelStyle}>Age</label>
-                <input type="number" value={age}
-                  onChange={e => { const raw = e.target.value; if (raw === '') { setAge(''); return } const val = parseInt(raw); if (!isNaN(val) && val >= 0) setAge(String(val)) }}
+                <input
+                  type="number"
+                  value={age}
+                  onChange={e => {
+                    const raw = e.target.value
+                    if (raw === '') { setAge(''); return }
+                    const val = parseInt(raw)
+                    if (!isNaN(val) && val >= 0) setAge(String(val))
+                  }}
                   onBlur={() => { const val = parseInt(age); if (isNaN(val) || val < 12) setAge('') }}
                   placeholder="e.g. 28"
-                  style={{ width: '100%', padding: '14px 16px', background: '#2A2A2A', border: `1px solid ${age ? '#C8A45A' : '#333'}`, color: '#F5F1EA', fontFamily: "'DM Sans', sans-serif", fontSize: '15px', outline: 'none', borderRadius: '2px' }} />
+                  style={{
+                    width: '100%',
+                    padding: '15px 16px',
+                    background: C.surface,
+                    border: `1px solid ${age ? C.gold : C.border}`,
+                    color: C.text,
+                    fontFamily: "'DM Sans', sans-serif",
+                    fontSize: '15px',
+                    outline: 'none',
+                    borderRadius: '3px',
+                  }}
+                />
               </div>
               <div>
                 <label style={labelStyle}>Gender</label>
@@ -362,22 +495,46 @@ export default function Onboarding() {
           </div>
         )}
 
-        {/* STEP 2 */}
+        {/* STEP 2 — cities */}
         {step === 2 && briefType === 'personalised' && (
           <div>
             <Wordmark size="small" />
-            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '9px', letterSpacing: '2px', color: '#C8A45A', marginBottom: '12px' }}>STEP 2 OF {personalisedSteps}</div>
+            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '10px', letterSpacing: '2px', color: C.gold, marginBottom: '14px' }}>STEP 2 OF {personalisedSteps}</div>
             <h2 style={headStyle}>Your cities</h2>
-            <p style={subStyle}>We cover local news for every city you add.</p>
+            <p style={subStyle}>We surface local news for your current city in your personalised brief.</p>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
               <SelectInput label="City you live in now" value={cityCurrent} onChange={setCityCurrent} options={CITIES} placeholder="Select your city" />
               <div>
                 <label style={labelStyle}>Home city (where you're from)</label>
-                <button type="button" onClick={() => { setSameAsCurrentCity(!sameAsCurrentCity); if (!sameAsCurrentCity) setCityHome('') }} style={{ display: 'flex', alignItems: 'center', gap: '8px', background: 'none', border: 'none', cursor: 'pointer', marginBottom: '10px', minHeight: '32px', padding: '0' }}>
-                  <div style={{ width: '18px', height: '18px', border: `2px solid ${sameAsCurrentCity ? '#C8A45A' : '#444'}`, borderRadius: '2px', flexShrink: 0, background: sameAsCurrentCity ? '#C8A45A' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                    {sameAsCurrentCity && <span style={{ color: '#1A1A1A', fontSize: '11px', fontWeight: '700' }}>✓</span>}
+                <button
+                  type="button"
+                  onClick={() => { setSameAsCurrentCity(!sameAsCurrentCity); if (!sameAsCurrentCity) setCityHome('') }}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '10px',
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    marginBottom: '12px',
+                    minHeight: '36px',
+                    padding: 0,
+                  }}
+                >
+                  <div style={{
+                    width: '20px',
+                    height: '20px',
+                    border: `2px solid ${sameAsCurrentCity ? C.gold : C.borderHi}`,
+                    borderRadius: '3px',
+                    flexShrink: 0,
+                    background: sameAsCurrentCity ? C.gold : 'transparent',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}>
+                    {sameAsCurrentCity && <span style={{ color: '#1A1A1A', fontSize: '12px', fontWeight: 700 }}>✓</span>}
                   </div>
-                  <span style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '13px', color: '#888' }}>Same as current city</span>
+                  <span style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '14px', color: C.textSoft }}>Same as current city</span>
                 </button>
                 {!sameAsCurrentCity && <SelectInput label="" value={cityHome} onChange={setCityHome} options={CITIES} placeholder="Select home city" />}
               </div>
@@ -385,7 +542,23 @@ export default function Onboarding() {
                 <label style={labelStyle}>Other cities to cover (optional, up to 3)</label>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                   {extraCities.map((city, idx) => (
-                    <select key={idx} value={city} onChange={e => updateExtraCity(idx, e.target.value)} style={{ width: '100%', padding: '14px 16px', background: '#2A2A2A', border: `1px solid ${city ? '#C8A45A' : '#2A2A2A'}`, color: city ? '#F5F1EA' : '#444', fontFamily: "'DM Sans', sans-serif", fontSize: '14px', outline: 'none', borderRadius: '2px', appearance: 'none' as const }}>
+                    <select
+                      key={idx}
+                      value={city}
+                      onChange={e => updateExtraCity(idx, e.target.value)}
+                      style={{
+                        width: '100%',
+                        padding: '15px 16px',
+                        background: C.surface,
+                        border: `1px solid ${city ? C.gold : C.border}`,
+                        color: city ? C.text : C.textDim,
+                        fontFamily: "'DM Sans', sans-serif",
+                        fontSize: '14px',
+                        outline: 'none',
+                        borderRadius: '3px',
+                        appearance: 'none' as const,
+                      }}
+                    >
                       <option value="">+ Add city {idx + 1}</option>
                       {CITIES.map(c => <option key={c} value={c}>{c}</option>)}
                     </select>
@@ -396,50 +569,67 @@ export default function Onboarding() {
           </div>
         )}
 
-        {/* STEP 3 */}
+        {/* STEP 3 — work / study */}
         {step === 3 && briefType === 'personalised' && (
           <div>
             <Wordmark size="small" />
-            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '9px', letterSpacing: '2px', color: '#C8A45A', marginBottom: '12px' }}>STEP 3 OF {personalisedSteps}</div>
+            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '10px', letterSpacing: '2px', color: C.gold, marginBottom: '14px' }}>STEP 3 OF {personalisedSteps}</div>
             <h2 style={headStyle}>What do you do?</h2>
             <p style={subStyle}>Shapes how we cover business and economy news.</p>
             <div style={{ marginBottom: '24px' }}>
               <label style={labelStyle}>Which best describes you?</label>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
                 {LIFE_STAGES.map(ls => (
-                  <button type="button" key={ls.id} onClick={() => { setLifeStage(ls.id); setWorkArea(''); setIndustry(''); setCompany(''); setStudyArea(''); setStudyLevel('') }} style={{ padding: '14px 12px', textAlign: 'center', background: lifeStage === ls.id ? 'rgba(200,164,90,0.1)' : '#1E1E1E', border: `1px solid ${lifeStage === ls.id ? '#C8A45A' : '#2A2A2A'}`, borderRadius: '4px', cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', minHeight: '72px' }}>
+                  <button
+                    type="button"
+                    key={ls.id}
+                    onClick={() => { setLifeStage(ls.id); setWorkArea(''); setIndustry(''); setCompany(''); setStudyArea(''); setStudyLevel('') }}
+                    style={{
+                      padding: '14px 12px',
+                      textAlign: 'center',
+                      background: lifeStage === ls.id ? C.goldSoft : C.surface,
+                      border: `1px solid ${lifeStage === ls.id ? C.gold : C.border}`,
+                      borderRadius: '4px',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      gap: '7px',
+                      minHeight: '76px',
+                    }}
+                  >
                     <span style={{ fontSize: '22px' }}>{ls.icon}</span>
-                    <span style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '12px', fontWeight: lifeStage === ls.id ? '600' : '400', color: lifeStage === ls.id ? '#C8A45A' : '#999', lineHeight: '1.3' }}>{ls.label}</span>
+                    <span style={{
+                      fontFamily: "'DM Sans', sans-serif",
+                      fontSize: '12px',
+                      fontWeight: lifeStage === ls.id ? 600 : 400,
+                      color: lifeStage === ls.id ? C.gold : C.textSoft,
+                      lineHeight: '1.3',
+                    }}>{ls.label}</span>
                   </button>
                 ))}
               </div>
             </div>
-            {isWorkingPro && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            {(isWorkingPro || lifeStage === 'freelancer') && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
                 <SelectInput label="Area of work" value={workArea} onChange={setWorkArea} options={WORK_AREAS} />
                 {workArea === 'Other' && <TextInput label="Please specify" value={workAreaOther} onChange={setWorkAreaOther} placeholder="Your area of work" />}
                 <SelectInput label="Industry" value={industry} onChange={setIndustry} options={INDUSTRIES} />
                 {industry === 'Other' && <TextInput label="Please specify" value={industryOther} onChange={setIndustryOther} placeholder="Your industry" />}
-                <TextInput label="Company name (optional)" value={company} onChange={setCompany} placeholder="e.g. Amazon" />
-              </div>
-            )}
-            {lifeStage === 'freelancer' && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                <SelectInput label="Area of work" value={workArea} onChange={setWorkArea} options={WORK_AREAS} />
-                {workArea === 'Other' && <TextInput label="Please specify" value={workAreaOther} onChange={setWorkAreaOther} placeholder="Your area of work" />}
-                <SelectInput label="Industry" value={industry} onChange={setIndustry} options={INDUSTRIES} />
-                {industry === 'Other' && <TextInput label="Please specify" value={industryOther} onChange={setIndustryOther} placeholder="Your industry" />}
+                {isWorkingPro && (
+                  <TextInput label="Company name (optional)" value={company} onChange={setCompany} placeholder="e.g. Amazon" />
+                )}
               </div>
             )}
             {lifeStage === 'business' && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
                 <SelectInput label="Industry" value={industry} onChange={setIndustry} options={INDUSTRIES} />
                 {industry === 'Other' && <TextInput label="Please specify" value={industryOther} onChange={setIndustryOther} placeholder="Your industry" />}
                 <TextInput label="Company / venture name (optional)" value={company} onChange={setCompany} placeholder="e.g. My Startup" />
               </div>
             )}
             {lifeStage === 'student' && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
                 <SelectInput label="Area of study" value={studyArea} onChange={setStudyArea} options={STUDY_AREAS} />
                 {studyArea === 'Other' && <TextInput label="Please specify" value={studyAreaOther} onChange={setStudyAreaOther} placeholder="Your field of study" />}
                 <SelectInput label="Level of education" value={studyLevel} onChange={setStudyLevel} options={STUDY_LEVELS} />
@@ -449,11 +639,11 @@ export default function Onboarding() {
           </div>
         )}
 
-        {/* STEP 4 */}
+        {/* STEP 4 — interests */}
         {step === 4 && briefType === 'personalised' && (
           <div>
             <Wordmark size="small" />
-            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '9px', letterSpacing: '2px', color: '#C8A45A', marginBottom: '12px' }}>STEP 4 OF {personalisedSteps}</div>
+            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '10px', letterSpacing: '2px', color: C.gold, marginBottom: '14px' }}>STEP 4 OF {personalisedSteps}</div>
             <h2 style={headStyle}>What are you into?</h2>
             <p style={subStyle}>Pick as many as you like.</p>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '24px' }}>
@@ -462,41 +652,126 @@ export default function Onboarding() {
               ))}
             </div>
             {interests.length > 0 && (
-              <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '10px', color: '#C8A45A', letterSpacing: '1px', marginBottom: '8px' }}>{interests.length} selected ✓</div>
+              <div style={{
+                fontFamily: "'DM Mono', monospace",
+                fontSize: '11px',
+                color: C.gold,
+                letterSpacing: '1.5px',
+                marginBottom: '8px',
+              }}>{interests.length} SELECTED ✓</div>
             )}
           </div>
         )}
 
-        {/* STEP 5 */}
-        {/* STEP 5 */}
+        {/* STEP 5 — mood + edition (personalised) */}
         {step === 5 && briefType === 'personalised' && (
           <div>
             <Wordmark size="small" />
-            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '9px', letterSpacing: '2px', color: '#C8A45A', marginBottom: '12px' }}>STEP 5 OF {personalisedSteps}</div>
+            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '10px', letterSpacing: '2px', color: C.gold, marginBottom: '14px' }}>STEP 5 OF {personalisedSteps}</div>
             <h2 style={headStyle}>How do you like your news?</h2>
             <p style={subStyle}>You can change these any time from your profile.</p>
 
-            <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '13px', fontWeight: '600', color: '#B0A898', marginBottom: '12px', letterSpacing: '0.5px' }}>Analysis tone</div>
+            <div style={{
+              fontFamily: "'DM Sans', sans-serif",
+              fontSize: '13px',
+              fontWeight: 600,
+              color: C.textSoft,
+              marginBottom: '12px',
+              letterSpacing: '0.5px',
+            }}>Analysis tone</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '32px' }}>
               {MOODS.map(m => (
-                <button type="button" key={m.id} onClick={() => setMood(m.id)} style={{ padding: '16px', background: mood === m.id ? 'rgba(200,164,90,0.1)' : '#2A2A2A', border: `1px solid ${mood === m.id ? '#C8A45A' : '#333'}`, borderRadius: '2px', cursor: 'pointer', textAlign: 'left', display: 'flex', gap: '12px', alignItems: 'center', minHeight: '44px' }}>
-                  <span style={{ fontSize: '20px', flexShrink: 0, color: '#C8A45A', width: '24px', textAlign: 'center' }}>{m.icon}</span>
+                <button
+                  type="button"
+                  key={m.id}
+                  onClick={() => setMood(m.id)}
+                  style={{
+                    padding: '16px',
+                    background: mood === m.id ? C.goldSoft : C.surface,
+                    border: `1px solid ${mood === m.id ? C.gold : C.border}`,
+                    borderRadius: '3px',
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                    display: 'flex',
+                    gap: '12px',
+                    alignItems: 'center',
+                    minHeight: '44px',
+                  }}
+                >
+                  <span style={{
+                    fontSize: '20px',
+                    flexShrink: 0,
+                    color: C.gold,
+                    width: '24px',
+                    textAlign: 'center',
+                  }}>{m.icon}</span>
                   <div>
-                    <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '14px', fontWeight: '600', color: mood === m.id ? '#C8A45A' : '#F5F1EA', marginBottom: '2px' }}>{m.id === 'optimistic' ? 'Hopeful' : m.label}</div>
-                    <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '12px', color: '#666', lineHeight: '1.4' }}>{m.desc}</div>
+                    <div style={{
+                      fontFamily: "'DM Sans', sans-serif",
+                      fontSize: '15px',
+                      fontWeight: 600,
+                      color: mood === m.id ? C.gold : C.text,
+                      marginBottom: '2px',
+                    }}>{m.label}</div>
+                    <div style={{
+                      fontFamily: "'DM Sans', sans-serif",
+                      fontSize: '13px',
+                      color: C.textMute,
+                      lineHeight: '1.4',
+                    }}>{m.desc}</div>
                   </div>
                 </button>
               ))}
             </div>
 
-            <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '13px', fontWeight: '600', color: '#B0A898', marginBottom: '12px', letterSpacing: '0.5px' }}>Default reading depth</div>
+            <div style={{
+              fontFamily: "'DM Sans', sans-serif",
+              fontSize: '13px',
+              fontWeight: 600,
+              color: C.textSoft,
+              marginBottom: '12px',
+              letterSpacing: '0.5px',
+            }}>Default reading depth</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
               {EDITIONS.map(e => (
-                <button type="button" key={e.id} onClick={() => setEdition(e.id)} style={{ padding: '16px', background: edition === e.id ? 'rgba(200,164,90,0.1)' : '#2A2A2A', border: `1px solid ${edition === e.id ? '#C8A45A' : '#333'}`, borderRadius: '2px', cursor: 'pointer', textAlign: 'left', display: 'flex', gap: '12px', alignItems: 'center', minHeight: '44px' }}>
-                  <span style={{ fontSize: '20px', flexShrink: 0, color: '#C8A45A', width: '24px', textAlign: 'center' }}>{e.icon}</span>
+                <button
+                  type="button"
+                  key={e.id}
+                  onClick={() => setEdition(e.id)}
+                  style={{
+                    padding: '16px',
+                    background: edition === e.id ? C.goldSoft : C.surface,
+                    border: `1px solid ${edition === e.id ? C.gold : C.border}`,
+                    borderRadius: '3px',
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                    display: 'flex',
+                    gap: '12px',
+                    alignItems: 'center',
+                    minHeight: '44px',
+                  }}
+                >
+                  <span style={{
+                    fontSize: '20px',
+                    flexShrink: 0,
+                    color: C.gold,
+                    width: '24px',
+                    textAlign: 'center',
+                  }}>{e.icon}</span>
                   <div>
-                    <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '14px', fontWeight: '600', color: edition === e.id ? '#C8A45A' : '#F5F1EA', marginBottom: '2px' }}>{e.label}</div>
-                    <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '12px', color: '#666', lineHeight: '1.4' }}>{e.desc}</div>
+                    <div style={{
+                      fontFamily: "'DM Sans', sans-serif",
+                      fontSize: '15px',
+                      fontWeight: 600,
+                      color: edition === e.id ? C.gold : C.text,
+                      marginBottom: '2px',
+                    }}>{e.label}</div>
+                    <div style={{
+                      fontFamily: "'DM Sans', sans-serif",
+                      fontSize: '13px',
+                      color: C.textMute,
+                      lineHeight: '1.4',
+                    }}>{e.desc}</div>
                   </div>
                 </button>
               ))}
@@ -504,40 +779,73 @@ export default function Onboarding() {
           </div>
         )}
 
-{step === 6 && briefType === 'standard' && (
-  <div>
-    <Wordmark size="small" />
-    <h2 style={headStyle}>How long is your morning?</h2>
-    <p style={subStyle}>Pick your default reading depth. You can change this any time.</p>
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-      {EDITIONS.map(e => (
-        <button type="button" key={e.id} onClick={() => setEdition(e.id)} style={{ padding: '16px', background: edition === e.id ? 'rgba(200,164,90,0.1)' : '#2A2A2A', border: `1px solid ${edition === e.id ? '#C8A45A' : '#333'}`, borderRadius: '2px', cursor: 'pointer', textAlign: 'left', display: 'flex', gap: '12px', alignItems: 'flex-start', minHeight: '44px' }}>
-          <span style={{ fontSize: '18px', flexShrink: 0, color: '#C8A45A' }}>{e.icon}</span>
+        {/* STEP 6 — edition (standard path) */}
+        {step === 6 && briefType === 'standard' && (
           <div>
-            <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '14px', fontWeight: '600', color: edition === e.id ? '#C8A45A' : '#F5F1EA', marginBottom: '2px' }}>{e.label}</div>
-            <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '12px', color: '#666', lineHeight: '1.4' }}>{e.desc}</div>
+            <Wordmark size="small" />
+            <h2 style={headStyle}>How long is your morning?</h2>
+            <p style={subStyle}>Pick your default reading depth. You can change this any time.</p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              {EDITIONS.map(e => (
+                <button
+                  type="button"
+                  key={e.id}
+                  onClick={() => setEdition(e.id)}
+                  style={{
+                    padding: '16px',
+                    background: edition === e.id ? C.goldSoft : C.surface,
+                    border: `1px solid ${edition === e.id ? C.gold : C.border}`,
+                    borderRadius: '3px',
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                    display: 'flex',
+                    gap: '12px',
+                    alignItems: 'flex-start',
+                    minHeight: '44px',
+                  }}
+                >
+                  <span style={{ fontSize: '20px', flexShrink: 0, color: C.gold }}>{e.icon}</span>
+                  <div>
+                    <div style={{
+                      fontFamily: "'DM Sans', sans-serif",
+                      fontSize: '15px',
+                      fontWeight: 600,
+                      color: edition === e.id ? C.gold : C.text,
+                      marginBottom: '2px',
+                    }}>{e.label}</div>
+                    <div style={{
+                      fontFamily: "'DM Sans', sans-serif",
+                      fontSize: '13px',
+                      color: C.textMute,
+                      lineHeight: '1.4',
+                    }}>{e.desc}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
           </div>
-        </button>
-      ))}
-    </div>
-  </div>
-)}
+        )}
 
         {/* Navigation */}
-        <div style={{ display: 'flex', gap: '12px', marginTop: '36px', paddingBottom: '48px' }}>
+        <div style={{ display: 'flex', gap: '12px', marginTop: '40px', paddingBottom: '48px' }}>
           {step > 0 && (
-            <button type="button" onClick={() => step === 6 ? setStep(0) : back()} style={{ padding: '16px 20px', background: 'transparent', color: '#555', fontFamily: "'DM Sans', sans-serif", fontSize: '14px', border: '1px solid #2A2A2A', cursor: 'pointer', borderRadius: '2px', minHeight: '52px' }}>← Back</button>
+            <button type="button" onClick={() => step === 6 ? setStep(0) : back()} style={btnSecondary}>← Back</button>
           )}
           {step > 0 && (
-            <button type="button" onClick={() => {
-              if (step === 6) { handleFinish() }
-              else if (step < personalisedSteps) { setStep(s => s + 1) }
-              else { handleFinish() }
-            }} disabled={saving} style={btnPrimary}>
+            <button
+              type="button"
+              onClick={() => {
+                if (step === 6) { handleFinish() }
+                else if (step < personalisedSteps) { setStep(s => s + 1) }
+                else { handleFinish() }
+              }}
+              disabled={saving}
+              style={btnPrimary}
+            >
               {saving ? 'Saving...' : (step === personalisedSteps || step === 6) ? 'Build My Brief →' : 'Continue →'}
             </button>
           )}
- </div>
+        </div>
 
       </div>
     </div>

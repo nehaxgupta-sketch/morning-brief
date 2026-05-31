@@ -5,12 +5,26 @@ import { supabase } from '@/lib/supabase'
 
 // ─── Admin page ──────────────────────────────────────────────────────────────
 // Shows today's brief generation status across all 3 editions, with status
-// badges, story counts, generated-at timestamp, and a manual regenerate
-// button. Protected by ADMIN_EMAIL env var (set in Vercel env settings).
-//
-// To enable: in Vercel project settings, add an env var named
-// NEXT_PUBLIC_ADMIN_EMAILS with a comma-separated list of allowed emails,
-// e.g. "neha@example.com,partner@example.com".
+// badges, story counts (incl. Sprint 7's major_events), generated-at
+// timestamp, and a manual regenerate button. Also surfaces personalisation
+// stats including personal_sections counts.
+
+const C = {
+  bg: '#0E0E0E',
+  surface: '#161616',
+  surface2: '#1E1E1E',
+  surfaceDeep: '#0A0A0A',
+  border: '#262626',
+  borderHi: '#3A3A3A',
+  gold: '#C8A45A',
+  text: '#F5F1EA',
+  textSoft: '#CFC6B8',
+  textMute: '#8E867B',
+  textDim: '#5E574D',
+  ok: '#5FB87E',
+  warn: '#E0A85C',
+  err: '#E76161',
+}
 
 type BriefRow = {
   date: string
@@ -21,28 +35,54 @@ type BriefRow = {
   raw_stories: any
 }
 
+type HistoryDay = {
+  date: string
+  editions: Record<string, string>
+}
+
+type PersonalisedRow = {
+  edition: string
+  status: string
+  content: any
+}
+
 function getISTDate(offsetDays = 0): string {
   const now = new Date()
   const istMs = now.getTime() + 5.5 * 60 * 60 * 1000 + offsetDays * 24 * 60 * 60 * 1000
   return new Date(istMs).toISOString().split('T')[0]
 }
 
-function statusColor(status: string) {
-  if (status === 'ready') return '#4CAF7D'
-  if (status === 'fallback') return '#E0A85C'
-  if (status === 'failed') return '#E05C5C'
-  return '#888'
+function formatDayShort(dateISO: string): string {
+  const d = new Date(dateISO + 'T00:00:00')
+  const day = d.toLocaleDateString('en-IN', { weekday: 'short' }).toUpperCase()
+  return `${day} ${d.getDate()}`
 }
 
+function statusColor(status: string) {
+  if (status === 'ready') return C.ok
+  if (status === 'fallback') return C.warn
+  if (status === 'failed') return C.err
+  return C.textMute
+}
+
+// Sprint 7: include major_events in the count
 function countStories(content: any): number {
   if (!content) return 0
   let n = 0
-  for (const key of ['world', 'india', 'bengaluru', 'delhi', 'business', 'technology', 'climate_health']) {
+  for (const key of ['major_events', 'world', 'india', 'bengaluru', 'delhi', 'business', 'technology', 'climate_health']) {
     if (Array.isArray(content[key])) n += content[key].length
   }
   if (content.sport?.headline) n += 1
   if (content.culture?.headline) n += 1
   return n
+}
+
+function countMajorEvents(content: any): number {
+  return Array.isArray(content?.major_events) ? content.major_events.length : 0
+}
+
+function countPersonalSections(content: any): number {
+  return Array.isArray(content?.personal_sections) ? content.personal_sections.length : 0
 }
 
 export default function AdminPage() {
@@ -54,6 +94,11 @@ export default function AdminPage() {
   const [regenResult, setRegenResult] = useState<string>('')
   const [selectedDate, setSelectedDate] = useState(getISTDate())
   const [expanded, setExpanded] = useState<string | null>(null)
+
+  const [history, setHistory] = useState<HistoryDay[]>([])
+  const [personalisedToday, setPersonalisedToday] = useState<{ users: number; ready: number; withCity: number }>({ users: 0, ready: 0, withCity: 0 })
+  const [runningPersonalisation, setRunningPersonalisation] = useState(false)
+  const [personaliseResult, setPersonaliseResult] = useState<string>('')
 
   useEffect(() => {
     const checkAuth = async () => {
@@ -76,7 +121,11 @@ export default function AdminPage() {
   }, [])
 
   useEffect(() => {
-    if (authorized) loadBriefs()
+    if (authorized) {
+      loadBriefs()
+      loadHistory()
+      loadPersonalisedStats()
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authorized, selectedDate])
 
@@ -109,6 +158,63 @@ export default function AdminPage() {
     setRegenerating(false)
   }
 
+  async function loadHistory() {
+    const today = getISTDate()
+    const sixDaysAgo = getISTDate(-6)
+    const { data } = await supabase
+      .from('briefs')
+      .select('date, edition, status')
+      .gte('date', sixDaysAgo)
+      .lte('date', today)
+    if (!data) { setHistory([]); return }
+
+    const byDate: Record<string, Record<string, string>> = {}
+    for (const r of data as any[]) {
+      if (!byDate[r.date]) byDate[r.date] = {}
+      byDate[r.date][r.edition] = r.status
+    }
+    const days: HistoryDay[] = []
+    for (let i = 0; i < 7; i++) {
+      const d = getISTDate(-i)
+      days.push({ date: d, editions: byDate[d] || {} })
+    }
+    setHistory(days)
+  }
+
+  async function loadPersonalisedStats() {
+    const [u, r, withCity] = await Promise.all([
+      supabase.from('profiles').select('id', { count: 'exact', head: true }).eq('brief_type', 'personalised'),
+      supabase.from('personalised_briefs').select('id', { count: 'exact', head: true }).eq('date', selectedDate).eq('status', 'ready'),
+      // Personal_sections is inside content (JSONB) — Postgres can filter on json path
+      supabase.from('personalised_briefs')
+        .select('id, content', { count: 'exact', head: false })
+        .eq('date', selectedDate)
+        .eq('status', 'ready'),
+    ])
+    const cityCount = (withCity.data ?? []).filter((row: any) =>
+      Array.isArray(row?.content?.personal_sections) && row.content.personal_sections.length > 0
+    ).length
+    setPersonalisedToday({ users: u.count || 0, ready: r.count || 0, withCity: cityCount })
+  }
+
+  async function runPersonalisation() {
+    setRunningPersonalisation(true)
+    setPersonaliseResult('')
+    try {
+      const res = await fetch('/api/personalise-briefs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      const data = await res.json()
+      setPersonaliseResult(JSON.stringify(data, null, 2))
+      await loadPersonalisedStats()
+    } catch (e: any) {
+      setPersonaliseResult('Error: ' + e.message)
+    }
+    setRunningPersonalisation(false)
+  }
+
   if (authorized === null) {
     return <CenteredMsg>Checking access…</CenteredMsg>
   }
@@ -116,10 +222,15 @@ export default function AdminPage() {
   if (authorized === false) {
     return (
       <CenteredMsg>
-        <div style={{ fontFamily: "'Playfair Display', serif", fontSize: '22px', color: '#F5F1EA', marginBottom: '12px' }}>
+        <div style={{
+          fontFamily: "'Playfair Display', serif", fontSize: '26px',
+          color: C.text, marginBottom: '14px', lineHeight: 1.3,
+        }}>
           Not authorised
         </div>
-        <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '15px', color: '#888' }}>
+        <div style={{
+          fontFamily: "'DM Sans', sans-serif", fontSize: '16px', color: C.textSoft,
+        }}>
           {email} doesn't have admin access.
         </div>
       </CenteredMsg>
@@ -129,140 +240,289 @@ export default function AdminPage() {
   return (
     <>
       <Head><title>Admin — Morning Brief</title></Head>
-      <div style={{ minHeight: '100vh', background: '#1A1A1A', padding: '32px 20px 80px', maxWidth: '900px', margin: '0 auto' }}>
+      <div style={{ minHeight: '100vh', background: C.bg, padding: '32px 20px 80px', maxWidth: '920px', margin: '0 auto' }}>
 
         {/* Header */}
-        <div style={{ marginBottom: '32px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ marginBottom: '36px', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '16px' }}>
           <div>
-            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '10px', letterSpacing: '2px', color: '#C8A45A', marginBottom: '6px' }}>
+            <div style={{
+              fontFamily: "'DM Mono', monospace", fontSize: '11px',
+              letterSpacing: '2.5px', color: C.gold, marginBottom: '8px',
+            }}>
               MORNING BRIEF · ADMIN
             </div>
-            <h1 style={{ fontFamily: "'Playfair Display', serif", fontSize: '28px', fontWeight: 900, color: '#F5F1EA', margin: 0 }}>
+            <h1 style={{
+              fontFamily: "'Playfair Display', serif", fontSize: '32px',
+              fontWeight: 900, color: C.text, margin: 0, lineHeight: 1.15,
+            }}>
               Brief Status
             </h1>
           </div>
           <Link href="/brief" style={{
-            fontFamily: "'DM Mono', monospace", fontSize: '11px', color: '#888',
-            textDecoration: 'none', border: '1px solid #2A2A2A', padding: '8px 14px',
+            fontFamily: "'DM Mono', monospace", fontSize: '11px', color: C.textSoft,
+            textDecoration: 'none', border: `1px solid ${C.border}`, padding: '10px 16px',
+            letterSpacing: '1.5px', whiteSpace: 'nowrap', minHeight: '44px',
+            display: 'flex', alignItems: 'center',
           }}>
             ← BACK TO APP
           </Link>
         </div>
 
+        {/* 7-day history */}
+        {history.length > 0 && (
+          <div style={{ marginBottom: '32px' }}>
+            <div style={{
+              fontFamily: "'DM Mono', monospace", fontSize: '11px',
+              letterSpacing: '2px', color: C.textMute, marginBottom: '14px',
+            }}>
+              LAST 7 DAYS
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '8px' }}>
+              {history.map((day) => {
+                const isSelected = day.date === selectedDate
+                return (
+                  <button
+                    key={day.date}
+                    onClick={() => setSelectedDate(day.date)}
+                    style={{
+                      border: `1px solid ${isSelected ? C.gold : C.border}`,
+                      background: isSelected ? C.surface2 : C.surfaceDeep,
+                      padding: '12px 4px',
+                      cursor: 'pointer',
+                      textAlign: 'center',
+                      minHeight: '60px',
+                    }}
+                    title={day.date}
+                  >
+                    <div style={{
+                      fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                      color: isSelected ? C.gold : C.textSoft,
+                      marginBottom: '10px', letterSpacing: '0.5px',
+                    }}>
+                      {formatDayShort(day.date)}
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'center', gap: '5px' }}>
+                      {(['5min', '10min', 'deep'] as const).map((ed) => {
+                        const status = day.editions[ed]
+                        return (
+                          <span
+                            key={ed}
+                            title={`${ed}: ${status || 'missing'}`}
+                            style={{
+                              width: '9px',
+                              height: '9px',
+                              borderRadius: '50%',
+                              background: status ? statusColor(status) : 'transparent',
+                              border: status ? 'none' : `1px solid ${C.borderHi}`,
+                              display: 'inline-block',
+                            }}
+                          />
+                        )
+                      })}
+                    </div>
+                  </button>
+                )
+              })}
+            </div>
+            <div style={{
+              display: 'flex', gap: '18px', marginTop: '14px',
+              fontFamily: "'DM Mono', monospace", fontSize: '10px',
+              color: C.textMute, letterSpacing: '1.5px', flexWrap: 'wrap',
+            }}>
+              <span><span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: statusColor('ready'), marginRight: '6px' }} />READY</span>
+              <span><span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: statusColor('fallback'), marginRight: '6px' }} />FALLBACK</span>
+              <span><span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: statusColor('failed'), marginRight: '6px' }} />FAILED</span>
+              <span><span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', border: `1px solid ${C.borderHi}`, marginRight: '6px' }} />MISSING</span>
+            </div>
+          </div>
+        )}
+
         {/* Date picker */}
-        <div style={{ marginBottom: '24px', display: 'flex', gap: '12px', alignItems: 'center' }}>
-          <span style={{ fontFamily: "'DM Mono', monospace", fontSize: '11px', color: '#888' }}>DATE:</span>
+        <div style={{ marginBottom: '28px', display: 'flex', gap: '14px', alignItems: 'center', flexWrap: 'wrap' }}>
+          <span style={{
+            fontFamily: "'DM Mono', monospace", fontSize: '11px',
+            color: C.textMute, letterSpacing: '1.5px',
+          }}>DATE:</span>
           <input
             type="date"
             value={selectedDate}
             onChange={(e) => setSelectedDate(e.target.value)}
             style={{
-              background: '#1E1E1E', border: '1px solid #2A2A2A', color: '#F5F1EA',
-              padding: '8px 12px', fontFamily: "'DM Mono', monospace", fontSize: '13px',
+              background: C.surface2, border: `1px solid ${C.border}`, color: C.text,
+              padding: '10px 14px', fontFamily: "'DM Mono', monospace", fontSize: '13px',
+              minHeight: '44px',
             }}
           />
           <button
             onClick={() => setSelectedDate(getISTDate())}
             style={{
-              background: 'none', border: '1px solid #2A2A2A', color: '#888',
-              padding: '8px 12px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
-              cursor: 'pointer',
+              background: 'none', border: `1px solid ${C.border}`, color: C.textSoft,
+              padding: '10px 14px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
+              letterSpacing: '1.5px', cursor: 'pointer', minHeight: '44px',
             }}
           >TODAY</button>
         </div>
 
         {/* Editions grid */}
         {loading ? (
-          <div style={{ color: '#666', fontFamily: "'DM Mono', monospace", padding: '20px' }}>Loading…</div>
+          <div style={{
+            color: C.textMute, fontFamily: "'DM Mono', monospace",
+            padding: '24px', fontSize: '13px',
+          }}>Loading…</div>
         ) : rows.length === 0 ? (
           <div style={{
-            border: '1px solid #2A2A2A', padding: '24px', color: '#888',
-            fontFamily: "'DM Sans', sans-serif", marginBottom: '24px',
+            border: `1px solid ${C.border}`, padding: '24px', color: C.textSoft,
+            fontFamily: "'DM Sans', sans-serif", fontSize: '15px',
+            marginBottom: '24px', background: C.surface, lineHeight: 1.6,
           }}>
             No briefs found for {selectedDate}. The cron may not have run yet, or the date might be in the future.
           </div>
         ) : (
-          rows.map((row) => (
-            <div key={row.edition} style={{
-              border: '1px solid #2A2A2A',
-              borderLeft: `3px solid ${statusColor(row.status)}`,
-              padding: '20px',
-              marginBottom: '14px',
-              background: '#1E1E1E',
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
-                <div style={{
-                  fontFamily: "'Playfair Display', serif", fontSize: '20px', fontWeight: 700, color: '#F5F1EA',
-                }}>{row.edition.toUpperCase()}</div>
-                <div style={{
-                  fontFamily: "'DM Mono', monospace", fontSize: '11px', letterSpacing: '1.5px',
-                  color: statusColor(row.status), textTransform: 'uppercase',
-                }}>{row.status}</div>
-              </div>
-
-              <div style={{
-                display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px',
-                fontFamily: "'DM Mono', monospace", fontSize: '12px', color: '#999', marginBottom: '14px',
+          rows.map((row) => {
+            const majorCount = countMajorEvents(row.content)
+            return (
+              <div key={row.edition} style={{
+                border: `1px solid ${C.border}`,
+                borderLeft: `3px solid ${statusColor(row.status)}`,
+                padding: '22px',
+                marginBottom: '16px',
+                background: C.surface2,
               }}>
-                <div>stories: <span style={{ color: '#F5F1EA' }}>{countStories(row.content)}</span></div>
-                <div>closer: <span style={{ color: '#F5F1EA' }}>{row.content?.closer ? 'yes' : 'no'}</span></div>
-                <div>generated: <span style={{ color: '#F5F1EA' }}>{row.generated_at ? new Date(row.generated_at).toLocaleString('en-IN') : '—'}</span></div>
-                <div>markets: <span style={{ color: '#F5F1EA' }}>{row.content?.markets?.indices?.length ?? 0} indices</span></div>
-              </div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
+                  <div style={{
+                    fontFamily: "'Playfair Display', serif", fontSize: '22px',
+                    fontWeight: 700, color: C.text,
+                  }}>{row.edition.toUpperCase()}</div>
+                  <div style={{
+                    fontFamily: "'DM Mono', monospace", fontSize: '11px', letterSpacing: '2px',
+                    color: statusColor(row.status), textTransform: 'uppercase',
+                  }}>{row.status}</div>
+                </div>
 
-              <div style={{ display: 'flex', gap: '8px' }}>
-                <button
-                  onClick={() => setExpanded(expanded === row.edition ? null : row.edition)}
-                  style={{
-                    background: 'none', border: '1px solid #2A2A2A', color: '#888',
-                    padding: '6px 12px', fontFamily: "'DM Mono', monospace", fontSize: '10px',
-                    letterSpacing: '1px', cursor: 'pointer',
-                  }}
-                >{expanded === row.edition ? 'HIDE JSON' : 'VIEW JSON'}</button>
-                <button
-                  onClick={() => regenerate(row.edition)}
-                  disabled={regenerating}
-                  style={{
-                    background: 'none', border: '1px solid #C8A45A', color: '#C8A45A',
-                    padding: '6px 12px', fontFamily: "'DM Mono', monospace", fontSize: '10px',
-                    letterSpacing: '1px', cursor: regenerating ? 'not-allowed' : 'pointer',
-                    opacity: regenerating ? 0.5 : 1,
-                  }}
-                >REGENERATE</button>
-              </div>
+                <div style={{
+                  display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 18px',
+                  fontFamily: "'DM Mono', monospace", fontSize: '12px',
+                  color: C.textMute, marginBottom: '16px',
+                }}>
+                  <div>stories: <span style={{ color: C.text }}>{countStories(row.content)}</span></div>
+                  <div>major events: <span style={{ color: C.text }}>{majorCount}</span></div>
+                  <div>closer: <span style={{ color: C.text }}>{row.content?.closer ? 'yes' : 'no'}</span></div>
+                  <div>markets: <span style={{ color: C.text }}>{row.content?.markets?.indices?.length ?? 0} indices</span></div>
+                  <div style={{ gridColumn: '1 / -1' }}>generated: <span style={{ color: C.text }}>{row.generated_at ? new Date(row.generated_at).toLocaleString('en-IN') : '—'}</span></div>
+                </div>
 
-              {expanded === row.edition && (
-                <pre style={{
-                  marginTop: '14px', padding: '14px', background: '#0F0F0F',
-                  border: '1px solid #2A2A2A', color: '#C0B9AF',
-                  fontFamily: "'DM Mono', monospace", fontSize: '11px',
-                  maxHeight: '400px', overflow: 'auto', whiteSpace: 'pre-wrap',
-                }}>{JSON.stringify(row.content, null, 2)}</pre>
-              )}
-            </div>
-          ))
+                <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                  <button
+                    onClick={() => setExpanded(expanded === row.edition ? null : row.edition)}
+                    style={{
+                      background: 'none', border: `1px solid ${C.border}`, color: C.textSoft,
+                      padding: '8px 14px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
+                      letterSpacing: '1.5px', cursor: 'pointer', minHeight: '40px',
+                    }}
+                  >{expanded === row.edition ? 'HIDE JSON' : 'VIEW JSON'}</button>
+                  <button
+                    onClick={() => regenerate(row.edition)}
+                    disabled={regenerating}
+                    style={{
+                      background: 'none', border: `1px solid ${C.gold}`, color: C.gold,
+                      padding: '8px 14px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
+                      letterSpacing: '1.5px',
+                      cursor: regenerating ? 'not-allowed' : 'pointer',
+                      opacity: regenerating ? 0.5 : 1, minHeight: '40px',
+                    }}
+                  >REGENERATE</button>
+                </div>
+
+                {expanded === row.edition && (
+                  <pre style={{
+                    marginTop: '16px', padding: '16px', background: C.surfaceDeep,
+                    border: `1px solid ${C.border}`, color: C.textSoft,
+                    fontFamily: "'DM Mono', monospace", fontSize: '11px',
+                    maxHeight: '420px', overflow: 'auto', whiteSpace: 'pre-wrap',
+                    lineHeight: 1.5,
+                  }}>{JSON.stringify(row.content, null, 2)}</pre>
+                )}
+              </div>
+            )
+          })
         )}
 
         {/* Regenerate all */}
-        <div style={{ marginTop: '32px', paddingTop: '24px', borderTop: '1px solid #2A2A2A' }}>
+        <div style={{ marginTop: '36px', paddingTop: '28px', borderTop: `1px solid ${C.border}` }}>
           <button
             onClick={() => regenerate(undefined)}
             disabled={regenerating}
             style={{
-              background: '#C8A45A', color: '#1A1A1A', border: 'none',
-              padding: '14px 24px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
-              letterSpacing: '1.5px', fontWeight: 700, cursor: regenerating ? 'not-allowed' : 'pointer',
-              opacity: regenerating ? 0.6 : 1,
+              background: C.gold, color: '#0E0E0E', border: 'none',
+              padding: '16px 28px', fontFamily: "'DM Mono', monospace", fontSize: '12px',
+              letterSpacing: '2px', fontWeight: 700,
+              cursor: regenerating ? 'not-allowed' : 'pointer',
+              opacity: regenerating ? 0.6 : 1, minHeight: '52px',
             }}
-          >{regenerating ? 'GENERATING… (60-120s)' : 'REGENERATE ALL 3 EDITIONS'}</button>
+          >{regenerating ? 'GENERATING… (60–120s)' : 'REGENERATE ALL 3 EDITIONS'}</button>
 
           {regenResult && (
             <pre style={{
-              marginTop: '16px', padding: '14px', background: '#0F0F0F',
-              border: '1px solid #2A2A2A', color: '#C0B9AF',
+              marginTop: '18px', padding: '16px', background: C.surfaceDeep,
+              border: `1px solid ${C.border}`, color: C.textSoft,
               fontFamily: "'DM Mono', monospace", fontSize: '11px',
-              maxHeight: '300px', overflow: 'auto', whiteSpace: 'pre-wrap',
+              maxHeight: '320px', overflow: 'auto', whiteSpace: 'pre-wrap',
+              lineHeight: 1.5,
             }}>{regenResult}</pre>
+          )}
+        </div>
+
+        {/* Personalisation panel */}
+        <div style={{ marginTop: '36px', paddingTop: '28px', borderTop: `1px solid ${C.border}` }}>
+          <div style={{
+            fontFamily: "'DM Mono', monospace", fontSize: '11px',
+            letterSpacing: '2.5px', color: C.gold, marginBottom: '16px',
+          }}>
+            PERSONALISATION
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px', marginBottom: '20px' }}>
+            <div style={{
+              border: `1px solid ${C.border}`, padding: '16px', background: C.surface2,
+              fontFamily: "'DM Mono', monospace", fontSize: '12px', color: C.textMute,
+            }}>
+              <div style={{ marginBottom: '6px', letterSpacing: '1px' }}>USERS</div>
+              <div style={{ color: C.text, fontSize: '20px', fontWeight: 700 }}>{personalisedToday.users}</div>
+            </div>
+            <div style={{
+              border: `1px solid ${C.border}`, padding: '16px', background: C.surface2,
+              fontFamily: "'DM Mono', monospace", fontSize: '12px', color: C.textMute,
+            }}>
+              <div style={{ marginBottom: '6px', letterSpacing: '1px' }}>READY</div>
+              <div style={{ color: C.text, fontSize: '20px', fontWeight: 700 }}>{personalisedToday.ready}</div>
+            </div>
+            <div style={{
+              border: `1px solid ${C.border}`, padding: '16px', background: C.surface2,
+              fontFamily: "'DM Mono', monospace", fontSize: '12px', color: C.textMute,
+            }}>
+              <div style={{ marginBottom: '6px', letterSpacing: '1px' }}>W/ CITY</div>
+              <div style={{ color: C.text, fontSize: '20px', fontWeight: 700 }}>{personalisedToday.withCity}</div>
+            </div>
+          </div>
+          <button
+            onClick={runPersonalisation}
+            disabled={runningPersonalisation}
+            style={{
+              background: 'none', border: `1px solid ${C.gold}`, color: C.gold,
+              padding: '14px 20px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
+              letterSpacing: '2px',
+              cursor: runningPersonalisation ? 'not-allowed' : 'pointer',
+              opacity: runningPersonalisation ? 0.5 : 1, minHeight: '48px',
+            }}
+          >{runningPersonalisation ? 'RUNNING…' : 'RUN PERSONALISATION NOW'}</button>
+
+          {personaliseResult && (
+            <pre style={{
+              marginTop: '16px', padding: '16px', background: C.surfaceDeep,
+              border: `1px solid ${C.border}`, color: C.textSoft,
+              fontFamily: "'DM Mono', monospace", fontSize: '11px',
+              maxHeight: '320px', overflow: 'auto', whiteSpace: 'pre-wrap',
+              lineHeight: 1.5,
+            }}>{personaliseResult}</pre>
           )}
         </div>
       </div>
@@ -273,8 +533,8 @@ export default function AdminPage() {
 function CenteredMsg({ children }: { children: React.ReactNode }) {
   return (
     <div style={{
-      minHeight: '100vh', background: '#1A1A1A', display: 'flex',
-      flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '24px',
+      minHeight: '100vh', background: C.bg, display: 'flex',
+      flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '28px',
     }}>
       {children}
     </div>

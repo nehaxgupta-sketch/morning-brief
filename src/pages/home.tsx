@@ -2,6 +2,20 @@ import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { supabase, Profile } from '@/lib/supabase'
 
+const C = {
+  bg: '#0E0E0E',
+  surface: '#161616',
+  surface2: '#1E1E1E',
+  border: '#262626',
+  borderHi: '#3A3A3A',
+  gold: '#C8A45A',
+  goldSoft: 'rgba(200,164,90,0.10)',
+  text: '#F5F1EA',
+  textSoft: '#CFC6B8',
+  textMute: '#8E867B',
+  textDim: '#5E574D',
+}
+
 export default function Home() {
   const [profile, setProfile] = useState<Profile | null>(null)
   const [loading, setLoading] = useState(true)
@@ -22,15 +36,14 @@ export default function Home() {
       if (data && !data.onboarding_complete) { window.location.href = '/onboarding'; return }
       setProfile(data)
 
-      // Which edition to look for
-      const preferredEdition = (data?.edition_preference as string) || '5min'
-      const editionToCheck = ['5min', '10min', 'deep'].includes(preferredEdition)
-        ? preferredEdition : '5min'
+      const rawPref = (data?.edition_preference as string) || '10min'
+      const normalised = rawPref === 'ultra' ? '5min' : rawPref
+      const editionToCheck = ['5min', '10min', 'deep'].includes(normalised)
+        ? normalised : '10min'
 
       const isPersonalised = data?.brief_type === 'personalised'
       let content: any = null
 
-      // Personalised users: check for their custom brief first
       if (isPersonalised) {
         const { data: personalised } = await supabase
           .from('personalised_briefs')
@@ -43,7 +56,6 @@ export default function Home() {
         if (personalised?.content) content = personalised.content
       }
 
-      // Fallback to the shared standard brief
       if (!content) {
         const { data: briefData } = await supabase
           .from('briefs')
@@ -70,53 +82,62 @@ export default function Home() {
   const isPersonalised = profile?.brief_type === 'personalised'
 
   const editionLabel = (pref: string) => {
-    if (pref === '5min') return '5-minute'
-    if (pref === 'deep') return 'deep dive'
+    const p = pref === 'ultra' ? '5min' : pref
+    if (p === '5min') return '5-minute'
+    if (p === 'deep') return 'deep dive'
     return '10-minute'
   }
 
-  // ── Pull the teaser + counts out of today's brief content ──────────────
-  const topHeadline: string | null = briefContent?.world?.[0]?.headline ?? null
+  // Prefer major_events for the headline teaser, fall back to world[0]
+  const topHeadline: string | null =
+    briefContent?.major_events?.[0]?.headline
+    ?? briefContent?.world?.[0]?.headline
+    ?? null
 
-  // Build a short "what's inside" summary line
+  // What's inside summary
   const sectionCounts: string[] = []
   if (briefContent) {
+    const m = briefContent.major_events?.length ?? 0
     const w = briefContent.world?.length ?? 0
     const i = briefContent.india?.length ?? 0
+    const ps = briefContent.personal_sections?.length ?? 0
+    if (m) sectionCounts.push(`🔥 ${m} major`)
     if (w) sectionCounts.push(`🌍 ${w} world`)
     if (i) sectionCounts.push(`🇮🇳 ${i} India`)
+    if (ps) sectionCounts.push(`📍 ${ps} for you`)
     if (briefContent.markets?.indices?.length) sectionCounts.push('📈 Markets')
     if (briefContent.sport?.headline) sectionCounts.push('🏏 Sport')
     if (briefContent.culture?.headline) sectionCounts.push('🎭 Culture')
   }
 
   return (
-    <div style={{ minHeight: '100vh', background: '#F5F1EA', paddingBottom: '72px' }}>
+    <div style={{ minHeight: '100vh', background: C.bg, paddingBottom: '80px' }}>
 
       {/* Header */}
       <div style={{
-        background: '#1A1A1A',
-        borderBottom: '2px solid #C8A45A',
+        background: C.bg,
+        borderBottom: `2px solid ${C.gold}`,
         padding: '0 20px',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
-        height: '52px',
+        height: '56px',
         position: 'sticky',
         top: 0,
         zIndex: 10,
       }}>
         <div style={{
           fontFamily: "'Playfair Display', Georgia, serif",
-          fontSize: '20px',
-          fontWeight: '900',
-          color: '#C8A45A',
+          fontSize: '22px',
+          fontWeight: 900,
+          color: C.gold,
+          letterSpacing: '0.2px',
         }}>Morning Brief</div>
         <Link href="/profile" style={{
           fontFamily: "'DM Mono', monospace",
-          fontSize: '9px',
-          letterSpacing: '1px',
-          color: '#666',
+          fontSize: '10px',
+          letterSpacing: '1.5px',
+          color: C.textMute,
           textDecoration: 'none',
           minHeight: '44px',
           display: 'flex',
@@ -125,84 +146,83 @@ export default function Home() {
       </div>
 
       {/* Greeting */}
-      <div style={{ background: '#1A1A1A', padding: '16px 20px 20px' }}>
+      <div style={{ background: C.bg, padding: '20px 20px 24px' }}>
         <div style={{
           fontFamily: "'DM Mono', monospace",
-          fontSize: '9px',
+          fontSize: '10px',
           letterSpacing: '2px',
-          color: '#666',
-          marginBottom: '4px',
+          color: C.textMute,
+          marginBottom: '6px',
         }}>{today.toUpperCase()}</div>
         <div style={{
           fontFamily: "'Playfair Display', Georgia, serif",
-          fontSize: '20px',
-          color: '#F5F1EA',
+          fontSize: '24px',
+          fontWeight: 700,
+          color: C.text,
+          lineHeight: 1.3,
         }}>{greeting}, {firstName}.</div>
       </div>
 
-      <div style={{ padding: '20px', maxWidth: '480px', margin: '0 auto' }}>
+      <div style={{ padding: '0 20px', maxWidth: '480px', margin: '0 auto' }}>
 
         {/* Brief card */}
         <div style={{
-          background: '#FDFCF9',
-          border: '1px solid #E2DBD0',
-          borderTop: '3px solid #C8A45A',
-          padding: '20px',
-          marginBottom: '16px',
+          background: C.surface,
+          border: `1px solid ${C.border}`,
+          borderTop: `3px solid ${C.gold}`,
+          padding: '22px',
+          marginBottom: '20px',
         }}>
           <div style={{
             fontFamily: "'DM Mono', monospace",
-            fontSize: '9px',
+            fontSize: '10px',
             letterSpacing: '2px',
-            color: '#C8A45A',
-            marginBottom: '8px',
+            color: C.gold,
+            marginBottom: '12px',
           }}>TODAY'S BRIEF</div>
 
           {briefReady ? (
-            // ── Brief is ready ──────────────────────────────────────────
             <>
               <div style={{
                 fontFamily: "'DM Mono', monospace",
-                fontSize: '9px',
-                letterSpacing: '1px',
-                color: '#999',
-                marginBottom: '10px',
+                fontSize: '10px',
+                letterSpacing: '1.5px',
+                color: C.textMute,
+                marginBottom: '14px',
               }}>
                 YOUR {editionLabel(profile?.edition_preference as string || '10min').toUpperCase()} BRIEF IS READY
                 {isPersonalised ? ' · PERSONALISED' : ''}
               </div>
 
-              {/* Top headline teaser */}
               {topHeadline ? (
                 <div style={{
                   fontFamily: "'Playfair Display', Georgia, serif",
-                  fontSize: '20px',
-                  fontWeight: '700',
-                  color: '#1A1A1A',
-                  lineHeight: '1.35',
-                  marginBottom: '12px',
+                  fontSize: '22px',
+                  fontWeight: 700,
+                  color: C.text,
+                  lineHeight: 1.35,
+                  marginBottom: '16px',
                 }}>{topHeadline}</div>
               ) : (
                 <div style={{
                   fontFamily: "'Playfair Display', Georgia, serif",
-                  fontSize: '18px',
-                  fontWeight: '700',
-                  color: '#1A1A1A',
-                  marginBottom: '12px',
+                  fontSize: '20px',
+                  fontWeight: 700,
+                  color: C.text,
+                  marginBottom: '16px',
                 }}>Your brief is ready</div>
               )}
 
-              {/* What's inside */}
               {sectionCounts.length > 0 && (
                 <div style={{
                   fontFamily: "'DM Sans', sans-serif",
-                  fontSize: '13px',
-                  color: '#777',
-                  lineHeight: '1.6',
-                  marginBottom: '20px',
+                  fontSize: '14px',
+                  color: C.textSoft,
+                  lineHeight: 1.7,
+                  marginBottom: '22px',
                   display: 'flex',
                   flexWrap: 'wrap',
-                  gap: '4px 12px',
+                  gap: '6px 14px',
                 }}>
                   {sectionCounts.map((s, i) => (
                     <span key={i}>{s}</span>
@@ -214,68 +234,70 @@ export default function Home() {
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                padding: '14px 20px',
-                background: '#1A1A1A',
-                color: '#F5F1EA',
+                padding: '16px 20px',
+                background: C.gold,
+                color: '#0E0E0E',
                 fontFamily: "'DM Sans', sans-serif",
                 fontSize: '14px',
-                fontWeight: '600',
-                letterSpacing: '0.5px',
+                fontWeight: 700,
+                letterSpacing: '1.5px',
+                textTransform: 'uppercase',
                 textDecoration: 'none',
-                borderRadius: '2px',
+                minHeight: '52px',
               }}>Read Today's Brief →</Link>
             </>
           ) : (
-            // ── Brief not yet ready ─────────────────────────────────────
             <>
               <div style={{
                 fontFamily: "'Playfair Display', Georgia, serif",
-                fontSize: '18px',
-                fontWeight: '700',
-                color: '#1A1A1A',
-                marginBottom: '8px',
+                fontSize: '20px',
+                fontWeight: 700,
+                color: C.text,
+                marginBottom: '12px',
+                lineHeight: 1.35,
               }}>Your brief is being prepared</div>
               <div style={{
                 fontFamily: "'DM Sans', sans-serif",
-                fontSize: '14px',
-                color: '#888',
-                lineHeight: '1.6',
-                marginBottom: '20px',
+                fontSize: '15px',
+                color: C.textSoft,
+                lineHeight: 1.7,
+                marginBottom: '22px',
               }}>
                 {isPersonalised
                   ? `Your personalised brief — tailored to ${profile?.city_current || 'your city'} and your interests — will be ready tomorrow at 6:45 AM.`
-                  : 'Your standard brief covering top world and India stories will be ready tomorrow at 6:45 AM.'
+                  : 'Your standard brief covering today\'s biggest stories will be ready tomorrow at 6:45 AM.'
                 }
               </div>
 
               {isPersonalised && (
                 <div style={{
-                  background: '#F5F1EA',
-                  border: '1px solid #E2DBD0',
-                  padding: '14px',
-                  marginBottom: '20px',
+                  background: C.surface2,
+                  border: `1px solid ${C.border}`,
+                  padding: '16px',
+                  marginBottom: '22px',
                 }}>
                   <div style={{
                     fontFamily: "'DM Mono', monospace",
-                    fontSize: '8px',
+                    fontSize: '10px',
                     letterSpacing: '2px',
-                    color: '#888',
-                    marginBottom: '8px',
+                    color: C.gold,
+                    marginBottom: '10px',
                   }}>YOUR BRIEF WILL COVER</div>
                   {[
-                    `📍 ${[profile?.city_current, profile?.city_home].filter(Boolean).join(' & ')} local news`,
-                    '🌍 World affairs, India politics, geopolitics',
-                    `💼 Business & markets — ${profile?.industry || (profile as any)?.work_area || 'tailored to your field'}`,
+                    `📍 ${[profile?.city_current, profile?.city_home].filter(Boolean).join(' & ') || 'Your city'}`,
+                    '🔥 Major events worth tracking',
+                    '🌍 World & India politics',
+                    `💼 Markets · ${profile?.industry || (profile as any)?.work_area || 'your field'}`,
                     profile?.interests?.length ? `🎯 ${profile.interests.slice(0, 3).join(', ')}` : null,
-                    `📖 ${editionLabel(profile?.edition_preference as string || '10min')} depth · ${profile?.mood_preference || 'Neutral'} lens`,
+                    `📖 ${editionLabel(profile?.edition_preference as string || '10min')} · ${profile?.mood_preference || 'Neutral'} lens`,
                   ].filter(Boolean).map((item, i) => (
                     <div key={i} style={{
                       fontFamily: "'DM Sans', sans-serif",
-                      fontSize: '13px',
-                      color: '#555',
-                      padding: '5px 0',
-                      borderBottom: '1px solid #EDE8DF',
-                      lineHeight: '1.4',
+                      fontSize: '14px',
+                      color: C.textSoft,
+                      padding: '8px 0',
+                      borderBottom: `1px solid ${C.border}`,
+                      lineHeight: 1.55,
                     }}>{item}</div>
                   ))}
                 </div>
@@ -285,15 +307,17 @@ export default function Home() {
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                padding: '13px 20px',
-                background: '#1A1A1A',
-                color: '#F5F1EA',
+                padding: '16px 20px',
+                background: 'transparent',
+                color: C.gold,
+                border: `1px solid ${C.gold}`,
                 fontFamily: "'DM Sans', sans-serif",
-                fontSize: '13px',
-                fontWeight: '600',
-                letterSpacing: '0.5px',
+                fontSize: '14px',
+                fontWeight: 700,
+                letterSpacing: '1.5px',
+                textTransform: 'uppercase',
                 textDecoration: 'none',
-                borderRadius: '2px',
+                minHeight: '52px',
               }}>Read Demo Brief →</Link>
             </>
           )}
@@ -304,28 +328,28 @@ export default function Home() {
       <div style={{
         position: 'fixed',
         bottom: 0, left: 0, right: 0,
-        background: '#1A1A1A',
-        borderTop: '1px solid #2A2A2A',
+        background: C.surface,
+        borderTop: `1px solid ${C.border}`,
         display: 'flex',
-        height: '60px',
-        paddingBottom: 'env(safe-area-inset-bottom)',
+        height: '64px',
+        paddingBottom: 'env(safe-area-inset-bottom, 0px)',
       }}>
         {[
-          { href: '/home', label: 'Brief', icon: '◆', active: true },
-          { href: '/bookmarks', label: 'Saved', icon: '★', active: false },
-          { href: '/profile', label: 'Profile', icon: '◑', active: false },
+          { href: '/home',      label: 'Brief',   icon: '◆', active: true },
+          { href: '/bookmarks', label: 'Saved',   icon: '★', active: false },
+          { href: '/profile',   label: 'Profile', icon: '◑', active: false },
         ].map(({ href, label, icon, active }) => (
           <Link key={href} href={href} style={{
             flex: 1, display: 'flex', flexDirection: 'column',
             alignItems: 'center', justifyContent: 'center',
-            gap: '3px', textDecoration: 'none', minHeight: '60px',
+            gap: '4px', textDecoration: 'none', minHeight: '60px',
           }}>
-            <span style={{ fontSize: '16px', color: active ? '#C8A45A' : '#666' }}>{icon}</span>
+            <span style={{ fontSize: '18px', color: active ? C.gold : C.textMute }}>{icon}</span>
             <span style={{
               fontFamily: "'DM Mono', monospace",
-              fontSize: '8px',
-              letterSpacing: '1px',
-              color: active ? '#C8A45A' : '#666',
+              fontSize: '10px',
+              letterSpacing: '1.5px',
+              color: active ? C.gold : C.textMute,
             }}>{label.toUpperCase()}</span>
           </Link>
         ))}
