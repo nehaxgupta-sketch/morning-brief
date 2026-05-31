@@ -409,11 +409,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   // 3) Build the unique-cities set. Trim, dedup (case-insensitive label).
   const cityNorm = (s: any) => (typeof s === 'string' ? s.trim() : '');
-  const uniqueCities = [...new Set(
+  const uniqueCities = Array.from(new Set(
     users
       .map((u: any) => cityNorm(u.city_current))
       .filter(Boolean)
-  )];
+  ));
   console.log(`Unique cities to fetch: ${uniqueCities.length} — ${uniqueCities.join(', ')}`);
 
   // 4) Build the city cache in parallel.
@@ -517,7 +517,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     date,
     dryRun,
     uniqueCities,
-    cityHits: Object.fromEntries([...cityCache.entries()].map(([c, s]) => [c, s.length])),
+    cityHits: Object.fromEntries(Array.from(cityCache.entries()).map(([c, s]) => [c, s.length])),
     processed: results.length,
     editionsReady,
     results,
