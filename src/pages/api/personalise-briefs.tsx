@@ -138,7 +138,8 @@ function isWhitelistedSource(url?: string): boolean {
   if (!url) return false;
   try {
     const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
-    for (const allowed of TIER_1_HOSTS) {
+    // Array.from() avoids downlevel-iteration error on Set<string>.
+    for (const allowed of Array.from(TIER_1_HOSTS)) {
       if (host === allowed || host.endsWith('.' + allowed)) return true;
     }
     return false;

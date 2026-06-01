@@ -114,8 +114,9 @@ function isWhitelistedSource(url: string | undefined | null): boolean {
   if (!url || typeof url !== 'string') return false;
   const host = extractHostname(url);
   if (!host) return false;
-  // Accept exact match or any subdomain of a whitelisted domain
-  for (const allowed of TIER_1_DOMAINS) {
+  // Accept exact match or any subdomain of a whitelisted domain.
+  // Array.from() avoids downlevel-iteration error on Set<string>.
+  for (const allowed of Array.from(TIER_1_DOMAINS)) {
     if (host === allowed || host.endsWith('.' + allowed)) return true;
   }
   return false;
