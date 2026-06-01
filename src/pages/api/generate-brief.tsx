@@ -151,8 +151,8 @@ interface RawStories {
   business: RawStory[];
   technology: RawStory[];
   climate_health: RawStory[];
-  sport: RawStory;
-  culture: RawStory;
+  sport?: RawStory;
+  culture?: RawStory;
   markets: { summary: string; indices: MarketIndex[] };
   // Lens — the four-line summary used by the home flash card.
   lens: {
@@ -219,8 +219,8 @@ interface BriefDaily {
   markets: { summary: string; indices: MarketIndex[] };
   technology: FullStory[];
   climate_health: FullStory[];
-  sport: FullStory;
-  culture: FullStory;
+  sport?: FullStory;
+  culture?: FullStory;
   closer: Closer;
 }
 
@@ -302,18 +302,20 @@ const CloserSchema = z.object({
 const BriefQuickSchema = z.object({
   edition: z.literal('5min'),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  major_events: z.array(MicroStorySchema).min(1),
-  world: z.array(MicroStorySchema).min(1),
-  india: z.array(MicroStorySchema).min(1),
-  topics: z.array(MicroStorySchema).min(1),
+  // Sections can be empty on quiet news days — UI shows "no stories" rather than failing the whole brief.
+  major_events: z.array(MicroStorySchema),
+  world: z.array(MicroStorySchema),
+  india: z.array(MicroStorySchema),
+  topics: z.array(MicroStorySchema),
 });
 
 const BriefDailySchema = z.object({
   edition: z.literal('10min'),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  major_events: z.array(FullStorySchema).min(1),
-  world: z.array(FullStorySchema).min(1),
-  india: z.array(FullStorySchema).min(1),
+  // Sections can be empty on quiet news days — UI shows "no stories" rather than failing the whole brief.
+  major_events: z.array(FullStorySchema),
+  world: z.array(FullStorySchema),
+  india: z.array(FullStorySchema),
   business: z.array(FullStorySchema),
   markets: z.object({
     summary: z.string().min(10),
@@ -321,8 +323,10 @@ const BriefDailySchema = z.object({
   }),
   technology: z.array(FullStorySchema),
   climate_health: z.array(FullStorySchema),
-  sport: FullStorySchema,
-  culture: FullStorySchema,
+  // sport/culture optional — when OpenAI can't source a story from a whitelisted publisher,
+  // we omit the section entirely rather than fail the whole brief.
+  sport: FullStorySchema.optional(),
+  culture: FullStorySchema.optional(),
   closer: CloserSchema,
 });
 
@@ -641,21 +645,19 @@ function enforceQualityRules(raw: any): RawStories {
     return kept;
   }
 
-  function processSingle(section: string, story: any): RawStory {
-    // Graceful degradation: if the section is missing or malformed, return a
-    // placeholder that downstream validation will reject for editions that
-    // require the section. Other editions (Brief, Editorial) don't reference
-    // sport/culture by schema, so they can proceed normally.
+  function processSingle(section: string, story: any): RawStory | undefined {
+    // Graceful degradation: if the section is missing, malformed, or sourced from
+    // a non-whitelisted publisher, return undefined. The 10min schema marks
+    // sport/culture as optional, so the brief publishes without them on those days.
     if (!story || typeof story !== 'object') {
-      console.warn(`Single-section ${section} missing or malformed; using empty placeholder.`);
+      console.warn(`Single-section ${section} missing or malformed; omitting.`);
       dropped.push({ section, reason: 'missing from fetch' });
-      return { headline: '', body: '', source: '', source_url: '' } as RawStory;
+      return undefined;
     }
     if (!isWhitelistedSource(story.source_url)) {
+      console.warn(`Single-section ${section} dropped (non-whitelisted source): ${story.source_url}`);
       dropped.push({ section, reason: 'non-whitelisted source', headline: story.headline, url: story.source_url });
-      // Single sections can't have nothing — return as-is but log. Validation
-      // downstream will surface this as a fallback to yesterday's brief.
-      console.warn(`Single-section ${section} kept despite non-whitelisted source (fallback may trigger):`, story.source_url);
+      return undefined;
     }
     const fp = fingerprint(story);
     if (seenFingerprints.has(fp)) {
@@ -673,8 +675,8 @@ function enforceQualityRules(raw: any): RawStories {
     business: [],
     technology: [],
     climate_health: [],
-    sport: {} as RawStory,
-    culture: {} as RawStory,
+    sport: undefined,
+    culture: undefined,
     markets: raw?.markets || { summary: '', indices: [] },
     lens: raw?.lens || { world: '', india: '', markets: '', watch: '' },
   };
@@ -771,7 +773,7 @@ FORMAT: each story has FIVE labelled fields:
 - what_happens_next: 1-2 sentences. The specific developments to track (hearings, decisions, releases, fixtures).
 - analysis: 1-2 sentences. Concise interpretation, clearly separate from the facts. Acknowledge uncertainty where appropriate.
 
-SELECTION: Include EVERY story from the raw stories. Do not drop anything. Maintain the ordering from the raw stories within each section.
+SELECTION: Include EVERY story from the raw stories. Do not drop anything. Maintain the ordering from the raw stories within each section. If raw stories has no "sport" or "culture" key (or the value is empty/missing), OMIT that field from your output entirely — do NOT fabricate a story.
 
 CLOSER: Include a "closer" object at the end with:
 - headlines_to_remember: EXACTLY 5 single-line memory anchors covering today's most important stories. Each short, factual, scannable (≤ 14 words).
