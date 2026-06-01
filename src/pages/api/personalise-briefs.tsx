@@ -832,7 +832,13 @@ function makeInterestSection(
   // Non-standard interest — fetched separately into interestCache.
   const fetched = interestCache.get(interest) || [];
   if (fetched.length === 0) return null;
-  const stories = fetched.slice(0, storiesPerSection).map(shape === 'micro' ? cityToMicro : cityToFull);
+  // Branch the map so TypeScript sees a single concrete callback per call.
+  // (A conditional `.map(shape === 'micro' ? cityToMicro : cityToFull)` fails
+  // type-check because the two return shapes don't unify.)
+  const sliced = fetched.slice(0, storiesPerSection);
+  const stories: any[] = shape === 'micro'
+    ? sliced.map(cityToMicro)
+    : sliced.map(cityToFull);
 
   return {
     id,
