@@ -4,18 +4,10 @@ import Link from 'next/link'
 import { supabase, Profile } from '@/lib/supabase'
 
 const C = {
-  bg: '#0E0E0E',
-  surface: '#161616',
-  surface2: '#1E1E1E',
-  border: '#262626',
-  borderHi: '#3A3A3A',
-  gold: '#C8A45A',
-  goldSoft: 'rgba(200,164,90,0.10)',
-  goldBorder: 'rgba(200,164,90,0.40)',
-  text: '#F5F1EA',
-  textSoft: '#CFC6B8',
-  textMute: '#8E867B',
-  textDim: '#5E574D',
+  bg: '#0E0E0E', surface: '#161616', surface2: '#1E1E1E',
+  border: '#262626', borderHi: '#3A3A3A',
+  gold: '#C8A45A', goldSoft: 'rgba(200,164,90,0.10)', goldBorder: 'rgba(200,164,90,0.40)',
+  text: '#F5F1EA', textSoft: '#CFC6B8', textMute: '#8E867B', textDim: '#5E574D',
   ok: '#3A6F4F',
 }
 
@@ -30,6 +22,13 @@ const LIFE_STAGE_LABELS: Record<string, string> = {
   retired: 'Retired',
   prefer_not: 'Prefer not to say',
 }
+
+// Edition picker labels — internal IDs stay 5min/10min/deep.
+const EDITION_OPTIONS = [
+  { id: '5min',  label: 'The Brief',     sub: '5 min · skim' },
+  { id: '10min', label: 'The Daily',     sub: '10 min · full read' },
+  { id: 'deep',  label: 'The Editorial', sub: '15 min · synthesis' },
+]
 
 export default function ProfilePage() {
   const router = useRouter()
@@ -48,7 +47,6 @@ export default function ProfilePage() {
       if (data) {
         setProfile(data)
         setMood(data.mood_preference || 'neutral')
-        // Legacy 'ultra' → '5min' normalisation
         const pref = data.edition_preference
         if (pref === 'ultra' || pref === '5min') setEdition('5min')
         else if (pref === 'deep') setEdition('deep')
@@ -65,7 +63,7 @@ export default function ProfilePage() {
     await supabase.from('profiles').update({
       mood_preference: mood,
       edition_preference: edition,
-      updated_at: new Date().toISOString()
+      updated_at: new Date().toISOString(),
     }).eq('id', user.id)
     setSaving(false)
     setSaved(true)
@@ -113,7 +111,6 @@ export default function ProfilePage() {
 
   return (
     <div style={{ minHeight: '100vh', background: C.bg, paddingBottom: '88px' }}>
-
       {/* Header */}
       <div style={{
         background: C.bg, borderBottom: `2px solid ${C.gold}`,
@@ -132,12 +129,8 @@ export default function ProfilePage() {
       </div>
 
       <div style={{ padding: '20px', maxWidth: '480px', margin: '0 auto' }}>
-
         {/* Name card */}
-        <div style={{
-          ...cardStyle,
-          borderTop: `3px solid ${C.gold}`,
-        }}>
+        <div style={{ ...cardStyle, borderTop: `3px solid ${C.gold}` }}>
           <div style={{
             fontFamily: "'Playfair Display', Georgia, serif",
             fontSize: '26px', fontWeight: 700, color: C.text,
@@ -199,6 +192,13 @@ export default function ProfilePage() {
                 }}>{interest}</span>
               ))}
             </div>
+            <div style={{
+              marginTop: '14px',
+              fontFamily: "'DM Sans', sans-serif", fontSize: '12px',
+              color: C.textMute, lineHeight: 1.6,
+            }}>
+              To change your interests, tap "Edit Full Profile" below.
+            </div>
           </div>
         )}
 
@@ -227,29 +227,45 @@ export default function ProfilePage() {
                 </button>
               ))}
             </div>
+            <div style={{
+              marginTop: '10px',
+              fontFamily: "'DM Sans', sans-serif", fontSize: '11px',
+              color: C.textDim, lineHeight: 1.55,
+              fontStyle: 'italic',
+            }}>
+              Tone preference is saved but doesn't change the brief content yet.
+            </div>
           </div>
 
           <div style={{ marginBottom: '22px' }}>
             <div style={{
               fontFamily: "'DM Mono', monospace", fontSize: '10px',
               letterSpacing: '1.5px', color: C.textMute, marginBottom: '12px',
-            }}>DEFAULT DEPTH</div>
-            <div style={{ display: 'flex', gap: '10px' }}>
-              {[
-                { id: '5min', label: '5 Min' },
-                { id: '10min', label: '10 Min' },
-                { id: 'deep', label: 'Deep' },
-              ].map(e => (
+            }}>DEFAULT EDITION</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {EDITION_OPTIONS.map(e => (
                 <button key={e.id} onClick={() => setEdition(e.id)} style={{
-                  flex: 1, padding: '14px 6px',
+                  padding: '14px 16px', textAlign: 'left',
                   background: edition === e.id ? C.goldSoft : C.surface2,
                   border: `1px solid ${edition === e.id ? C.gold : C.border}`,
-                  borderRadius: '2px', cursor: 'pointer', minHeight: '48px',
+                  borderRadius: '2px', cursor: 'pointer', minHeight: '54px',
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px',
                 }}>
-                  <div style={{
-                    fontFamily: "'DM Sans', sans-serif", fontSize: '14px',
-                    fontWeight: 600, color: edition === e.id ? C.gold : C.textSoft,
-                  }}>{e.label}</div>
+                  <div>
+                    <div style={{
+                      fontFamily: "'Playfair Display', Georgia, serif",
+                      fontSize: '16px', fontWeight: 700,
+                      color: edition === e.id ? C.gold : C.text,
+                      marginBottom: '2px',
+                    }}>{e.label}</div>
+                    <div style={{
+                      fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                      letterSpacing: '1.5px', color: C.textMute,
+                    }}>{e.sub.toUpperCase()}</div>
+                  </div>
+                  {edition === e.id && (
+                    <span style={{ color: C.gold, fontSize: '14px' }}>✓</span>
+                  )}
                 </button>
               ))}
             </div>
@@ -285,20 +301,16 @@ export default function ProfilePage() {
         </Link>
 
         {/* Sign out */}
-        <button
-          onClick={handleSignOut}
-          disabled={signingOut}
-          style={{
-            width: '100%', padding: '16px',
-            background: 'transparent',
-            border: `1px solid ${C.border}`,
-            color: signingOut ? C.textDim : C.textMute,
-            fontFamily: "'DM Sans', sans-serif",
-            fontSize: '14px', fontWeight: 500,
-            cursor: signingOut ? 'not-allowed' : 'pointer',
-            borderRadius: '2px', minHeight: '54px',
-          }}
-        >
+        <button onClick={handleSignOut} disabled={signingOut} style={{
+          width: '100%', padding: '16px',
+          background: 'transparent',
+          border: `1px solid ${C.border}`,
+          color: signingOut ? C.textDim : C.textMute,
+          fontFamily: "'DM Sans', sans-serif",
+          fontSize: '14px', fontWeight: 500,
+          cursor: signingOut ? 'not-allowed' : 'pointer',
+          borderRadius: '2px', minHeight: '54px',
+        }}>
           {signingOut ? 'Signing out…' : 'Sign Out'}
         </button>
       </div>
@@ -328,7 +340,6 @@ export default function ProfilePage() {
           </Link>
         ))}
       </div>
-
     </div>
   )
 }

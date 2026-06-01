@@ -4,26 +4,16 @@ import Link from 'next/link'
 import { supabase } from '@/lib/supabase'
 
 // ─── Admin page ──────────────────────────────────────────────────────────────
-// Shows today's brief generation status across all 3 editions, with status
-// badges, story counts (incl. Sprint 7's major_events), generated-at
-// timestamp, and a manual regenerate button. Also surfaces personalisation
-// stats including personal_sections counts.
+// Sprint 8 — shows today's status across all 3 editions (The Brief / The Daily /
+// The Editorial), with story/section counts adapted to each edition's shape.
 
 const C = {
-  bg: '#0E0E0E',
-  surface: '#161616',
-  surface2: '#1E1E1E',
+  bg: '#0E0E0E', surface: '#161616', surface2: '#1E1E1E',
   surfaceDeep: '#0A0A0A',
-  border: '#262626',
-  borderHi: '#3A3A3A',
+  border: '#262626', borderHi: '#3A3A3A',
   gold: '#C8A45A',
-  text: '#F5F1EA',
-  textSoft: '#CFC6B8',
-  textMute: '#8E867B',
-  textDim: '#5E574D',
-  ok: '#5FB87E',
-  warn: '#E0A85C',
-  err: '#E76161',
+  text: '#F5F1EA', textSoft: '#CFC6B8', textMute: '#8E867B', textDim: '#5E574D',
+  ok: '#5FB87E', warn: '#E0A85C', err: '#E76161',
 }
 
 type BriefRow = {
@@ -38,12 +28,6 @@ type BriefRow = {
 type HistoryDay = {
   date: string
   editions: Record<string, string>
-}
-
-type PersonalisedRow = {
-  edition: string
-  status: string
-  content: any
 }
 
 function getISTDate(offsetDays = 0): string {
@@ -65,16 +49,41 @@ function statusColor(status: string) {
   return C.textMute
 }
 
-// Sprint 7: include major_events in the count
-function countStories(content: any): number {
+function editionLabel(e: string): string {
+  if (e === '5min') return 'The Brief (5min)'
+  if (e === '10min') return 'The Daily (10min)'
+  if (e === 'deep') return 'The Editorial (deep)'
+  return e
+}
+
+// Edition-aware story count.
+function countStoriesForEdition(content: any, edition: string): number {
   if (!content) return 0
-  let n = 0
-  for (const key of ['major_events', 'world', 'india', 'bengaluru', 'delhi', 'business', 'technology', 'climate_health']) {
-    if (Array.isArray(content[key])) n += content[key].length
+  if (edition === '5min') {
+    return ['major_events', 'world', 'india', 'topics']
+      .reduce((n, k) => n + (Array.isArray(content[k]) ? content[k].length : 0), 0)
   }
-  if (content.sport?.headline) n += 1
-  if (content.culture?.headline) n += 1
-  return n
+  if (edition === '10min') {
+    let n = 0
+    for (const k of ['major_events', 'world', 'india', 'business', 'technology', 'climate_health', 'bengaluru', 'delhi']) {
+      if (Array.isArray(content[k])) n += content[k].length
+    }
+    if (content.sport?.headline) n++
+    if (content.culture?.headline) n++
+    return n
+  }
+  if (edition === 'deep') {
+    // Editorial: count by pieces, not stories.
+    let n = 0
+    if (Array.isArray(content.three_patterns)) n += content.three_patterns.length
+    if (content.long_read?.body) n += 1
+    if (Array.isArray(content.watching_this_week)) n += content.watching_this_week.length
+    if (content.signature?.one_number) n += 1
+    if (content.signature?.one_chart) n += 1
+    if (content.signature?.one_quote) n += 1
+    return n
+  }
+  return 0
 }
 
 function countMajorEvents(content: any): number {
@@ -83,6 +92,10 @@ function countMajorEvents(content: any): number {
 
 function countPersonalSections(content: any): number {
   return Array.isArray(content?.personal_sections) ? content.personal_sections.length : 0
+}
+
+function hasLens(lens: any): boolean {
+  return !!(lens && (lens.world || lens.india || lens.markets || lens.watch))
 }
 
 export default function AdminPage() {
@@ -103,19 +116,13 @@ export default function AdminPage() {
   useEffect(() => {
     const checkAuth = async () => {
       const { data: { user } } = await supabase.auth.getUser()
-      if (!user) {
-        window.location.href = '/login'
-        return
-      }
+      if (!user) { window.location.href = '/login'; return }
       const allowed = (process.env.NEXT_PUBLIC_ADMIN_EMAILS || '')
         .split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
       const userEmail = (user.email || '').toLowerCase()
       setEmail(userEmail)
-      if (allowed.length === 0 || allowed.includes(userEmail)) {
-        setAuthorized(true)
-      } else {
-        setAuthorized(false)
-      }
+      if (allowed.length === 0 || allowed.includes(userEmail)) setAuthorized(true)
+      else setAuthorized(false)
     }
     checkAuth()
   }, [])
@@ -185,14 +192,14 @@ export default function AdminPage() {
     const [u, r, withCity] = await Promise.all([
       supabase.from('profiles').select('id', { count: 'exact', head: true }).eq('brief_type', 'personalised'),
       supabase.from('personalised_briefs').select('id', { count: 'exact', head: true }).eq('date', selectedDate).eq('status', 'ready'),
-      // Personal_sections is inside content (JSONB) — Postgres can filter on json path
       supabase.from('personalised_briefs')
         .select('id, content', { count: 'exact', head: false })
         .eq('date', selectedDate)
         .eq('status', 'ready'),
     ])
     const cityCount = (withCity.data ?? []).filter((row: any) =>
-      Array.isArray(row?.content?.personal_sections) && row.content.personal_sections.length > 0
+      Array.isArray(row?.content?.personal_sections) &&
+      row.content.personal_sections.some((s: any) => s?.id === 'your_city')
     ).length
     setPersonalisedToday({ users: u.count || 0, ready: r.count || 0, withCity: cityCount })
   }
@@ -215,9 +222,7 @@ export default function AdminPage() {
     setRunningPersonalisation(false)
   }
 
-  if (authorized === null) {
-    return <CenteredMsg>Checking access…</CenteredMsg>
-  }
+  if (authorized === null) return <CenteredMsg>Checking access…</CenteredMsg>
 
   if (authorized === false) {
     return (
@@ -225,14 +230,10 @@ export default function AdminPage() {
         <div style={{
           fontFamily: "'Playfair Display', serif", fontSize: '26px',
           color: C.text, marginBottom: '14px', lineHeight: 1.3,
-        }}>
-          Not authorised
-        </div>
+        }}>Not authorised</div>
         <div style={{
           fontFamily: "'DM Sans', sans-serif", fontSize: '16px', color: C.textSoft,
-        }}>
-          {email} doesn't have admin access.
-        </div>
+        }}>{email} doesn't have admin access.</div>
       </CenteredMsg>
     )
   }
@@ -248,24 +249,18 @@ export default function AdminPage() {
             <div style={{
               fontFamily: "'DM Mono', monospace", fontSize: '11px',
               letterSpacing: '2.5px', color: C.gold, marginBottom: '8px',
-            }}>
-              MORNING BRIEF · ADMIN
-            </div>
+            }}>MORNING BRIEF · ADMIN</div>
             <h1 style={{
               fontFamily: "'Playfair Display', serif", fontSize: '32px',
               fontWeight: 900, color: C.text, margin: 0, lineHeight: 1.15,
-            }}>
-              Brief Status
-            </h1>
+            }}>Brief Status</h1>
           </div>
           <Link href="/brief" style={{
             fontFamily: "'DM Mono', monospace", fontSize: '11px', color: C.textSoft,
             textDecoration: 'none', border: `1px solid ${C.border}`, padding: '10px 16px',
             letterSpacing: '1.5px', whiteSpace: 'nowrap', minHeight: '44px',
             display: 'flex', alignItems: 'center',
-          }}>
-            ← BACK TO APP
-          </Link>
+          }}>← BACK TO APP</Link>
         </div>
 
         {/* 7-day history */}
@@ -274,49 +269,32 @@ export default function AdminPage() {
             <div style={{
               fontFamily: "'DM Mono', monospace", fontSize: '11px',
               letterSpacing: '2px', color: C.textMute, marginBottom: '14px',
-            }}>
-              LAST 7 DAYS
-            </div>
+            }}>LAST 7 DAYS</div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '8px' }}>
               {history.map((day) => {
                 const isSelected = day.date === selectedDate
                 return (
-                  <button
-                    key={day.date}
-                    onClick={() => setSelectedDate(day.date)}
-                    style={{
-                      border: `1px solid ${isSelected ? C.gold : C.border}`,
-                      background: isSelected ? C.surface2 : C.surfaceDeep,
-                      padding: '12px 4px',
-                      cursor: 'pointer',
-                      textAlign: 'center',
-                      minHeight: '60px',
-                    }}
-                    title={day.date}
-                  >
+                  <button key={day.date} onClick={() => setSelectedDate(day.date)} style={{
+                    border: `1px solid ${isSelected ? C.gold : C.border}`,
+                    background: isSelected ? C.surface2 : C.surfaceDeep,
+                    padding: '12px 4px', cursor: 'pointer',
+                    textAlign: 'center', minHeight: '60px',
+                  }} title={day.date}>
                     <div style={{
                       fontFamily: "'DM Mono', monospace", fontSize: '10px',
                       color: isSelected ? C.gold : C.textSoft,
                       marginBottom: '10px', letterSpacing: '0.5px',
-                    }}>
-                      {formatDayShort(day.date)}
-                    </div>
+                    }}>{formatDayShort(day.date)}</div>
                     <div style={{ display: 'flex', justifyContent: 'center', gap: '5px' }}>
                       {(['5min', '10min', 'deep'] as const).map((ed) => {
                         const status = day.editions[ed]
                         return (
-                          <span
-                            key={ed}
-                            title={`${ed}: ${status || 'missing'}`}
-                            style={{
-                              width: '9px',
-                              height: '9px',
-                              borderRadius: '50%',
-                              background: status ? statusColor(status) : 'transparent',
-                              border: status ? 'none' : `1px solid ${C.borderHi}`,
-                              display: 'inline-block',
-                            }}
-                          />
+                          <span key={ed} title={`${ed}: ${status || 'missing'}`} style={{
+                            width: '9px', height: '9px', borderRadius: '50%',
+                            background: status ? statusColor(status) : 'transparent',
+                            border: status ? 'none' : `1px solid ${C.borderHi}`,
+                            display: 'inline-block',
+                          }} />
                         )
                       })}
                     </div>
@@ -343,24 +321,16 @@ export default function AdminPage() {
             fontFamily: "'DM Mono', monospace", fontSize: '11px',
             color: C.textMute, letterSpacing: '1.5px',
           }}>DATE:</span>
-          <input
-            type="date"
-            value={selectedDate}
-            onChange={(e) => setSelectedDate(e.target.value)}
-            style={{
-              background: C.surface2, border: `1px solid ${C.border}`, color: C.text,
-              padding: '10px 14px', fontFamily: "'DM Mono', monospace", fontSize: '13px',
-              minHeight: '44px',
-            }}
-          />
-          <button
-            onClick={() => setSelectedDate(getISTDate())}
-            style={{
-              background: 'none', border: `1px solid ${C.border}`, color: C.textSoft,
-              padding: '10px 14px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
-              letterSpacing: '1.5px', cursor: 'pointer', minHeight: '44px',
-            }}
-          >TODAY</button>
+          <input type="date" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} style={{
+            background: C.surface2, border: `1px solid ${C.border}`, color: C.text,
+            padding: '10px 14px', fontFamily: "'DM Mono', monospace", fontSize: '13px',
+            minHeight: '44px',
+          }} />
+          <button onClick={() => setSelectedDate(getISTDate())} style={{
+            background: 'none', border: `1px solid ${C.border}`, color: C.textSoft,
+            padding: '10px 14px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
+            letterSpacing: '1.5px', cursor: 'pointer', minHeight: '44px',
+          }}>TODAY</button>
         </div>
 
         {/* Editions grid */}
@@ -380,19 +350,18 @@ export default function AdminPage() {
         ) : (
           rows.map((row) => {
             const majorCount = countMajorEvents(row.content)
+            const storyCount = countStoriesForEdition(row.content, row.edition)
             return (
               <div key={row.edition} style={{
                 border: `1px solid ${C.border}`,
                 borderLeft: `3px solid ${statusColor(row.status)}`,
-                padding: '22px',
-                marginBottom: '16px',
-                background: C.surface2,
+                padding: '22px', marginBottom: '16px', background: C.surface2,
               }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
                   <div style={{
                     fontFamily: "'Playfair Display', serif", fontSize: '22px',
                     fontWeight: 700, color: C.text,
-                  }}>{row.edition.toUpperCase()}</div>
+                  }}>{editionLabel(row.edition)}</div>
                   <div style={{
                     fontFamily: "'DM Mono', monospace", fontSize: '11px', letterSpacing: '2px',
                     color: statusColor(row.status), textTransform: 'uppercase',
@@ -404,33 +373,28 @@ export default function AdminPage() {
                   fontFamily: "'DM Mono', monospace", fontSize: '12px',
                   color: C.textMute, marginBottom: '16px',
                 }}>
-                  <div>stories: <span style={{ color: C.text }}>{countStories(row.content)}</span></div>
+                  <div>stories / blocks: <span style={{ color: C.text }}>{storyCount}</span></div>
                   <div>major events: <span style={{ color: C.text }}>{majorCount}</span></div>
                   <div>closer: <span style={{ color: C.text }}>{row.content?.closer ? 'yes' : 'no'}</span></div>
-                  <div>markets: <span style={{ color: C.text }}>{row.content?.markets?.indices?.length ?? 0} indices</span></div>
-                  <div style={{ gridColumn: '1 / -1' }}>generated: <span style={{ color: C.text }}>{row.generated_at ? new Date(row.generated_at).toLocaleString('en-IN') : '—'}</span></div>
+                  <div>lens: <span style={{ color: hasLens(row.content?.lens) ? C.ok : C.warn }}>{hasLens(row.content?.lens) ? 'yes' : 'no'}</span></div>
+                  <div style={{ gridColumn: '1 / -1' }}>
+                    generated: <span style={{ color: C.text }}>{row.generated_at ? new Date(row.generated_at).toLocaleString('en-IN') : '—'}</span>
+                  </div>
                 </div>
 
                 <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-                  <button
-                    onClick={() => setExpanded(expanded === row.edition ? null : row.edition)}
-                    style={{
-                      background: 'none', border: `1px solid ${C.border}`, color: C.textSoft,
-                      padding: '8px 14px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
-                      letterSpacing: '1.5px', cursor: 'pointer', minHeight: '40px',
-                    }}
-                  >{expanded === row.edition ? 'HIDE JSON' : 'VIEW JSON'}</button>
-                  <button
-                    onClick={() => regenerate(row.edition)}
-                    disabled={regenerating}
-                    style={{
-                      background: 'none', border: `1px solid ${C.gold}`, color: C.gold,
-                      padding: '8px 14px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
-                      letterSpacing: '1.5px',
-                      cursor: regenerating ? 'not-allowed' : 'pointer',
-                      opacity: regenerating ? 0.5 : 1, minHeight: '40px',
-                    }}
-                  >REGENERATE</button>
+                  <button onClick={() => setExpanded(expanded === row.edition ? null : row.edition)} style={{
+                    background: 'none', border: `1px solid ${C.border}`, color: C.textSoft,
+                    padding: '8px 14px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
+                    letterSpacing: '1.5px', cursor: 'pointer', minHeight: '40px',
+                  }}>{expanded === row.edition ? 'HIDE JSON' : 'VIEW JSON'}</button>
+                  <button onClick={() => regenerate(row.edition)} disabled={regenerating} style={{
+                    background: 'none', border: `1px solid ${C.gold}`, color: C.gold,
+                    padding: '8px 14px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
+                    letterSpacing: '1.5px',
+                    cursor: regenerating ? 'not-allowed' : 'pointer',
+                    opacity: regenerating ? 0.5 : 1, minHeight: '40px',
+                  }}>REGENERATE</button>
                 </div>
 
                 {expanded === row.edition && (
@@ -449,17 +413,13 @@ export default function AdminPage() {
 
         {/* Regenerate all */}
         <div style={{ marginTop: '36px', paddingTop: '28px', borderTop: `1px solid ${C.border}` }}>
-          <button
-            onClick={() => regenerate(undefined)}
-            disabled={regenerating}
-            style={{
-              background: C.gold, color: '#0E0E0E', border: 'none',
-              padding: '16px 28px', fontFamily: "'DM Mono', monospace", fontSize: '12px',
-              letterSpacing: '2px', fontWeight: 700,
-              cursor: regenerating ? 'not-allowed' : 'pointer',
-              opacity: regenerating ? 0.6 : 1, minHeight: '52px',
-            }}
-          >{regenerating ? 'GENERATING… (60–120s)' : 'REGENERATE ALL 3 EDITIONS'}</button>
+          <button onClick={() => regenerate(undefined)} disabled={regenerating} style={{
+            background: C.gold, color: '#0E0E0E', border: 'none',
+            padding: '16px 28px', fontFamily: "'DM Mono', monospace", fontSize: '12px',
+            letterSpacing: '2px', fontWeight: 700,
+            cursor: regenerating ? 'not-allowed' : 'pointer',
+            opacity: regenerating ? 0.6 : 1, minHeight: '52px',
+          }}>{regenerating ? 'GENERATING… (60–120s)' : 'REGENERATE ALL 3 EDITIONS'}</button>
 
           {regenResult && (
             <pre style={{
@@ -477,9 +437,7 @@ export default function AdminPage() {
           <div style={{
             fontFamily: "'DM Mono', monospace", fontSize: '11px',
             letterSpacing: '2.5px', color: C.gold, marginBottom: '16px',
-          }}>
-            PERSONALISATION
-          </div>
+          }}>PERSONALISATION</div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px', marginBottom: '20px' }}>
             <div style={{
               border: `1px solid ${C.border}`, padding: '16px', background: C.surface2,
@@ -503,17 +461,13 @@ export default function AdminPage() {
               <div style={{ color: C.text, fontSize: '20px', fontWeight: 700 }}>{personalisedToday.withCity}</div>
             </div>
           </div>
-          <button
-            onClick={runPersonalisation}
-            disabled={runningPersonalisation}
-            style={{
-              background: 'none', border: `1px solid ${C.gold}`, color: C.gold,
-              padding: '14px 20px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
-              letterSpacing: '2px',
-              cursor: runningPersonalisation ? 'not-allowed' : 'pointer',
-              opacity: runningPersonalisation ? 0.5 : 1, minHeight: '48px',
-            }}
-          >{runningPersonalisation ? 'RUNNING…' : 'RUN PERSONALISATION NOW'}</button>
+          <button onClick={runPersonalisation} disabled={runningPersonalisation} style={{
+            background: 'none', border: `1px solid ${C.gold}`, color: C.gold,
+            padding: '14px 20px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
+            letterSpacing: '2px',
+            cursor: runningPersonalisation ? 'not-allowed' : 'pointer',
+            opacity: runningPersonalisation ? 0.5 : 1, minHeight: '48px',
+          }}>{runningPersonalisation ? 'RUNNING…' : 'RUN PERSONALISATION NOW'}</button>
 
           {personaliseResult && (
             <pre style={{
@@ -535,8 +489,6 @@ function CenteredMsg({ children }: { children: React.ReactNode }) {
     <div style={{
       minHeight: '100vh', background: C.bg, display: 'flex',
       flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '28px',
-    }}>
-      {children}
-    </div>
+    }}>{children}</div>
   )
 }

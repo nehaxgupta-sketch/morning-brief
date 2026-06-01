@@ -5,17 +5,10 @@ import Link from 'next/link'
 import { supabase } from '@/lib/supabase'
 
 const C = {
-  bg: '#0E0E0E',
-  surface: '#161616',
-  surface2: '#1E1E1E',
-  border: '#262626',
-  borderHi: '#3A3A3A',
-  gold: '#C8A45A',
-  goldSoft: 'rgba(200,164,90,0.10)',
-  text: '#F5F1EA',
-  textSoft: '#CFC6B8',
-  textMute: '#8E867B',
-  textDim: '#5E574D',
+  bg: '#0E0E0E', surface: '#161616', surface2: '#1E1E1E',
+  border: '#262626', borderHi: '#3A3A3A',
+  gold: '#C8A45A', goldSoft: 'rgba(200,164,90,0.10)',
+  text: '#F5F1EA', textSoft: '#CFC6B8', textMute: '#8E867B', textDim: '#5E574D',
   err: '#E76161',
 }
 
@@ -31,32 +24,56 @@ type Bookmark = {
   created_at: string
 }
 
+// Section emoji map. Includes Sprint 8 additions and legacy carryovers.
 const sectionEmoji: Record<string, string> = {
   world: '🌍',
   india: '🇮🇳',
   major_events: '🔥',
+  topics: '📰',           // The Brief's mixed-topic section
   your_city: '📍',
-  bengaluru: '🏙️',
-  delhi: '🏛️',
+  your_home_city: '🏡',
   business: '💼',
   markets: '📈',
   technology: '💻',
   climate_health: '🌱',
   sport: '🏏',
   culture: '🎭',
+  // Legacy (Sprint 7 and earlier):
+  bengaluru: '🏙️',
+  delhi: '🏛️',
 }
 
 const sectionLabel: Record<string, string> = {
-  climate_health: 'climate',
+  climate_health: 'climate & health',
   technology: 'tech',
   major_events: 'major events',
   your_city: 'your city',
+  your_home_city: 'home city',
+  topics: 'topics',
 }
 
 const editionLabel: Record<string, string> = {
-  '5min': '5-MIN',
-  '10min': '10-MIN',
-  'deep': 'DEEP',
+  '5min': 'THE BRIEF',
+  '10min': 'THE DAILY',
+  'deep': 'THE EDITORIAL',
+}
+
+function formatSection(s: string): string {
+  // Interest sections come with id like "interest_renewable_energy" — humanise.
+  if (s.startsWith('interest_')) {
+    return s.slice('interest_'.length).replace(/_/g, ' ')
+  }
+  return sectionLabel[s] || s.replace(/_/g, ' ')
+}
+
+function formatEdition(e: string): string {
+  if (e === 'ultra') return editionLabel['5min'] || '5-MIN'
+  return editionLabel[e] || e.toUpperCase()
+}
+
+function sectionIcon(s: string): string {
+  if (s.startsWith('interest_')) return '🎯'
+  return sectionEmoji[s] || '📰'
 }
 
 export default function BookmarksPage() {
@@ -117,7 +134,6 @@ export default function BookmarksPage() {
       </Head>
 
       <div style={{ background: C.bg, minHeight: '100vh', paddingBottom: '88px' }}>
-
         {/* Header */}
         <div style={{
           padding: '52px 24px 28px',
@@ -195,7 +211,6 @@ export default function BookmarksPage() {
 
           {!loading && Object.entries(grouped).map(([date, items]) => (
             <div key={date} style={{ marginBottom: '44px' }}>
-              {/* Date group header */}
               <p style={{
                 fontFamily: "'DM Mono', monospace", fontSize: '11px',
                 color: C.gold, letterSpacing: '2.5px',
@@ -206,31 +221,24 @@ export default function BookmarksPage() {
               </p>
 
               {items.map(bookmark => (
-                <div
-                  key={bookmark.id}
-                  style={{
-                    background: C.surface,
-                    borderRadius: '0px',
-                    padding: '22px',
-                    marginBottom: '14px',
-                    border: `1px solid ${C.border}`,
-                    position: 'relative',
-                  }}
-                >
-                  {/* Section pill */}
+                <div key={bookmark.id} style={{
+                  background: C.surface,
+                  borderRadius: '0px',
+                  padding: '22px',
+                  marginBottom: '14px',
+                  border: `1px solid ${C.border}`,
+                  position: 'relative',
+                }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' }}>
-                    <span style={{ fontSize: '15px' }}>
-                      {sectionEmoji[bookmark.section] || '📰'}
-                    </span>
+                    <span style={{ fontSize: '15px' }}>{sectionIcon(bookmark.section)}</span>
                     <span style={{
                       fontFamily: "'DM Mono', monospace", fontSize: '10px',
                       color: C.textMute, textTransform: 'uppercase', letterSpacing: '1.5px',
                     }}>
-                      {(sectionLabel[bookmark.section] || bookmark.section)} · {editionLabel[bookmark.edition] || bookmark.edition.toUpperCase()}
+                      {formatSection(bookmark.section)} · {formatEdition(bookmark.edition)}
                     </span>
                   </div>
 
-                  {/* Headline */}
                   <p style={{
                     fontFamily: "'Playfair Display', Georgia, serif", fontSize: '20px',
                     fontWeight: 700, color: C.text, margin: '0 0 12px',
@@ -239,7 +247,6 @@ export default function BookmarksPage() {
                     {bookmark.headline}
                   </p>
 
-                  {/* Body */}
                   <p style={{
                     fontFamily: "'DM Sans', sans-serif", fontSize: '16px',
                     color: C.textSoft, lineHeight: 1.7, margin: '0 0 16px',
@@ -247,20 +254,14 @@ export default function BookmarksPage() {
                     {bookmark.body}
                   </p>
 
-                  {/* Footer row */}
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '14px' }}>
                     {bookmark.source && (
                       bookmark.source_url ? (
-                        <a
-                          href={bookmark.source_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          style={{
-                            fontFamily: "'DM Mono', monospace", fontSize: '11px',
-                            color: C.textMute, textDecoration: 'none',
-                            letterSpacing: '1px',
-                          }}
-                        >
+                        <a href={bookmark.source_url} target="_blank" rel="noopener noreferrer" style={{
+                          fontFamily: "'DM Mono', monospace", fontSize: '11px',
+                          color: C.textMute, textDecoration: 'none',
+                          letterSpacing: '1px',
+                        }}>
                           via {bookmark.source} ↗
                         </a>
                       ) : (
@@ -272,16 +273,12 @@ export default function BookmarksPage() {
                         </span>
                       )
                     )}
-                    <button
-                      onClick={() => removeBookmark(bookmark.id)}
-                      disabled={removing === bookmark.id}
-                      style={{
-                        background: 'none', border: 'none', cursor: 'pointer',
-                        fontFamily: "'DM Sans', sans-serif", fontSize: '13px',
-                        color: removing === bookmark.id ? C.textDim : C.err,
-                        padding: '6px 0', marginLeft: 'auto', minHeight: '44px',
-                      }}
-                    >
+                    <button onClick={() => removeBookmark(bookmark.id)} disabled={removing === bookmark.id} style={{
+                      background: 'none', border: 'none', cursor: 'pointer',
+                      fontFamily: "'DM Sans', sans-serif", fontSize: '13px',
+                      color: removing === bookmark.id ? C.textDim : C.err,
+                      padding: '6px 0', marginLeft: 'auto', minHeight: '44px',
+                    }}>
                       {removing === bookmark.id ? 'Removing…' : 'Remove'}
                     </button>
                   </div>
