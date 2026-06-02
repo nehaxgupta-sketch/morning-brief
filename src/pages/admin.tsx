@@ -151,14 +151,77 @@ export default function AdminPage() {
     setRegenerating(true)
     setRegenResult('')
     try {
-      const res = await fetch('/api/generate-brief', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ edition, skipPush: true }),
-      })
-      const data = await res.json()
-      setRegenResult(JSON.stringify(data.results || data, null, 2))
-      await loadBriefs()
+      if (edition) {
+        // Per-edition regenerate: just re-run the writer for that one edition.
+        // Assumes today's raw_stories were already fetched (by cron or by the
+        // "Regenerate All" button). If not, the API will tell us.
+        setRegenResult(`Writing ${edition}…`)
+        const res = await fetch('/api/generate-brief', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: 'write', edition }),
+        })
+        const data = await res.json()
+        const reason = data.reason || data.error || ''
+        if (reason && /no raw_stories/i.test(reason)) {
+          setRegenResult(
+            JSON.stringify(data, null, 2) +
+            '\n\nTip: hit "REGENERATE ALL 3 EDITIONS" first — it fetches today\'s news, then this button can re-write a single edition from it.'
+          )
+        } else {
+          setRegenResult(JSON.stringify(data, null, 2))
+        }
+        await loadBriefs()
+      } else {
+        // Regenerate all 3 editions. The work is split across multiple Vercel
+        // invocations to stay under the 60s function timeout:
+        //   1. mode=fetch  — fetch news + lens (~35-45s)
+        //   2. mode=write  — three parallel writes (~15-30s each)
+        // Each call is its own function invocation with its own 60s budget.
+
+        // Stage 1 — fetch
+        setRegenResult('Stage 1/2 — fetching today\'s news (~40s)…')
+        const fetchRes = await fetch('/api/generate-brief', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: 'fetch' }),
+        })
+        const fetchData = await fetchRes.json()
+        if (!fetchData.ok) {
+          setRegenResult('FETCH FAILED:\n' + JSON.stringify(fetchData, null, 2))
+          await loadBriefs()
+          setRegenerating(false)
+          return
+        }
+        await loadBriefs() // shows pending rows
+
+        // Stage 2 — writes (parallel)
+        setRegenResult(
+          'Stage 1/2 — fetch ✓\n' +
+          'sections: ' + JSON.stringify(fetchData.sections) + '\n\n' +
+          'Stage 2/2 — writing 5min, 10min, deep in parallel (~25s)…'
+        )
+        const writeResults = await Promise.all(
+          (['5min', '10min', 'deep'] as const).map(async (ed) => {
+            try {
+              const r = await fetch('/api/generate-brief', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: 'write', edition: ed }),
+              })
+              return await r.json()
+            } catch (err: any) {
+              return { edition: ed, ok: false, error: err.message }
+            }
+          })
+        )
+
+        setRegenResult(JSON.stringify({
+          fetch: { ok: fetchData.ok, sections: fetchData.sections, lens_ok: fetchData.lens_ok },
+          writes: writeResults,
+        }, null, 2))
+        await loadBriefs()
+      }
     } catch (e: any) {
       setRegenResult('Error: ' + e.message)
     }
@@ -419,7 +482,7 @@ export default function AdminPage() {
             letterSpacing: '2px', fontWeight: 700,
             cursor: regenerating ? 'not-allowed' : 'pointer',
             opacity: regenerating ? 0.6 : 1, minHeight: '52px',
-          }}>{regenerating ? 'GENERATING… (60–120s)' : 'REGENERATE ALL 3 EDITIONS'}</button>
+          }}>{regenerating ? 'GENERATING… (~65s)' : 'REGENERATE ALL 3 EDITIONS'}</button>
 
           {regenResult && (
             <pre style={{

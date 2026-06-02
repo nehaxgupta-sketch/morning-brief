@@ -1195,7 +1195,7 @@ async function saveBriefToSupabase(
   rawStories: RawStories | null,
   content: BriefContent | null,
   lens: any,
-  status: 'ready' | 'fallback' | 'failed',
+  status: 'ready' | 'fallback' | 'failed' | 'pending',
 ) {
   const today = getISTDate();
   // Sprint 8: lens lives inside the content JSONB (no DB migration needed).
@@ -1245,7 +1245,29 @@ async function sendPushNotification(topHeadline: string) {
   return data;
 }
 
-// ─── Per-edition processor ──────────────────────────────────────────────────
+// ─── Mode-based architecture ────────────────────────────────────────────────
+//
+// Why modes exist: Vercel Hobby plan caps serverless functions at 60s. The
+// original "do everything in one call" flow (fetch news + lens + 3 writers +
+// save + push) couldn't fit. It would TIMEOUT (504 / FUNCTION_INVOCATION_TIMEOUT),
+// which the admin page would then fail to parse as JSON. So we split:
+//
+//   mode='fetch' — fetch news (parallel sections) + synthesise lens, save raw
+//                  to 3 'pending' brief rows. ~35-45s, fits in 60s.
+//   mode='write' — needs `edition`. Read raw_stories from today's pending row,
+//                  write that one edition, save as 'ready'. ~15-30s.
+//   mode='push'  — send OneSignal push using today's top ready headline.
+//   mode='full'  — LEGACY single-call flow. Kept only for emergencies on light
+//                  news days; will timeout on busy days. Do not use from cron.
+//
+// Default when no mode is provided: 'fetch'. This makes the admin page and
+// cron sensible: hit the endpoint with no body, you get the fetch phase,
+// then chain writes from the caller.
+
+// ─── Per-edition writer pipeline ────────────────────────────────────────────
+//
+// Pure function: takes raw stories, returns a saved result. Shared by 'write'
+// mode and 'full' mode below.
 
 type EditionOutcome = {
   status: 'ready' | 'fallback' | 'failed';
@@ -1253,21 +1275,11 @@ type EditionOutcome = {
   content?: BriefContent;
 };
 
-async function processEdition(
+async function runWriterForEdition(
   ed: Edition,
-  rawStories: RawStories | null,
+  rawStories: RawStories,
   lens: any | null,
 ): Promise<EditionOutcome> {
-  if (!rawStories) {
-    const prev = await fetchPreviousBrief(ed);
-    if (prev) {
-      await saveBriefToSupabase(ed, null, prev.content, prev.lens, 'fallback');
-      return { status: 'fallback', reason: 'OpenAI fetch failed', content: prev.content };
-    }
-    await saveBriefToSupabase(ed, null, null, lens, 'failed');
-    return { status: 'failed', reason: 'OpenAI fetch failed and no previous brief' };
-  }
-
   try {
     console.log(`Writing ${ed}...`);
     const writer =
@@ -1306,74 +1318,267 @@ async function processEdition(
   }
 }
 
+// ─── Mode: fetch ────────────────────────────────────────────────────────────
+//
+// Phase 1 of the daily flow. Loads personalisation universe, fetches news +
+// lens from OpenAI, saves raw_stories to three pending brief rows (one per
+// edition). Lens lives inside raw_stories.lens — the writers read it from
+// there in the write phase.
+
+async function modeFetch() {
+  const universe = await loadPersonalisationUniverse();
+  console.log(`Universe — industries: ${universe.industries.length}, interests: ${universe.interests.length}, cities: ${universe.cities.length}`);
+
+  let rawStories: RawStories;
+  try {
+    console.log('Fetching news from OpenAI...');
+    rawStories = await fetchNewsFromOpenAI(universe);
+    console.log('News fetched.');
+  } catch (err: any) {
+    console.error('OpenAI fetch failed:', err.message);
+    return { ok: false as const, error: `OpenAI fetch failed: ${err.message}` };
+  }
+
+  const lensOk = !!rawStories.lens && validateLens(rawStories.lens);
+  if (!lensOk) console.warn('Lens missing or invalid in fetch response.');
+
+  const today = getISTDate();
+  const editions: Edition[] = ['5min', '10min', 'deep'];
+
+  // Save 3 pending rows in parallel. raw_stories carries the lens, so write
+  // mode can pick it up from there. content stays null until write runs.
+  await Promise.all(editions.map(async (ed) => {
+    const { error } = await supabase
+      .from('briefs')
+      .upsert(
+        {
+          date: today,
+          edition: ed,
+          status: 'pending',
+          raw_stories: rawStories,
+          content: null,
+          generated_at: new Date().toISOString(),
+        },
+        { onConflict: 'date,edition' },
+      );
+    if (error) throw new Error(`Pending save failed (${ed}): ${error.message}`);
+    console.log(`Saved pending raw for ${ed} on ${today}.`);
+  }));
+
+  return {
+    ok: true as const,
+    date: today,
+    universe,
+    lens_ok: lensOk,
+    sections: {
+      major_events:  rawStories.major_events.length,
+      world:         rawStories.world.length,
+      india:         rawStories.india.length,
+      business:      rawStories.business.length,
+      technology:    rawStories.technology.length,
+      climate_health: rawStories.climate_health.length,
+      sport:         rawStories.sport   ? 1 : 0,
+      culture:       rawStories.culture ? 1 : 0,
+      markets_indices: rawStories.markets.indices.length,
+    },
+    next: "POST { mode: 'write', edition: '5min' | '10min' | 'deep' } in parallel for each edition.",
+  };
+}
+
+// ─── Mode: write ────────────────────────────────────────────────────────────
+//
+// Phase 2. Read raw_stories from today's pending row for one edition, run
+// the writer, validate, strip, save as 'ready'. If no pending row exists,
+// fall back to yesterday's brief and mark 'fallback'.
+
+async function modeWrite(edition: Edition) {
+  const today = getISTDate();
+  const { data, error } = await supabase
+    .from('briefs')
+    .select('raw_stories, status')
+    .eq('date', today)
+    .eq('edition', edition)
+    .maybeSingle();
+
+  if (error) {
+    console.warn(`modeWrite read failed (${edition}):`, error.message);
+  }
+
+  const raw = (data?.raw_stories ?? null) as RawStories | null;
+
+  if (!raw) {
+    console.warn(`modeWrite: no raw_stories for ${edition} on ${today}. Did fetch run?`);
+    const prev = await fetchPreviousBrief(edition);
+    if (prev) {
+      await saveBriefToSupabase(edition, null, prev.content, prev.lens, 'fallback');
+      return {
+        ok: true as const,
+        edition,
+        status: 'fallback' as const,
+        reason: 'No raw_stories for today; restored previous brief. Run mode=fetch first to get fresh news.',
+      };
+    }
+    await saveBriefToSupabase(edition, null, null, null, 'failed');
+    return {
+      ok: false as const,
+      edition,
+      status: 'failed' as const,
+      error: 'No raw_stories for today and no previous brief to fall back to. Run mode=fetch first.',
+    };
+  }
+
+  const lens = raw.lens && validateLens(raw.lens) ? raw.lens : null;
+  const outcome = await runWriterForEdition(edition, raw, lens);
+  return {
+    ok: outcome.status !== 'failed',
+    edition,
+    status: outcome.status,
+    reason: outcome.reason,
+  };
+}
+
+// ─── Mode: push ─────────────────────────────────────────────────────────────
+//
+// Phase 3 (optional). Picks today's best top headline across ready briefs
+// and sends a OneSignal push. Idempotent-ish: safe to call again, but you'll
+// get a second push.
+
+async function modePush() {
+  const today = getISTDate();
+  const { data, error } = await supabase
+    .from('briefs')
+    .select('content, edition')
+    .eq('date', today)
+    .eq('status', 'ready');
+
+  if (error) {
+    return { ok: false as const, error: `Read failed: ${error.message}` };
+  }
+  if (!data || data.length === 0) {
+    return { ok: false as const, error: 'No ready briefs for today; not pushing.' };
+  }
+
+  // Prefer 5min → 10min top headline. major_events first, then world.
+  const byEd: Record<string, any> = {};
+  for (const row of data) byEd[row.edition] = row.content;
+
+  const top =
+    (byEd['5min']  as any)?.major_events?.[0]?.headline ??
+    (byEd['10min'] as any)?.major_events?.[0]?.headline ??
+    (byEd['5min']  as any)?.world?.[0]?.headline ??
+    (byEd['10min'] as any)?.world?.[0]?.headline ??
+    "Today's stories are waiting for you.";
+
+  try {
+    const result = await sendPushNotification(top);
+    return { ok: true as const, headline: top, recipients: result?.recipients ?? null };
+  } catch (err: any) {
+    console.error('Push failed:', err.message);
+    return { ok: false as const, error: err.message };
+  }
+}
+
+// ─── Mode: full (LEGACY) ────────────────────────────────────────────────────
+//
+// Old behaviour. Will TIMEOUT on Vercel Hobby (60s cap) on most days. Kept
+// here only as an emergency single-call path. Production should use the
+// fetch → write → push chain instead.
+
+async function modeFull(skipPush: boolean | undefined) {
+  console.warn('mode=full is deprecated and likely to timeout on Vercel Hobby (60s cap). Use mode=fetch → mode=write → mode=push instead.');
+
+  const universe = await loadPersonalisationUniverse();
+  console.log(`Universe — industries: ${universe.industries.length}, interests: ${universe.interests.length}, cities: ${universe.cities.length}`);
+
+  let rawStories: RawStories | null = null;
+  let lens: any = null;
+  try {
+    console.log('Fetching news from OpenAI...');
+    rawStories = await fetchNewsFromOpenAI(universe);
+    if (rawStories.lens && validateLens(rawStories.lens)) lens = rawStories.lens;
+  } catch (err: any) {
+    console.error('OpenAI fetch failed:', err.message);
+  }
+
+  const editions: Edition[] = ['5min', '10min', 'deep'];
+  const results: Record<string, { status: string; reason?: string }> = {};
+  const writtenBriefs: Record<string, BriefContent> = {};
+
+  // Capture into a const so TypeScript narrows correctly inside the async map below.
+  const raw = rawStories;
+
+  const editionPairs = await Promise.all(
+    editions.map(async (ed) => {
+      let r: EditionOutcome;
+      if (!raw) {
+        const prev = await fetchPreviousBrief(ed);
+        if (prev) {
+          await saveBriefToSupabase(ed, null, prev.content, prev.lens, 'fallback');
+          r = { status: 'fallback', reason: 'OpenAI fetch failed', content: prev.content };
+        } else {
+          await saveBriefToSupabase(ed, null, null, lens, 'failed');
+          r = { status: 'failed', reason: 'OpenAI fetch failed and no previous brief' };
+        }
+      } else {
+        r = await runWriterForEdition(ed, raw, lens);
+      }
+      if (r.content) writtenBriefs[ed] = r.content;
+      const { content, ...rest } = r;
+      return [ed, rest] as const;
+    }),
+  );
+  for (const [ed, r] of editionPairs) results[ed] = r;
+
+  if (!skipPush) {
+    const anyFresh = Object.values(results).some((r) => r.status === 'ready');
+    if (anyFresh) {
+      try { await modePush(); } catch (err: any) { console.error('Push failed:', err.message); }
+    }
+  }
+
+  return { ok: true as const, results, lens };
+}
+
 // ─── Handler ─────────────────────────────────────────────────────────────────
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  const { edition, skipPush } = req.body || {};
-  const editions: Edition[] = edition ? [edition] : ['5min', '10min', 'deep'];
-
-  const results: Record<string, { status: string; reason?: string }> = {};
+  // Default mode is 'fetch'. This means a bare POST (e.g. legacy cron-job.org
+  // hit with no body) does the fetch phase only — never the full thing, which
+  // would timeout.
+  const { mode = 'fetch', edition, skipPush } = req.body || {};
 
   try {
-    // Step 1: universe
-    const universe = await loadPersonalisationUniverse();
-    console.log(`Universe — industries: ${universe.industries.length}, interests: ${universe.interests.length}, cities: ${universe.cities.length}`);
-
-    // Step 2: fetch news
-    let rawStories: RawStories | null = null;
-    let lens: any = null;
-    try {
-      console.log('Fetching news from OpenAI...');
-      rawStories = await fetchNewsFromOpenAI(universe);
-      console.log('News fetched.');
-      // Lens validation — if invalid, leave null and the writers' fallbacks
-      // will surface yesterday's lens (or none).
-      if (rawStories.lens && validateLens(rawStories.lens)) {
-        lens = rawStories.lens;
-      } else {
-        console.warn('Lens missing or invalid in fetch response.');
-      }
-    } catch (err: any) {
-      console.error('OpenAI fetch failed:', err.message);
+    if (mode === 'fetch') {
+      const result = await modeFetch();
+      return res.status(result.ok ? 200 : 500).json(result);
     }
 
-    // Step 3: process editions in parallel
-    const writtenBriefs: Record<string, BriefContent> = {};
-    const editionPairs = await Promise.all(
-      editions.map(async (ed) => {
-        const r = await processEdition(ed, rawStories, lens);
-        if (r.content) writtenBriefs[ed] = r.content;
-        const { content, ...rest } = r;
-        return [ed, rest] as const;
-      }),
-    );
-    for (const [ed, r] of editionPairs) results[ed] = r;
-
-    // Step 4: push (only if at least one fresh-ready edition)
-    const anyFresh = Object.values(results).some((r) => r.status === 'ready');
-    if (!skipPush && anyFresh) {
-      const top =
-        (writtenBriefs['5min']  as BriefQuick | undefined)?.major_events?.[0]?.headline ??
-        (writtenBriefs['10min'] as BriefDaily | undefined)?.major_events?.[0]?.headline ??
-        (writtenBriefs['5min']  as BriefQuick | undefined)?.world?.[0]?.headline ??
-        (writtenBriefs['10min'] as BriefDaily | undefined)?.world?.[0]?.headline ??
-        "Today's stories are waiting for you.";
-      try {
-        await sendPushNotification(top);
-      } catch (err: any) {
-        console.error('Push failed (briefs already saved):', err.message);
+    if (mode === 'write') {
+      if (!edition || !['5min', '10min', 'deep'].includes(edition)) {
+        return res.status(400).json({ ok: false, error: "mode=write requires edition: '5min' | '10min' | 'deep'" });
       }
-    } else if (!skipPush && !anyFresh) {
-      console.log('Push skipped — no fresh briefs (all fallbacks or failed)');
-    } else {
-      console.log('Push skipped (skipPush: true)');
+      const result = await modeWrite(edition as Edition);
+      return res.status(result.ok ? 200 : 500).json(result);
     }
 
-    return res.status(200).json({ success: true, editions, universe, lens, results });
+    if (mode === 'push') {
+      const result = await modePush();
+      return res.status(result.ok ? 200 : 500).json(result);
+    }
+
+    if (mode === 'full') {
+      const result = await modeFull(skipPush);
+      return res.status(200).json(result);
+    }
+
+    return res.status(400).json({
+      ok: false,
+      error: `Unknown mode: ${mode}. Use 'fetch', 'write', 'push', or 'full'.`,
+    });
   } catch (error: any) {
     console.error('Top-level error:', error.message);
-    return res.status(500).json({ success: false, error: error.message, results });
+    return res.status(500).json({ ok: false, error: error.message });
   }
 }
