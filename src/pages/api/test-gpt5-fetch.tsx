@@ -1,32 +1,27 @@
-// src/pages/api/test-single-prompt-fetch.tsx
+// src/pages/api/test-gpt5-fetch.tsx
 //
-// ONE-OFF TEST. Not part of the production pipeline.
+// PATH B TEST. Single big prompt, but with gpt-5 + the proper reasoning
+// web_search tool (NOT web_search_preview). The bet: gpt-5's reasoning lets
+// it actually iterate searches the way ChatGPT does, instead of giving up
+// after one search like gpt-4o did.
 //
-// Purpose: prove out the "ChatGPT-style" single-prompt fetch.
-// One API call to gpt-4o with web_search_preview. The model decides how many
-// times to search. We log everything so we can calculate exact cost.
+// Differences from test-single-prompt-fetch.tsx:
+//   - model: 'gpt-5' instead of 'gpt-4o'
+//   - tool:  'web_search' (reasoning) instead of 'web_search_preview'
+//   - reasoning.effort: 'medium' (high might exceed Vercel's 60s limit)
+//   - pricing math updated: gpt-5 is $1.25/M in, $10/M out; web_search
+//     reasoning tool is $10/1K calls (cheaper than preview's $25/1K)
+//   - reasoning tokens are billed as output — we capture that separately
 //
-// How to use:
-//   1. Drop into src/pages/api/
-//   2. Commit + push (Vercel auto-deploys)
-//   3. POST to /api/test-single-prompt-fetch with empty body
-//   4. Read Vercel logs to see:
-//      - How many web_search_call items the model made
-//      - How many sections came back with how many stories
-//      - Token counts (input / output / search content)
-//      - Total cost
-//   5. The full raw_stories JSON comes back in the response so you can eyeball it.
+// Same standalone-endpoint pattern. Drop into src/pages/api/, commit, push,
+// hit with curl or browser console, read the result.
 //
-// What "success" looks like:
-//   - All 9 standard sections present (major_events, world, india, business,
-//     markets, technology, climate_health, sport, culture)
-//   - 4+ stories in india/world/major_events; 2+ in others
-//   - All source URLs from Tier-1 whitelisted publishers
-//   - Cost under $0.50 per run
+// Hit via PowerShell:
+//   Invoke-RestMethod -Uri "https://morning-brief-liart.vercel.app/api/test-gpt5-fetch" -Method POST | ConvertTo-Json -Depth 10
 //
-// If it works, we replace fetchNewsFromOpenAI in generate-brief.tsx with this
-// approach. If it fails (sparse sections, fabricated URLs, etc.) we know the
-// monolithic approach can't work and fall back to consolidated buckets.
+// IMPORTANT: gpt-5 with reasoning is SLOW. Expect 30-60 seconds. If it
+// times out at 60s, try changing reasoning.effort below from 'medium' to
+// 'low' or even 'minimal'. We can also try 'high' once we know it fits.
 
 import type { NextApiRequest, NextApiResponse } from 'next';
 
@@ -34,7 +29,7 @@ export const config = { maxDuration: 60 };
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// ─── Tier-1 whitelist (mirror of generate-brief.tsx for the test) ──────────
+// ─── Tier-1 whitelist (mirror of generate-brief.tsx) ───────────────────────
 
 const TIER_1_DOMAINS = new Set<string>([
   'reuters.com', 'apnews.com', 'bloomberg.com', 'ft.com', 'wsj.com',
@@ -62,14 +57,10 @@ function isWhitelisted(url: string | undefined): boolean {
   } catch { return false; }
 }
 
-// ─── Date helper ────────────────────────────────────────────────────────────
-
 function getISTDate(): string {
   const istMs = Date.now() + 5.5 * 60 * 60 * 1000;
   return new Date(istMs).toISOString().split('T')[0];
 }
-
-// ─── JSON extraction ────────────────────────────────────────────────────────
 
 function extractJsonObject(text: string): any {
   const cleaned = text.replace(/```json|```/g, '').trim();
@@ -89,42 +80,41 @@ function extractJsonObject(text: string): any {
   return JSON.parse(cleaned.slice(start, end + 1));
 }
 
-// ─── The big prompt ─────────────────────────────────────────────────────────
+// ─── Prompt — same as Path A test, refined slightly for reasoning model ────
 
 function buildPrompt(today: string): string {
   return `You are the news desk for Morning Brief, a daily intelligence brief for thoughtful Indian readers. Today is ${today}. Your job: produce a comprehensive raw news dossier covering the entire day's events.
 
-═══════════════════════════════════════════════
-SEARCH STRATEGY — read this carefully
-═══════════════════════════════════════════════
-You have the web_search_preview tool. USE IT AGGRESSIVELY. A good fetch makes 10-15 separate searches across the day's coverage. ONE search returning a roundup page is NOT enough — that's how briefs get sparse. Plan your searches by section:
-
-  • Run a search for major Indian news today
-  • Run a search for major world/international news today
-  • Run a search for Indian business and corporate news today
-  • Run a search for Indian and global markets close today (Sensex, Nifty, S&P, Nasdaq)
-  • Run a search for technology and AI news today
-  • Run a search for climate / extreme weather / health news today
-  • Run a search for today's biggest sport story (IPL especially in April-June)
-  • Run a search for today's culture / entertainment story
-  • Run extra searches for any developing story you need to confirm or expand
-
-Iterate. If a search returns a roundup, follow up with searches for specific stories you saw mentioned. Aim to confirm every story from at least one Tier-1 source.
+You are a reasoning model with access to the web_search tool. Use it aggressively and iteratively. A complete dossier requires 10-15 separate searches. For each section, plan searches, run them, evaluate gaps, run follow-up searches. Do not stop until every required section has the target story count from Tier-1 sources.
 
 ═══════════════════════════════════════════════
-SECTIONS REQUIRED — output ALL of these
+SEARCH PLAN
 ═══════════════════════════════════════════════
-Mandatory sections (must be present even if some are empty arrays on quiet days):
+Run AT LEAST these searches, plus follow-ups as needed:
+  1. Top India news today (politics, government, courts, business)
+  2. Major Indian business / corporate news today
+  3. Indian market close today — Sensex, Nifty values and drivers
+  4. Top world news today (geopolitics, government, conflicts)
+  5. US / Europe / China major news today
+  6. Technology and AI news today (product launches, regulation)
+  7. Climate / extreme weather / environment news today
+  8. Major health story today (outbreaks, drug approvals, research)
+  9. Today's biggest sport story (IPL when April-June; cricket dominates Indian sport)
+  10. Today's culture / entertainment story (film, arts, books, music)
+  11-15. Follow-ups: confirm developing stories, find Indian angles on global stories, fill gaps in any thin section
 
-  • major_events:    3-4 stories — sustained, multi-day themes shaping the week (ongoing wars, election cycles, IPL final stage, major policy rollouts). Distinct from 24-hour news.
+═══════════════════════════════════════════════
+SECTIONS REQUIRED (mandatory — every one must be present)
+═══════════════════════════════════════════════
+  • major_events:    3-4 stories — sustained, multi-day themes shaping the week (ongoing wars, election cycles, major policy rollouts, finals-stage tournaments). Distinct from 24-hour news.
   • world:           5-7 stories — 24-hour global news outside India, spread across regions.
-  • india:           5-7 stories — 24-hour national news (government, courts, business deals, accidents, state-level developments of national significance, city developments).
+  • india:           5-7 stories — 24-hour national news (government, courts, business deals, state developments, city news of national significance).
   • business:        3-4 stories — corporate news, earnings, M&A, regulatory actions. Indian + global.
-  • markets:         Sensex, Nifty, S&P 500, Nasdaq with today's actual closing/latest values + 2-3 sentence India-anchored summary of market direction.
+  • markets:         Sensex, Nifty, S&P 500, Nasdaq with actual closing values + 2-3 sentence India-anchored summary.
   • technology:      2-3 stories — meaningful product launches, AI developments, big-tech regulation, cybersecurity.
   • climate_health:  2-3 stories — climate disasters, environmental policy, major health stories with concrete impact.
-  • sport:           1-2 stories — the day's biggest sport story (IPL when relevant; cricket dominates Indian sport).
-  • culture:         1-2 stories — biggest culture/entertainment story (film, arts, books, music, notable cultural moment).
+  • sport:           1-2 stories — the day's biggest sport story.
+  • culture:         1-2 stories — biggest culture/entertainment story.
 
 ═══════════════════════════════════════════════
 SOURCE WHITELIST — strict
@@ -134,22 +124,24 @@ GLOBAL: Reuters, AP, Bloomberg, FT, WSJ, NYT, Washington Post, BBC, Guardian, Ec
 INDIA: The Hindu, Indian Express, Hindustan Times, NDTV, New Indian Express, The Print, Scroll, Times of India, Deccan Herald, The Wire, Mint, Business Standard, Economic Times, Financial Express, Hindu BusinessLine, Moneycontrol, Business Today.
 SPECIALIST (only when general sources don't cover): ESPNCricinfo (sport), Variety / Hollywood Reporter (entertainment), Nature / Science / STAT (health/science), TechCrunch / The Verge / Ars Technica / Wired (tech).
 
-NOT ALLOWED: aggregators (Google News, MSN, Yahoo), social media, opinion blogs, listicle sites, unfamiliar domains.
+NOT ALLOWED: aggregators (Google News, MSN, Yahoo), social media, opinion blogs, listicle sites, generic .com domains you don't recognise as a tier-1 publisher. Also NOT ALLOWED: WMO, WHO, UN, government press releases, NGO sites, regional papers outside the list above, Cleveland-anything or other US-local papers, tech blogs not on the list.
 
-source_url must be a DIRECT ARTICLE URL on the publisher's domain. No homepage URLs. No aggregator wrappers. No redirects. If you cannot find a whitelisted article for a section, return an empty array for that section — never fabricate.
+source_url MUST be a direct article URL on the publisher's domain. No homepage URLs (e.g. business-standard.com/economy is FORBIDDEN — needs /article/specific-headline). No aggregator wrappers. No redirects.
+
+If you cannot find a whitelisted article for a section after 2 searches, search a DIFFERENT angle of the same topic before giving up. Only return an empty array if multiple search angles all fail. NEVER fabricate.
 
 ═══════════════════════════════════════════════
 QUALITY RULES
 ═══════════════════════════════════════════════
 • Recency: every story published within the last 48 hours. major_events allows up to 7 days for sustained themes.
 • Order within each section by consequence — index 0 most important.
-• must_include flag: set true if the story is one of the day's 5 dominant stories any responsible Indian brief would be embarrassed to omit (election result, IPL final, major ruling, market-moving event).
-• No duplication: a story belongs in ONLY ONE section. Pick the section that fits best.
+• must_include flag: set true if the story is one of the day's 5 dominant stories any responsible Indian brief would be embarrassed to omit.
+• No duplication: a story belongs in ONLY ONE section. Pick the best-fitting section.
 
 ═══════════════════════════════════════════════
 OUTPUT
 ═══════════════════════════════════════════════
-Return ONLY this JSON, no markdown, no commentary:
+Return ONLY this JSON, no markdown:
 
 {
   "major_events": [ { "headline": "...", "body": "2-3 factual sentences", "source": "Publisher Name", "source_url": "https://...", "published_at": "YYYY-MM-DD", "must_include": false } ],
@@ -180,7 +172,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const today = getISTDate();
   const startTime = Date.now();
 
-  console.log(`[test] Starting single-prompt fetch for ${today}`);
+  console.log(`[test-gpt5] Starting reasoning fetch for ${today}`);
 
   const response = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
@@ -189,25 +181,40 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       'Authorization': `Bearer ${OPENAI_API_KEY}`,
     },
     body: JSON.stringify({
-      model: 'gpt-4o',
-      tools: [{ type: 'web_search_preview' }],
+      model: 'gpt-5',
+      tools: [{ type: 'web_search' }],   // NOT web_search_preview — reasoning version
       tool_choice: 'auto',
+      reasoning: { effort: 'medium' },   // medium is the sweet spot for 60s limit
       input: buildPrompt(today),
-      max_output_tokens: 8000,
+      max_output_tokens: 12000,          // higher because reasoning + output both count
     }),
   });
 
   const data = await response.json();
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
 
-  console.log(`[test] OpenAI status ${response.status}. Elapsed: ${elapsed}s`);
+  console.log(`[test-gpt5] OpenAI status ${response.status}. Elapsed: ${elapsed}s`);
 
-  // ─── Count searches ─────────────────────────────────────────────────────
+  // If the request failed at the API level, return the raw error so we can see it.
+  if (!response.ok || data.error) {
+    console.error('[test-gpt5] API error:', JSON.stringify(data).slice(0, 1000));
+    return res.status(response.status || 500).json({
+      ok: false,
+      elapsed_seconds: parseFloat(elapsed),
+      api_error: data.error || data,
+    });
+  }
+
+  // ─── Inspect the output items ──────────────────────────────────────────
   const output = Array.isArray(data.output) ? data.output : [];
   const searchCalls = output.filter((o: any) => o.type === 'web_search_call');
+  const reasoningItems = output.filter((o: any) => o.type === 'reasoning');
   const messageItem = output.find((o: any) => o.type === 'message');
 
-  console.log(`[test] Web searches performed: ${searchCalls.length}`);
+  console.log(`[test-gpt5] Output items: ${output.length} total`);
+  console.log(`[test-gpt5] Web searches: ${searchCalls.length}`);
+  console.log(`[test-gpt5] Reasoning items: ${reasoningItems.length}`);
+
   searchCalls.forEach((s: any, i: number) => {
     const action = s?.action?.query || s?.action?.type || 'unknown';
     console.log(`  search ${i + 1}: ${action}`);
@@ -217,38 +224,38 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const usage = data.usage || {};
   const inputTokens = usage.input_tokens || 0;
   const outputTokens = usage.output_tokens || 0;
-  console.log(`[test] Tokens: input=${inputTokens}, output=${outputTokens}`);
+  const reasoningTokens = usage.output_tokens_details?.reasoning_tokens || 0;
+  const visibleOutputTokens = outputTokens - reasoningTokens;
+
+  console.log(`[test-gpt5] Tokens: input=${inputTokens}, output=${outputTokens} (reasoning=${reasoningTokens}, visible=${visibleOutputTokens})`);
 
   // ─── Cost calculation ───────────────────────────────────────────────────
-  // gpt-4o: $2.50 / 1M input, $10 / 1M output
-  // web_search_preview: $25 / 1K calls
-  const inputCost = (inputTokens / 1_000_000) * 2.50;
+  // gpt-5: $1.25/M input, $10/M output (reasoning tokens count as output)
+  // web_search (reasoning): $10/1K calls
+  const inputCost = (inputTokens / 1_000_000) * 1.25;
   const outputCost = (outputTokens / 1_000_000) * 10.00;
-  const searchCost = searchCalls.length * 0.025;
+  const searchCost = searchCalls.length * 0.010;
   const totalCost = inputCost + outputCost + searchCost;
 
-  console.log(`[test] Cost breakdown:`);
+  console.log(`[test-gpt5] Cost:`);
   console.log(`  input tokens:   $${inputCost.toFixed(4)}`);
-  console.log(`  output tokens:  $${outputCost.toFixed(4)}`);
+  console.log(`  output tokens:  $${outputCost.toFixed(4)} (incl ${reasoningTokens} reasoning tokens = $${((reasoningTokens / 1_000_000) * 10).toFixed(4)})`);
   console.log(`  ${searchCalls.length} searches:    $${searchCost.toFixed(4)}`);
   console.log(`  TOTAL:          $${totalCost.toFixed(4)}`);
 
   // ─── Parse output JSON ──────────────────────────────────────────────────
   let parsed: any = null;
   let parseError: string | null = null;
-  const text = messageItem?.content?.[0]?.text;
+  const text = messageItem?.content?.find((c: any) => c.type === 'output_text')?.text
+            || messageItem?.content?.[0]?.text;
   if (text) {
-    try {
-      parsed = extractJsonObject(text);
-    } catch (e: any) {
-      parseError = e.message;
-      console.error(`[test] JSON parse failed: ${e.message}`);
-    }
+    try { parsed = extractJsonObject(text); }
+    catch (e: any) { parseError = e.message; console.error(`[test-gpt5] JSON parse failed: ${e.message}`); }
   } else {
     parseError = 'No message text in response';
   }
 
-  // ─── Section counts ─────────────────────────────────────────────────────
+  // ─── Section counts + whitelist check ───────────────────────────────────
   const sectionCounts: Record<string, number> = {};
   let whitelistedCount = 0;
   let nonWhitelistedCount = 0;
@@ -280,18 +287,23 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     sectionCounts['markets_indices'] = Array.isArray(parsed.markets?.indices) ? parsed.markets.indices.length : 0;
   }
 
-  console.log(`[test] Section counts:`, sectionCounts);
-  console.log(`[test] Whitelisted stories: ${whitelistedCount}, non-whitelisted: ${nonWhitelistedCount}`);
-  if (nonWhitelistedExamples.length > 0) {
-    console.log(`[test] Non-whitelisted examples:`, nonWhitelistedExamples);
-  }
+  console.log(`[test-gpt5] Section counts:`, sectionCounts);
+  console.log(`[test-gpt5] Whitelisted: ${whitelistedCount}, non-whitelisted: ${nonWhitelistedCount}`);
 
   return res.status(200).json({
     ok: true,
+    model: 'gpt-5',
+    reasoning_effort: 'medium',
     elapsed_seconds: parseFloat(elapsed),
     searches_performed: searchCalls.length,
     search_queries: searchCalls.map((s: any) => s?.action?.query || s?.action?.type || 'unknown'),
-    tokens: { input: inputTokens, output: outputTokens },
+    reasoning_steps: reasoningItems.length,
+    tokens: {
+      input: inputTokens,
+      output_total: outputTokens,
+      output_reasoning: reasoningTokens,
+      output_visible: visibleOutputTokens,
+    },
     cost: {
       input: parseFloat(inputCost.toFixed(4)),
       output: parseFloat(outputCost.toFixed(4)),
