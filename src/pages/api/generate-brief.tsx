@@ -78,16 +78,22 @@ const TIER_1_DOMAINS = new Set<string>([
   'aljazeera.com',
   // India-focused
   'thehindu.com',
+  'thehindubusinessline.com',
   'indianexpress.com',
+  'newindianexpress.com',
   'hindustantimes.com',
   'livemint.com',
   'business-standard.com',
+  'economictimes.indiatimes.com',
+  'financialexpress.com',
   'theprint.in',
   'scroll.in',
   'timesofindia.indiatimes.com',
+  'ndtv.com',
   'deccanherald.com',
   'thewire.in',
   'moneycontrol.com',
+  'businesstoday.in',
   // Tier-2 (allowed for specialist topics)
   'espncricinfo.com',
   'variety.com',
@@ -472,8 +478,9 @@ async function loadPersonalisationUniverse(): Promise<Universe> {
 function sourceWhitelistBlock(): string {
   return `SOURCE WHITELIST — cite ONLY from these publishers:
 GLOBAL: Reuters, Associated Press, Bloomberg, Financial Times, Wall Street Journal, New York Times, Washington Post, BBC, The Guardian, The Economist, Al Jazeera.
-INDIA: The Hindu, Indian Express, Hindustan Times, LiveMint (Mint), Business Standard, The Print, Scroll, Times of India, Deccan Herald, The Wire, Moneycontrol.
-SPECIALIST (only where general sources don't cover): ESPNCricinfo (sport), Variety / Hollywood Reporter (entertainment), Nature / Science / STAT (health/science), TechCrunch / The Verge / Ars Technica / Wired (tech).
+INDIA (general news): The Hindu, Indian Express, Hindustan Times, NDTV, New Indian Express, The Print, Scroll, Times of India, Deccan Herald, The Wire.
+INDIA (business / markets): Economic Times, LiveMint (Mint), Business Standard, Financial Express, The Hindu BusinessLine, Moneycontrol, Business Today.
+SPECIALIST (only where general sources don't cover): ESPNCricinfo (sport — especially IPL), Variety / Hollywood Reporter (entertainment), Nature / Science / STAT (health/science), TechCrunch / The Verge / Ars Technica / Wired (tech).
 
 NOT ALLOWED — drop the story rather than cite from here:
 - Aggregators (Google News, MSN, Yahoo News)
@@ -569,7 +576,7 @@ async function fetchSingleSection(
   today: string,
 ): Promise<any | null> {
   const guidance = section === 'sport'
-    ? `Find THE single biggest sport story of the day in India or globally. On Indian summer days, this is often an IPL match, especially a final or playoff. Tour matches, major tennis/football fixtures, world records also qualify.`
+    ? `Find THE single biggest sport story of the day in India or globally. On Indian summer days (April-June), this is very often an IPL match — especially a final or playoff (cricket is the dominant Indian sport story). Tour matches, major tennis/football fixtures, world records also qualify. ESPNCricinfo and the sports sections of whitelisted papers (Times of India, NDTV, Indian Express) are good sources for cricket.`
     : `Find THE single biggest culture/entertainment story of the day. This could be a film release, an arts award, a major book/music release, a death of a notable cultural figure, or a viral cultural moment.`;
 
   const prompt = `You are a senior news editor for an India-based daily brief. Today is ${today}.
@@ -580,14 +587,23 @@ ${guidance}
 
 ${sourceWhitelistBlock()}
 
-If no whitelisted article exists for today, return { "story": null }. Do NOT fabricate.
+CRITICAL OUTPUT RULE: You MUST output VALID JSON and nothing else. No prose, no preamble, no markdown explanations. If you cannot find a suitable story from a whitelisted source, output EXACTLY: { "story": null }
+Do NOT write apologies. Do NOT explain your search. Do NOT say "I couldn't find...". The ONLY allowed output is the JSON object below.
 
 ${tagsBlockFor(universe)}
 
-OUTPUT — return ONLY this JSON, no markdown:
-{ "story": ${storyShape(today)} }`;
+OUTPUT — return ONLY this JSON, no markdown, no other text:
+{ "story": ${storyShape(today)} }
 
-  const parsed = await callOpenAISection(prompt, section, 2500);
+OR, if no suitable whitelisted story exists:
+{ "story": null }`;
+
+  const parsed = await callOpenAISection(prompt, section, 2500).catch((err) => {
+    // Model returned prose instead of JSON, or the call itself failed. Either
+    // way: treat as "no story today" rather than crashing the parent fetch.
+    console.warn(`[fetch:${section}] parse failed, treating as null:`, err.message);
+    return null;
+  });
   return parsed?.story && typeof parsed.story === 'object' && parsed.story.headline ? parsed.story : null;
 }
 
@@ -888,24 +904,28 @@ function rawStoriesForWriter(raw: RawStories) {
 
 async function writeQuickEdition(raw: RawStories): Promise<BriefQuick> {
   const today = getISTDate();
-  const prompt = `You are the voice of Morning Brief — a daily news digest for thoughtful Indian readers. The reader is opening THE BRIEF, the 5-minute commute read.
+  const prompt = `You are writing THE BRIEF — the 5-minute commute edition of Morning Brief, a daily news digest for thoughtful Indian readers (urban, professional, 25-45). Today is ${today}.
 
-VOICE: warm, intelligent, conversational. Plain English. Active voice. No jargon. No sensationalism.
+VOICE: calm, analytical, newspaper-like — the register of an Economist briefing or an FT lex card. Declarative, sober sentences. Active voice. Plain English. No clickbait, no sensationalism, no conversational fluff ("plus", "also", "by the way"). Explain jargon when used.
 
-FORMAT: each story is a MICRO-ITEM with three short fields:
-- headline: clear and factual (≤ 14 words)
-- what_happened: ONE sentence (≤ 22 words). State the news plainly.
-- why_it_matters: ONE sentence (≤ 22 words). The reader takeaway. Avoid generic filler.
+FORMAT — each story is a MICRO-ITEM with three short fields:
+- headline: clear, factual (≤ 14 words). Lead with the subject (country, company, person, number) — not the verb.
+- what_happened: ONE sentence (≤ 22 words). State the news plainly. Use specific numbers, names, dates where they sharpen the story.
+- why_it_matters: ONE sentence (≤ 22 words). ANCHOR TO INDIA. Acceptable hooks: inflation, the rupee, food prices, RBI policy, EMIs, household budgets, jobs, urban life, India's strategic position, or sector impact on Indian companies/markets. A purely global takeaway is NOT enough — make the Indian connection visible. Example to emulate: "Higher oil prices directly affect India's inflation, rupee, and household budgets."
 
-SELECTION (be ruthless — this is the skim edition):
-- major_events: TOP 2 most significant
-- world: TOP 3 most consequential
-- india: TOP 2 most consequential
-- topics: pick 5 micro-items total mixed across business, markets, technology, climate_health, sport, culture — choose the most important across them. (Do not include the markets index table here — just one micro-item if a market story warrants it.)
+SELECTION — be ruthless. This is the skim edition.
+- major_events: TOP 2 — sustained, multi-day themes with the largest real-world consequence (think monsoon, oil shock, war escalation, election outcome, RBI policy).
+- world:        TOP 3 — distinct stories from different regions. Pick consequence over novelty.
+- india:        TOP 2 — national stories with material impact on policy, business, or daily life.
+- topics:       exactly 5 — the most consequential developments across business, markets, technology, climate, health, sport, culture. Pick stories that connect to inflation, the rupee, jobs, urban India, or sectors that move Indian household economics or daily life. Skip filler.
+
+ORDER WITHIN EACH SECTION: most consequential first. Index 0 is what a newscast would lead with.
+
+NO DUPLICATION ACROSS SECTIONS: a story belongs in ONLY ONE section across the whole brief. If you place it in major_events, do NOT also list it in world or india or topics. Use the most appropriate single section.
 
 HARD RULES:
-- USE ONLY THE STORIES PROVIDED IN THE RAW STORIES BELOW. Do not invent, infer, or recall stories from your own knowledge. Every story you output must correspond to a raw story; every source_url must appear VERBATIM in the raw stories. If a section has no raw stories, output an empty array — do NOT pad with fabricated entries.
-- ALWAYS include every story flagged must_include: true (in major_events, world, india). If a must_include sits in topics-territory (business/tech/etc.), surface it in topics. Never drop a must_include.
+- USE ONLY THE STORIES PROVIDED IN THE RAW STORIES BELOW. Do not invent, infer, or recall stories from your own knowledge. Every story you output must correspond to a raw story; every source_url must appear VERBATIM in the raw stories. If a section has no usable raw stories, output an empty array — do NOT pad with fabricated entries.
+- ALWAYS include every story flagged must_include: true. If a must_include sits in topics-territory (business/tech/etc.), surface it in topics. Never drop a must_include.
 - Pass through source, source_url, industries, interests, city_tags, topic_tags, must_include UNCHANGED on every story you keep.
 - Output ONLY JSON. No markdown, no commentary.
 
@@ -927,29 +947,31 @@ ${JSON.stringify(rawStoriesForWriter(raw))}`;
 
 async function writeDailyEdition(raw: RawStories): Promise<BriefDaily> {
   const today = getISTDate();
-  const prompt = `You are the voice of Morning Brief — a daily news digest for thoughtful Indian readers. The reader is opening THE DAILY, the main 10-minute read.
+  const prompt = `You are writing THE DAILY — the 10-minute main edition of Morning Brief, a daily news digest for thoughtful Indian readers (urban, professional, 25-45). Today is ${today}.
 
-VOICE: warm, intelligent, conversational. Plain English. Active voice. Separate fact from interpretation. Hedge where uncertain ("likely", "may", "early signs suggest"). No jargon. No sensationalism.
+VOICE: calm, analytical, newspaper-like — the register of a serious Indian daily front page mixed with an Economist briefing. Declarative, sober sentences. Active voice. Plain English. Separate fact from interpretation. Where facts are developing, uncertain, or disputed, say so explicitly ("early reports", "officials have not yet confirmed", "analysts disagree"). No clickbait, no sensationalism, no conversational filler. Explain jargon simply when used.
 
-FORMAT: each story has FIVE labelled fields:
-- headline: clear, factual (≤ 16 words)
-- facts: 1-2 sentences. What happened. Numbers, names, dates, locations.
+FORMAT — each story has FIVE labelled fields:
+- headline: clear, factual (≤ 16 words). Lead with the subject (country, company, person, number) — not the verb.
+- facts: 1-2 sentences. What happened. Specific numbers, names, dates, locations. Source-attributable.
 - background: 1-2 sentences. What led to this. Why the story is relevant beyond the immediate headline.
-- why_it_matters: 1-2 sentences. The impact — on people, policy, markets, society, governance.
-- what_happens_next: 1-2 sentences. The specific developments to track (hearings, decisions, releases, fixtures).
-- analysis: 1-2 sentences. Concise interpretation, clearly separate from the facts. Acknowledge uncertainty where appropriate.
+- why_it_matters: 1-2 sentences. ANCHOR TO INDIA — household budgets, inflation, the rupee, RBI policy, jobs, urban life, healthcare, sector impact on Indian companies/markets, or India's strategic position. A purely global or generic takeaway is NOT enough. Even for world stories, name the Indian transmission channel. Example to emulate: "India imports most of its oil. Any sustained increase feeds into inflation and current account pressures."
+- what_happens_next: 1-2 sentences. The SPECIFIC developments to track this week (named hearings, policy decisions, data releases, fixtures). Avoid "stay tuned" generalities.
+- analysis: 1-2 sentences. Concise interpretation, clearly marked as opinion. Acknowledge uncertainty where appropriate. Make a point rather than restating facts.
 
-SELECTION: Include EVERY story from the raw stories. Do not drop anything. Maintain the ordering from the raw stories within each section. If raw stories has no "sport" or "culture" key (or the value is empty/missing), OMIT that field from your output entirely — do NOT fabricate a story.
+SELECTION: Include EVERY story from the raw stories. Do not drop anything. Maintain the ordering from the raw stories within each section (raw is already impact-ordered). If raw stories has no "sport" or "culture" key (or the value is empty/missing), OMIT that field from your output entirely — do NOT fabricate a story.
 
-CLOSER: Include a "closer" object at the end with:
-- headlines_to_remember: EXACTLY 5 single-line memory anchors covering today's most important stories. Each short, factual, scannable (≤ 14 words).
-- things_to_watch: EXACTLY 3 forward-looking developments to track this week. Each ONE sentence (≤ 24 words).
-- conversation_insight: ONE intelligent observation a reader could naturally raise in conversation — a synthesis across multiple stories, not a restated headline. 2-3 sentences. Insightful, not gimmicky.
+NO DUPLICATION ACROSS SECTIONS: a story belongs in ONLY ONE section. If raw stories has duplicate-feeling entries across sections, pick the section that fits best and skip the others.
+
+CLOSER — include a "closer" object at the end with:
+- headlines_to_remember: EXACTLY 5 single-line memory anchors covering today's biggest developments. Each ≤ 14 words, factual, scannable. Drawn from across the brief's most consequential stories.
+- things_to_watch: EXACTLY 3 forward-looking developments to track this week. Each ONE sentence (≤ 24 words). Specific — name the event/release/decision and when.
+- conversation_insight: ONE intelligent observation that CONNECTS MULTIPLE STORIES into a single pattern — the kind of remark that lands at a dinner table. 2-3 sentences. The bar: when read aloud, it should sound like a synthesis, not a restated headline. Example pattern to emulate: "The most important story in India right now is not a single headline — it is the combination of oil uncertainty, a weak monsoon outlook, and inflation risk. Individually they are manageable, but together they can influence everything from grocery bills and EMIs to market performance and government policy."
 
 HARD RULES:
-- USE ONLY THE STORIES PROVIDED IN THE RAW STORIES BELOW. Do not invent, infer, or recall stories from your own knowledge. Every story you output must correspond to a raw story; every source_url must appear VERBATIM in the raw stories. If a section has no raw stories, output an empty array — do NOT pad with fabricated entries.
+- USE ONLY THE STORIES PROVIDED IN THE RAW STORIES BELOW. Do not invent, infer, or recall stories from your own knowledge. Every story you output must correspond to a raw story; every source_url must appear VERBATIM in the raw stories. If a section has no usable raw stories, output an empty array — do NOT pad with fabricated entries.
 - Carry source, source_url, industries, interests, city_tags, topic_tags, must_include UNCHANGED through every story.
-- Keep markets indices values EXACTLY as in raw data. You may rewrite the markets summary in your voice (2 sentences).
+- Keep markets indices values EXACTLY as in raw data. You may rewrite the markets summary in your voice (2 sentences, India-anchored).
 - Output ONLY JSON. No markdown, no commentary.
 
 OUTPUT SHAPE:
@@ -960,7 +982,7 @@ OUTPUT SHAPE:
   "world":          [ /* same shape */ ],
   "india":          [ /* same shape */ ],
   "business":       [ /* same shape */ ],
-  "markets":        { "summary": "rewritten 2-sentence summary", "indices": [ /* unchanged */ ] },
+  "markets":        { "summary": "rewritten 2-sentence India-anchored summary", "indices": [ /* unchanged */ ] },
   "technology":     [ /* same shape */ ],
   "climate_health": [ /* same shape */ ],
   "sport":   { /* single story, same shape */ },
