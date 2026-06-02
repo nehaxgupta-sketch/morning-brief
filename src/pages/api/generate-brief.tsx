@@ -459,128 +459,52 @@ async function loadPersonalisationUniverse(): Promise<Universe> {
 }
 
 // ─── Phase 2: Shared news fetch ─────────────────────────────────────────────
+//
+// Architecture: parallel per-section fetches. One large prompt covering 8
+// sections was unreliable — gpt-4o would do a single web search, land on a
+// roundup page, and return 1-2 stories. Section-scoped prompts (each with
+// one clear job) get the model to actually iterate searches per section.
+// Trade-off: 8 API calls instead of 1, slightly higher cost. Wall-clock
+// time stays similar because they run in parallel via Promise.allSettled.
 
-async function fetchNewsFromOpenAI(universe: Universe): Promise<RawStories> {
-  const today = getISTDate();
+// ─── Shared prompt fragments ────────────────────────────────────────────────
 
-  const tagsBlock = (universe.industries.length || universe.interests.length)
-    ? `
-DOWNSTREAM TAGGING (for personalisation):
-On every story, include zero or more tags from these EXACT vocabularies:
-- "industries": ${JSON.stringify(universe.industries)}
-- "interests":  ${JSON.stringify(universe.interests)}
-- "city_tags":  ${JSON.stringify(universe.cities)} (only if the story is materially relevant to that city)
-- "topic_tags": from { "business", "markets", "technology", "climate", "health", "sport", "culture", "policy", "education", "infrastructure", "energy" } (multiple allowed; "climate" and "health" are listed separately even though the section is climate_health)
-
-Tagging rules:
-- Use EXACT spelling from the vocabularies (case-sensitive).
-- Only tag where the relevance is real and direct. Better to leave a tag array empty than to over-tag.
-- Sport, culture, markets stories do not need industry/interest tags unless materially relevant.`
-    : `
-DOWNSTREAM TAGGING: No personalisation vocabulary yet. Skip the tag fields.`;
-
-  const prompt = `You are a senior news editor for an India-based daily brief read by educated, curious readers. Today is ${today}. Search the web for the day's most consequential stories and return ONLY a JSON object — no markdown, no commentary.
-
-═══════════════════════════════════════════════
-PART 1 — MUST-INCLUDE SCAN (do this FIRST, in your head)
-═══════════════════════════════════════════════
-Before you fetch anything, identify the 5 stories that any responsible Indian daily brief on ${today} would be embarrassed to omit. These are the day's dominant stories — what every major paper is leading with, what is unavoidable in conversation. Examples of what makes a story must-include:
-- A national-scale event (election result, major policy decision, large protest, major accident, major court ruling)
-- A dominant ongoing series at its peak (IPL final, World Cup final, election day, major hearing day)
-- A market-moving event of broad significance
-- A geopolitical event with direct India impact
-
-For each of these 5 stories, you will set "must_include": true on the corresponding story object you produce in Part 2. These MUST be in the output — no exceptions, no substitutes.
-
-═══════════════════════════════════════════════
-PART 2 — FETCH (web search required)
-═══════════════════════════════════════════════
-You MUST use the web_search_preview tool for EVERY story. Do not write any story from memory. If web search does not return a real article for a category, leave that category empty rather than fabricate.
-
-SOURCE WHITELIST — cite ONLY from these publishers:
+function sourceWhitelistBlock(): string {
+  return `SOURCE WHITELIST — cite ONLY from these publishers:
 GLOBAL: Reuters, Associated Press, Bloomberg, Financial Times, Wall Street Journal, New York Times, Washington Post, BBC, The Guardian, The Economist, Al Jazeera.
 INDIA: The Hindu, Indian Express, Hindustan Times, LiveMint (Mint), Business Standard, The Print, Scroll, Times of India, Deccan Herald, The Wire, Moneycontrol.
-SPECIALIST (only when general sources don't cover): ESPNCricinfo (sport), Variety / Hollywood Reporter (entertainment), Nature / Science / STAT (health/science), TechCrunch / The Verge / Ars Technica / Wired (tech).
+SPECIALIST (only where general sources don't cover): ESPNCricinfo (sport), Variety / Hollywood Reporter (entertainment), Nature / Science / STAT (health/science), TechCrunch / The Verge / Ars Technica / Wired (tech).
 
-ABSOLUTELY NOT ALLOWED — drop the story if you can only source it from here:
-- Aggregators: Google News, MSN, Yahoo News
-- Social media: X/Twitter, Reddit, YouTube
-- Opinion blogs, listicle sites
-- Anonymous / no-byline pieces
+NOT ALLOWED — drop the story rather than cite from here:
+- Aggregators (Google News, MSN, Yahoo News)
+- Social media (X/Twitter, Reddit, YouTube)
+- Opinion blogs, listicle sites, anonymous/no-byline pieces
 - Domain you don't recognise
 
-SOURCE_URL must be a direct article URL on the publisher's domain. No redirect links, no homepage URLs, no aggregator wrappers.
-
-RECENCY: every story's published_at must be within the last 48 hours, unless it is in major_events (sustained themes can reference up to 7 days).
-
-DEDUPLICATION — each story appears in EXACTLY ONE section. Priority order:
-1. major_events takes precedence over everything
-2. world / india take precedence over topic sections (business, technology, etc.)
-3. topic sections only get stories not already classified above
-If a story could fit two sections (e.g. IPL final = sport AND a major_event AND a Bengaluru/Ahmedabad story), pick the HIGHEST-priority section by the order above. Do not duplicate.
-
-CITIES INSIDE INDIA: significant city-level developments (Mumbai, Bengaluru, Chennai, Hyderabad, Delhi, Kolkata, Pune, Ahmedabad, etc.) belong in the "india" section. There are no separate city sections in the output. Do not bias toward any one city — select by news significance.
-
-═══════════════════════════════════════════════
-PART 3 — SECTIONS & COUNTS
-═══════════════════════════════════════════════
-- major_events: 3 to 4 stories — sustained, multi-day themes or dominant narratives shaping the week (ongoing wars, election cycles, IPL season, major policy rollouts). DISTINCT from world/india (which are 24-hour news).
-- world: exactly 5 stories — 24-hour global news.
-- india: exactly 5 stories — 24-hour national news. Significant city stories fold in here.
-- business: 2 to 3 stories.
-- technology: 1 to 2 stories.
-- climate_health: 1 to 2 stories (climate, environment, or health).
-- sport: 1 single story (the day's biggest sport story).
-- culture: 1 single story (the day's biggest culture/entertainment story).
-- markets: a one-paragraph summary + exactly 4 indices: Sensex, Nifty, S&P 500, Nasdaq.
-
-Order stories within each array by consequence — index 0 is the most important. (The 5-minute edition only keeps the top items from each section, so the ordering matters.)
-
-═══════════════════════════════════════════════
-PART 4 — LENS (four one-liners at the top)
-═══════════════════════════════════════════════
-At the start of your output, include a "lens" object with four lines that summarise the day at a glance. Each line is ONE short sentence (max 14 words). These appear on the app's home screen as a flash card before the reader picks an edition.
-
-- world: the single biggest theme in global news today
-- india: the single biggest theme in Indian news today
-- markets: a one-liner on markets direction and what's driving it
-- watch: the single most important development to watch this week
-
-${tagsBlock}
-
-═══════════════════════════════════════════════
-PART 5 — REQUIRED OUTPUT SHAPE
-═══════════════════════════════════════════════
-{
-  "lens": {
-    "world": "...",
-    "india": "...",
-    "markets": "...",
-    "watch": "..."
-  },
-  "major_events": [
-    { "headline": "...", "body": "2-3 sentence factual summary", "source": "Publisher Name", "source_url": "https://...", "published_at": "ISO date or ${today}", "industries": [], "interests": [], "city_tags": [], "topic_tags": [], "must_include": false }
-  ],
-  "world":   [ /* 5 stories, same shape */ ],
-  "india":   [ /* 5 stories, same shape */ ],
-  "business":      [ /* 2-3 */ ],
-  "technology":    [ /* 1-2 */ ],
-  "climate_health":[ /* 1-2 */ ],
-  "sport":   { /* single story */ },
-  "culture": { /* single story */ },
-  "markets": {
-    "summary": "2-3 sentences capturing today's market direction and drivers",
-    "indices": [
-      { "name": "Sensex",  "change": "+0.4%" },
-      { "name": "Nifty",   "change": "-0.1%" },
-      { "name": "S&P 500", "change": "+0.6%" },
-      { "name": "Nasdaq",  "change": "+1.1%" }
-    ]
-  }
+SOURCE_URL must be a direct article URL on the publisher's domain. No redirects, no homepage URLs, no aggregator wrappers. If you can't find a whitelisted article, leave the section empty rather than fabricate.`;
 }
 
-Use real markets data from today if available; otherwise neutral best estimates clearly grounded in the day's news. Be factual and neutral throughout — no opinion. Keep each story body to 2-3 sentences strictly.`;
+function tagsBlockFor(universe: Universe): string {
+  if (!universe.industries.length && !universe.interests.length) {
+    return `TAGGING: No personalisation vocabulary yet. Skip the tag fields.`;
+  }
+  return `TAGGING (for downstream personalisation):
+On every story, include zero or more tags from these EXACT vocabularies (case-sensitive):
+- "industries": ${JSON.stringify(universe.industries)}
+- "interests":  ${JSON.stringify(universe.interests)}
+- "city_tags":  ${JSON.stringify(universe.cities)} (only if materially relevant)
+- "topic_tags": from { "business", "markets", "technology", "climate", "health", "sport", "culture", "policy", "education", "infrastructure", "energy" }
 
+Only tag where relevance is real and direct. Better to leave a tag array empty than to over-tag.`;
+}
+
+function storyShape(today: string): string {
+  return `{ "headline": "...", "body": "2-3 factual sentences", "source": "Publisher Name", "source_url": "https://...", "published_at": "ISO date or ${today}", "industries": [], "interests": [], "city_tags": [], "topic_tags": [], "must_include": false }`;
+}
+
+// ─── Generic per-section fetch ──────────────────────────────────────────────
+
+async function callOpenAISection(prompt: string, sectionName: string, maxTokens = 4000): Promise<any> {
   const response = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
     headers: {
@@ -590,19 +514,260 @@ Use real markets data from today if available; otherwise neutral best estimates 
     body: JSON.stringify({
       model: 'gpt-4o',
       tools: [{ type: 'web_search_preview' }],
-      tool_choice: { type: 'web_search_preview' },
+      // 'auto' lets the model iterate searches naturally (which it does in a
+      // small, focused prompt — and didn't in the old monolithic one).
+      tool_choice: 'auto',
       input: prompt,
-      max_output_tokens: 14000,
+      max_output_tokens: maxTokens,
     }),
   });
 
   const data = await response.json();
-  console.log('OpenAI fetch status:', response.status, 'items:', data.output?.length);
+  console.log(`[fetch:${sectionName}] status ${response.status}, items ${data.output?.length}`);
   const text = data.output?.find((o: any) => o.type === 'message')?.content?.[0]?.text;
-  if (!text) throw new Error(`No response from OpenAI fetch. Raw: ${JSON.stringify(data).slice(0, 800)}`);
+  if (!text) throw new Error(`[fetch:${sectionName}] No text in response. Raw: ${JSON.stringify(data).slice(0, 500)}`);
+  return extractJsonObject(text);
+}
 
-  const parsed = extractJsonObject(text);
-  return enforceQualityRules(parsed);
+// ─── Per-section fetchers ───────────────────────────────────────────────────
+
+async function fetchListSection(
+  section: string,
+  guidance: string,
+  count: string,
+  universe: Universe,
+  today: string,
+): Promise<any[]> {
+  const prompt = `You are a senior news editor for an India-based daily brief. Today is ${today}.
+
+Your job: produce the "${section}" section. Use the web_search_preview tool to find real articles. Run multiple searches if needed — do not stop at the first roundup page.
+
+${guidance}
+
+TARGET COUNT: ${count} stories. If genuine news doesn't support the full count, return fewer — never fabricate to fill quota.
+
+${sourceWhitelistBlock()}
+
+RECENCY: every story published within the last 48 hours (major_events allows up to 7 days for sustained themes).
+
+MUST_INCLUDE: if a story is one of the day's 5 dominant stories that any responsible Indian brief would be embarrassed to omit (national election result, IPL final, major policy ruling, geopolitical event with India impact, market-moving event), set "must_include": true. Otherwise false.
+
+ORDER stories within the array by consequence — index 0 most important.
+
+${tagsBlockFor(universe)}
+
+OUTPUT — return ONLY this JSON, no markdown:
+{ "stories": [ ${storyShape(today)} ] }`;
+
+  const parsed = await callOpenAISection(prompt, section);
+  return Array.isArray(parsed?.stories) ? parsed.stories : [];
+}
+
+async function fetchSingleSection(
+  section: 'sport' | 'culture',
+  universe: Universe,
+  today: string,
+): Promise<any | null> {
+  const guidance = section === 'sport'
+    ? `Find THE single biggest sport story of the day in India or globally. On Indian summer days, this is often an IPL match, especially a final or playoff. Tour matches, major tennis/football fixtures, world records also qualify.`
+    : `Find THE single biggest culture/entertainment story of the day. This could be a film release, an arts award, a major book/music release, a death of a notable cultural figure, or a viral cultural moment.`;
+
+  const prompt = `You are a senior news editor for an India-based daily brief. Today is ${today}.
+
+Your job: produce the single "${section}" story for today. Use the web_search_preview tool — run multiple searches if needed.
+
+${guidance}
+
+${sourceWhitelistBlock()}
+
+If no whitelisted article exists for today, return { "story": null }. Do NOT fabricate.
+
+${tagsBlockFor(universe)}
+
+OUTPUT — return ONLY this JSON, no markdown:
+{ "story": ${storyShape(today)} }`;
+
+  const parsed = await callOpenAISection(prompt, section, 2500);
+  return parsed?.story && typeof parsed.story === 'object' && parsed.story.headline ? parsed.story : null;
+}
+
+async function fetchMarkets(today: string): Promise<{ summary: string; indices: MarketIndex[] }> {
+  const prompt = `You are a markets desk reporter. Today is ${today}. Use web_search_preview to fetch TODAY's closing values (or most recent if markets are open) for:
+- Sensex (BSE)
+- Nifty 50 (NSE)
+- S&P 500
+- Nasdaq Composite
+
+Search multiple sources if needed. Return ONLY this JSON, no markdown:
+{
+  "summary": "2-3 sentences on today's market direction and drivers, India-focused",
+  "indices": [
+    { "name": "Sensex",  "change": "+0.4%" },
+    { "name": "Nifty",   "change": "-0.1%" },
+    { "name": "S&P 500", "change": "+0.6%" },
+    { "name": "Nasdaq",  "change": "+1.1%" }
+  ]
+}
+
+Use real values — if you cannot confirm, use a neutral 0.0% rather than fabricate a number.`;
+
+  const parsed = await callOpenAISection(prompt, 'markets', 2000);
+  return {
+    summary: parsed?.summary || '',
+    indices: Array.isArray(parsed?.indices) ? parsed.indices : [],
+  };
+}
+
+async function fetchLens(rawStories: RawStories, today: string): Promise<{ world: string; india: string; markets: string; watch: string }> {
+  // Synthesised once we have all sections back. Doesn't need its own web search;
+  // the input is the already-fetched stories.
+  const summary = {
+    world: rawStories.world.slice(0, 3).map((s) => s.headline),
+    india: rawStories.india.slice(0, 3).map((s) => s.headline),
+    major_events: rawStories.major_events.slice(0, 3).map((s) => s.headline),
+    markets_summary: rawStories.markets.summary,
+  };
+
+  const prompt = `You are writing the four-line "lens" that appears on the home screen of an India daily brief on ${today}. Each line is ONE short sentence (max 14 words), written in clear neutral English.
+
+Stories fetched today:
+${JSON.stringify(summary, null, 2)}
+
+Return ONLY this JSON, no markdown:
+{
+  "world": "the single biggest theme in global news today",
+  "india": "the single biggest theme in Indian news today",
+  "markets": "a one-liner on markets direction and what's driving it",
+  "watch": "the single most important development to watch this week"
+}`;
+
+  // No web search needed — pure synthesis.
+  const response = await fetch('https://api.openai.com/v1/responses', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: 'gpt-4o-mini',
+      input: prompt,
+      max_output_tokens: 600,
+    }),
+  });
+  const data = await response.json();
+  const text = data.output?.find((o: any) => o.type === 'message')?.content?.[0]?.text;
+  if (!text) return { world: '', india: '', markets: '', watch: '' };
+  try {
+    const parsed = extractJsonObject(text);
+    return {
+      world: parsed?.world || '',
+      india: parsed?.india || '',
+      markets: parsed?.markets || '',
+      watch: parsed?.watch || '',
+    };
+  } catch {
+    return { world: '', india: '', markets: '', watch: '' };
+  }
+}
+
+// ─── Orchestrator ───────────────────────────────────────────────────────────
+
+async function fetchNewsFromOpenAI(universe: Universe): Promise<RawStories> {
+  const today = getISTDate();
+
+  // Section-specific guidance. The prompt is small and focused enough that the
+  // model actually performs targeted searches instead of giving up after one.
+  const sectionDefs: Array<{ section: string; guidance: string; count: string }> = [
+    {
+      section: 'major_events',
+      count: '3 to 4',
+      guidance: `MAJOR EVENTS are sustained, multi-day themes shaping the week — ongoing wars, election cycles, IPL season at finals stage, major policy rollouts, multi-day disasters. DISTINCT from 24-hour news (which goes into world/india). Pick the dominant narratives that someone reading this brief should be aware of even if today's headline is small.`,
+    },
+    {
+      section: 'world',
+      count: 'exactly 5',
+      guidance: `WORLD is 24-hour global news outside India. Major government decisions, international relations, foreign elections, big-tech moves abroad, global economic actions, climate/disaster events, major court rulings. Spread across regions — don't put all 5 from one country unless it's a genuinely dominant news day there.`,
+    },
+    {
+      section: 'india',
+      count: 'exactly 5',
+      guidance: `INDIA is 24-hour national news. Government actions, court rulings, state-level developments of national significance, business deals, accidents/disasters, social/political events. Significant CITY developments (Mumbai, Bengaluru, Chennai, Hyderabad, Delhi, Kolkata, Pune, Ahmedabad, Ahmedabad, etc.) belong here too. If today is an IPL final day or other major sport-but-national-event day, the sport story can ALSO appear in india if its national significance is large — that's fine, dedup happens downstream.`,
+    },
+    {
+      section: 'business',
+      count: '2 to 3',
+      guidance: `BUSINESS — corporate news, earnings, M&A, major financial moves, regulatory actions. Indian and global. Skip pure markets summaries (handled separately).`,
+    },
+    {
+      section: 'technology',
+      count: '1 to 2',
+      guidance: `TECHNOLOGY — product launches with real significance, major AI developments, big-tech regulation, cybersecurity events. Skip rumour or speculation pieces.`,
+    },
+    {
+      section: 'climate_health',
+      count: '1 to 2',
+      guidance: `CLIMATE & HEALTH — climate disasters, environmental policy, major health stories (outbreaks, drug approvals, research findings with real implications). Pick stories with concrete real-world impact, not speculative research.`,
+    },
+  ];
+
+  console.log(`[fetch] Starting parallel section fetch for ${today}. Sections: ${sectionDefs.map((s) => s.section).join(', ')}, sport, culture, markets.`);
+
+  // Kick everything off in parallel.
+  const listPromises = sectionDefs.map((def) =>
+    fetchListSection(def.section, def.guidance, def.count, universe, today)
+      .catch((err) => {
+        console.warn(`[fetch:${def.section}] failed:`, err.message);
+        return [] as any[];
+      }),
+  );
+  const sportPromise = fetchSingleSection('sport', universe, today).catch((err) => {
+    console.warn(`[fetch:sport] failed:`, err.message);
+    return null;
+  });
+  const culturePromise = fetchSingleSection('culture', universe, today).catch((err) => {
+    console.warn(`[fetch:culture] failed:`, err.message);
+    return null;
+  });
+  const marketsPromise = fetchMarkets(today).catch((err) => {
+    console.warn(`[fetch:markets] failed:`, err.message);
+    return { summary: '', indices: [] };
+  });
+
+  const [listResults, sport, culture, markets] = await Promise.all([
+    Promise.all(listPromises),
+    sportPromise,
+    culturePromise,
+    marketsPromise,
+  ]);
+
+  // Stitch into the raw shape that enforceQualityRules expects.
+  const stitched: any = {
+    major_events: listResults[0],
+    world: listResults[1],
+    india: listResults[2],
+    business: listResults[3],
+    technology: listResults[4],
+    climate_health: listResults[5],
+    sport,
+    culture,
+    markets,
+  };
+
+  console.log(`[fetch] Section counts pre-enforcement: ` +
+    `major=${stitched.major_events.length}, world=${stitched.world.length}, india=${stitched.india.length}, ` +
+    `biz=${stitched.business.length}, tech=${stitched.technology.length}, climate=${stitched.climate_health.length}, ` +
+    `sport=${sport ? 1 : 0}, culture=${culture ? 1 : 0}, indices=${markets.indices.length}`);
+
+  // Run existing dedup + whitelist + fingerprinting pipeline.
+  const cleaned = enforceQualityRules(stitched);
+
+  // Synthesise the lens from what we got. (Lens isn't a fetch — it's a summary.)
+  cleaned.lens = await fetchLens(cleaned, today).catch((err) => {
+    console.warn('[fetch:lens] failed:', err.message);
+    return { world: '', india: '', markets: '', watch: '' };
+  });
+
+  return cleaned;
 }
 
 // ─── Post-fetch enforcement ─────────────────────────────────────────────────
@@ -739,6 +904,7 @@ SELECTION (be ruthless — this is the skim edition):
 - topics: pick 5 micro-items total mixed across business, markets, technology, climate_health, sport, culture — choose the most important across them. (Do not include the markets index table here — just one micro-item if a market story warrants it.)
 
 HARD RULES:
+- USE ONLY THE STORIES PROVIDED IN THE RAW STORIES BELOW. Do not invent, infer, or recall stories from your own knowledge. Every story you output must correspond to a raw story; every source_url must appear VERBATIM in the raw stories. If a section has no raw stories, output an empty array — do NOT pad with fabricated entries.
 - ALWAYS include every story flagged must_include: true (in major_events, world, india). If a must_include sits in topics-territory (business/tech/etc.), surface it in topics. Never drop a must_include.
 - Pass through source, source_url, industries, interests, city_tags, topic_tags, must_include UNCHANGED on every story you keep.
 - Output ONLY JSON. No markdown, no commentary.
@@ -781,6 +947,7 @@ CLOSER: Include a "closer" object at the end with:
 - conversation_insight: ONE intelligent observation a reader could naturally raise in conversation — a synthesis across multiple stories, not a restated headline. 2-3 sentences. Insightful, not gimmicky.
 
 HARD RULES:
+- USE ONLY THE STORIES PROVIDED IN THE RAW STORIES BELOW. Do not invent, infer, or recall stories from your own knowledge. Every story you output must correspond to a raw story; every source_url must appear VERBATIM in the raw stories. If a section has no raw stories, output an empty array — do NOT pad with fabricated entries.
 - Carry source, source_url, industries, interests, city_tags, topic_tags, must_include UNCHANGED through every story.
 - Keep markets indices values EXACTLY as in raw data. You may rewrite the markets summary in your voice (2 sentences).
 - Output ONLY JSON. No markdown, no commentary.
@@ -848,7 +1015,7 @@ SECTIONS REQUIRED
 ═══════════════════════════════════════════════
 HARD RULES
 ═══════════════════════════════════════════════
-- Use the raw stories below as your source material. Do not invent stories or quotes.
+- Use the raw stories below as your source material. Do not invent stories, quotes, or facts. Every headline you reference in three_patterns.stories_connected must appear in the raw stories. The one_quote must be from a real raw-story figure or a real public figure — do not fabricate quotes.
 - Do not duplicate The Daily's content. This is synthesis, not repetition.
 - Output ONLY JSON. No markdown, no commentary.
 
@@ -934,6 +1101,67 @@ function validateBrief(content: any, edition: Edition):
 
 function validateLens(lens: any): boolean {
   return LensSchema.safeParse(lens).success;
+}
+
+// ─── Post-write source-URL guard ────────────────────────────────────────────
+//
+// The writers (LLMs) sometimes invent stories when raw is sparse, complete with
+// plausible-looking headlines and homepage URLs. Zod can't catch this because
+// any https URL passes the schema. This walks the WRITTEN brief and drops any
+// story whose source_url isn't from a Tier-1 whitelisted publisher. Acts as a
+// safety net on top of the fetch-time enforcement in enforceQualityRules.
+
+function stripNonWhitelistedFromContent(
+  content: any,
+  edition: Edition,
+): { content: any; dropped: number } {
+  if (!content || typeof content !== 'object') return { content, dropped: 0 };
+  let dropped = 0;
+
+  const filterArr = (arr: any[], section: string): any[] => {
+    if (!Array.isArray(arr)) return arr;
+    return arr.filter((s) => {
+      if (isWhitelistedSource(s?.source_url)) return true;
+      dropped++;
+      console.warn(
+        `[${edition}] Post-write strip — section "${section}" dropping story: "${(s?.headline || '').slice(0, 80)}" | url: ${s?.source_url}`,
+      );
+      return false;
+    });
+  };
+
+  if (edition === '5min') {
+    content.major_events = filterArr(content.major_events, 'major_events');
+    content.world = filterArr(content.world, 'world');
+    content.india = filterArr(content.india, 'india');
+    content.topics = filterArr(content.topics, 'topics');
+  } else if (edition === '10min') {
+    content.major_events = filterArr(content.major_events, 'major_events');
+    content.world = filterArr(content.world, 'world');
+    content.india = filterArr(content.india, 'india');
+    content.business = filterArr(content.business, 'business');
+    content.technology = filterArr(content.technology, 'technology');
+    content.climate_health = filterArr(content.climate_health, 'climate_health');
+    // sport/culture are single-story optional fields — delete if non-whitelisted.
+    if (content.sport && !isWhitelistedSource(content.sport?.source_url)) {
+      dropped++;
+      console.warn(
+        `[${edition}] Post-write strip — dropping sport: "${content.sport?.headline}" | url: ${content.sport?.source_url}`,
+      );
+      delete content.sport;
+    }
+    if (content.culture && !isWhitelistedSource(content.culture?.source_url)) {
+      dropped++;
+      console.warn(
+        `[${edition}] Post-write strip — dropping culture: "${content.culture?.headline}" | url: ${content.culture?.source_url}`,
+      );
+      delete content.culture;
+    }
+  }
+  // 'deep' has no story-level source_urls — three_patterns/long_read are pure
+  // synthesis. Nothing to strip here.
+
+  return { content, dropped };
 }
 
 // ─── Fallback fetch ─────────────────────────────────────────────────────────
@@ -1050,8 +1278,14 @@ async function processEdition(
     const content = await writer(rawStories);
     const validation = validateBrief(content, ed);
     if (validation.ok) {
-      await saveBriefToSupabase(ed, rawStories, validation.data, lens, 'ready');
-      return { status: 'ready', content: validation.data };
+      // Post-write source-URL guard: drop any story whose source_url isn't
+      // from a Tier-1 whitelisted publisher (catches writer hallucinations).
+      const { content: stripped, dropped } = stripNonWhitelistedFromContent(validation.data, ed);
+      if (dropped > 0) {
+        console.log(`[${ed}] Post-write strip removed ${dropped} non-whitelisted stories.`);
+      }
+      await saveBriefToSupabase(ed, rawStories, stripped, lens, 'ready');
+      return { status: 'ready', content: stripped };
     }
     const prev = await fetchPreviousBrief(ed);
     if (prev) {
