@@ -186,7 +186,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       tool_choice: 'auto',
       reasoning: { effort: 'medium' },   // medium is the sweet spot for 60s limit
       input: buildPrompt(today),
-      max_output_tokens: 12000,          // higher because reasoning + output both count
+      max_output_tokens: 32000,          // higher because reasoning + output both count
     }),
   });
 
