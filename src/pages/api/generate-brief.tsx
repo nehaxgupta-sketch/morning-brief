@@ -29,7 +29,10 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { createClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 
-export const config = { maxDuration: 60 };
+// 300s = 5min. Vercel Pro caps at 300; Hobby with Fluid Compute enabled also
+// reaches 300. gpt-5 with reasoning web_search at 'low' effort runs ~150-200s.
+// REQUIRES Fluid Compute toggle in Vercel project settings → Functions.
+export const config = { maxDuration: 300 };
 
 // ─── Env / clients ──────────────────────────────────────────────────────────
 
@@ -76,26 +79,54 @@ const TIER_1_DOMAINS = new Set<string>([
   'economist.com',
   'theguardian.com',
   'aljazeera.com',
-  // India-focused
+  'abc.net.au',
+  // India — wires + papers of record
+  'ptinews.com',          // Press Trust of India (wire)
+  'aninews.in',           // Asian News International
   'thehindu.com',
   'thehindubusinessline.com',
   'indianexpress.com',
   'newindianexpress.com',
   'hindustantimes.com',
+  'ndtv.com',
+  'timesofindia.indiatimes.com',
+  'deccanherald.com',
+  'telegraphindia.com',   // Kolkata/East India
+  'tribuneindia.com',     // Punjab/Haryana/Himachal strong
+  // India — business / markets
   'livemint.com',
   'business-standard.com',
   'economictimes.indiatimes.com',
   'financialexpress.com',
-  'theprint.in',
-  'scroll.in',
-  'timesofindia.indiatimes.com',
-  'ndtv.com',
-  'deccanherald.com',
-  'thewire.in',
   'moneycontrol.com',
   'businesstoday.in',
-  // Tier-2 (allowed for specialist topics)
+  // India — digital + magazine journalism
+  'theprint.in',
+  'scroll.in',
+  'thewire.in',
+  'indiatoday.in',
+  'outlookindia.com',
+  'thequint.com',
+  'caravanmagazine.in',
+  'thenewsminute.com',    // South India regional
+  // India — specialist (legal, environment)
+  'livelaw.in',           // Court/legal news
+  'barandbench.com',      // Court/legal news
+  'downtoearth.org.in',   // Environment / public health
+  // Government / institutional primary sources
+  'rbi.org.in',
+  'sebi.gov.in',
+  'mospi.gov.in',         // Ministry of Statistics
+  'pib.gov.in',           // Press Information Bureau
+  'bls.gov',              // US Bureau of Labor Statistics
+  'treasury.gov',
+  'federalreserve.gov',
+  'imf.org',
+  'worldbank.org',
+  'who.int',
+  // Specialist (allowed where general sources don't cover)
   'espncricinfo.com',
+  'espn.com',
   'variety.com',
   'hollywoodreporter.com',
   'nature.com',
@@ -110,7 +141,12 @@ const TIER_1_DOMAINS = new Set<string>([
 function extractHostname(url: string): string | null {
   try {
     const u = new URL(url);
-    return u.hostname.toLowerCase().replace(/^www\./, '');
+    // Strip www./m./amp. prefixes — mobile and AMP subdomains of whitelisted
+    // publishers (e.g. m.economictimes.com) should pass whitelist check.
+    return u.hostname.toLowerCase()
+      .replace(/^www\./, '')
+      .replace(/^m\./, '')
+      .replace(/^amp\./, '');
   } catch {
     return null;
   }
@@ -477,18 +513,24 @@ async function loadPersonalisationUniverse(): Promise<Universe> {
 
 function sourceWhitelistBlock(): string {
   return `SOURCE WHITELIST — cite ONLY from these publishers:
-GLOBAL: Reuters, Associated Press, Bloomberg, Financial Times, Wall Street Journal, New York Times, Washington Post, BBC, The Guardian, The Economist, Al Jazeera.
-INDIA (general news): The Hindu, Indian Express, Hindustan Times, NDTV, New Indian Express, The Print, Scroll, Times of India, Deccan Herald, The Wire.
-INDIA (business / markets): Economic Times, LiveMint (Mint), Business Standard, Financial Express, The Hindu BusinessLine, Moneycontrol, Business Today.
-SPECIALIST (only where general sources don't cover): ESPNCricinfo (sport — especially IPL), Variety / Hollywood Reporter (entertainment), Nature / Science / STAT (health/science), TechCrunch / The Verge / Ars Technica / Wired (tech).
+GLOBAL WIRES & PAPERS OF RECORD: Reuters, Associated Press, Bloomberg, Financial Times, Wall Street Journal, New York Times, Washington Post, BBC, The Guardian, The Economist, Al Jazeera, ABC News (Australia).
+INDIA NATIONAL DAILIES & WIRES: PTI (Press Trust of India), ANI, The Hindu, Indian Express, Hindustan Times, NDTV, New Indian Express, Times of India, Deccan Herald, Telegraph India, Tribune India.
+INDIA BUSINESS / MARKETS: Economic Times, LiveMint (Mint), Business Standard, Financial Express, The Hindu BusinessLine, Moneycontrol, Business Today.
+INDIA DIGITAL & MAGAZINES: The Print, Scroll, The Wire, India Today, Outlook India, The Quint, Caravan Magazine, The News Minute (South India regional).
+INDIA SPECIALIST: Live Law / Bar and Bench (courts), Down To Earth (environment, health).
+GOVT / INSTITUTIONAL PRIMARY SOURCES (use when more authoritative than press): RBI, SEBI, MoSPI, PIB, US Bureau of Labor Statistics, US Treasury, Federal Reserve, IMF, World Bank, WHO.
+SPECIALIST (only where general sources don't cover): ESPNCricinfo / ESPN (sport — especially IPL), Variety / Hollywood Reporter (entertainment), Nature / Science / STAT (health/science), TechCrunch / The Verge / Ars Technica / Wired (tech).
 
 NOT ALLOWED — drop the story rather than cite from here:
 - Aggregators (Google News, MSN, Yahoo News)
 - Social media (X/Twitter, Reddit, YouTube)
+- Vendor / corporate blogs (openai.com/blog, microsoft.com/blog, etc.) — these are PR, not journalism
 - Opinion blogs, listicle sites, anonymous/no-byline pieces
 - Domain you don't recognise
 
-SOURCE_URL must be a direct article URL on the publisher's domain. No redirects, no homepage URLs, no aggregator wrappers. If you can't find a whitelisted article, leave the section empty rather than fabricate.`;
+SOURCE_URL must be a direct article URL on the publisher's domain. No redirects, no homepage URLs, no aggregator wrappers. Mobile (m.) and AMP subdomains of whitelisted publishers are acceptable. If you can't find a whitelisted article, leave the section empty rather than fabricate.
+
+For Tier-2 Indian cities (Lucknow, Pune, Punjab cities, etc.) where major papers have thin coverage, prefer Tribune India (Punjab), Telegraph India (East), News Minute (South), or Hindustan Times / Times of India city editions. If none have today's local story, leave that city section empty.`;
 }
 
 function tagsBlockFor(universe: Universe): string {
@@ -688,7 +730,217 @@ Return ONLY this JSON, no markdown:
 
 // ─── Orchestrator ───────────────────────────────────────────────────────────
 
+// ─── PATH B: Single gpt-5 reasoning + web_search call ───────────────────────
+// Replaces the per-section parallel fetchers. The legacy helpers below
+// (fetchListSection, fetchSingleSection, fetchMarkets) remain in the file
+// as dead code for quick rollback via git.
+
+async function callGpt5Reasoning(
+  prompt: string,
+  reasoningEffort: 'low' | 'medium' | 'high' = 'medium',
+): Promise<string> {
+  const t0 = Date.now();
+  console.log(`[gpt-5] Starting reasoning fetch (effort=${reasoningEffort}). This typically takes 60-180s.`);
+
+  const response = await fetch('https://api.openai.com/v1/responses', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: 'gpt-5',
+      input: [{ role: 'user', content: prompt }],
+      reasoning: { effort: reasoningEffort },
+      tools: [{ type: 'web_search' }],
+      max_output_tokens: 32000,
+    }),
+  });
+
+  const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+  const data = await response.json();
+  console.log(`[gpt-5] Response received in ${elapsed}s, status=${response.status}.`);
+
+  if (response.status !== 200) {
+    throw new Error(`gpt-5 returned status ${response.status}. Body: ${JSON.stringify(data).slice(0, 600)}`);
+  }
+
+  // Count what happened for visibility in Vercel logs.
+  const items = Array.isArray(data.output) ? data.output : [];
+  const searchCount = items.filter((o: any) => o.type === 'web_search_call' || o.type === 'tool_use').length;
+  const reasoningCount = items.filter((o: any) => o.type === 'reasoning').length;
+  console.log(`[gpt-5] output items=${items.length}, web_searches=${searchCount}, reasoning_blocks=${reasoningCount}`);
+
+  // Extract the final assistant message text. Walk through any 'message' or
+  // 'output_text' items and concatenate. Defensive — the Responses API can
+  // return text in slightly different shapes.
+  let text = '';
+  for (const item of items) {
+    if (item.type === 'message' && Array.isArray(item.content)) {
+      for (const c of item.content) {
+        if (c.type === 'output_text' || c.type === 'text') {
+          text += (c.text || '');
+        }
+      }
+    } else if (item.type === 'output_text' && typeof item.text === 'string') {
+      text += item.text;
+    }
+  }
+
+  if (!text) {
+    throw new Error(`gpt-5 returned no text. Raw: ${JSON.stringify(data).slice(0, 600)}`);
+  }
+  return text;
+}
+
+function buildGpt5FetchPrompt(today: string, universe: Universe): string {
+  return `You are the fetcher for Morning Brief, India's daily news digest for thoughtful urban professionals (25-45, urban, English-reading). Today is ${today} (IST).
+
+Your job: search the web aggressively for today's most consequential news and return ONE JSON object with all sections filled. Use the web_search tool. Perform AT LEAST 15-20 distinct searches across topics — depth matters; do not stop early.
+
+═══════════════════════════════════════════════
+SECTIONS TO COLLECT
+═══════════════════════════════════════════════
+
+- major_events: 3-4 stories. SUSTAINED, multi-day themes shaping the week — ongoing wars (Russia-Ukraine, Middle East), IPL playoffs/finals, election cycles, major policy rollouts (RBI policy, budget, big regulatory moves), multi-day disasters. NOT 24-hour news.
+
+- world: EXACTLY 5 stories. 24-hour global news from OUTSIDE India. Spread across regions — avoid all 5 from one country unless it's a genuinely dominant news day there. Cover: US politics, major elections abroad, big government decisions, international relations, cross-border business moves, climate/disaster events, major court rulings, big tech moves abroad.
+
+- india: EXACTLY 5 stories. 24-hour national news. Government actions, court rulings, state-level developments of national significance (Bengaluru, Mumbai, Delhi, Chennai, Hyderabad, Pune, Kolkata, Ahmedabad all qualify), business deals, accidents/disasters, social/political events. Include RBI rate decisions, monsoon updates, major Indian corporate news.
+
+- business: 2-3 stories. Corporate news, earnings, M&A, regulatory actions, major financial moves. Indian AND global. Skip pure markets summaries (handled separately).
+
+- technology: 1-2 stories. Significant product launches, major AI developments, big-tech regulation, cybersecurity events. Skip rumour/speculation.
+
+- climate_health: 1-2 stories. Climate disasters, environmental policy, major health stories (outbreaks, drug approvals, research with real implications). Stories with concrete real-world impact.
+
+- sport: 1 story. THE single biggest sport story of the day. On Indian summer days (April-June), this is very often an IPL match — especially finals/playoffs. Major tennis/football/cricket fixtures, world records also qualify.
+
+- culture: 1 story. THE single biggest culture/entertainment story (film releases, major awards, big music/arts news).
+
+- markets: ONE object with summary + indices. Find today's closing values for Sensex, Nifty 50, Dow Jones, Nasdaq Composite. Write a 2-3 sentence India-anchored summary of today's market action.
+
+- lens: ONE object with 4 short sentences (≤14 words each), each summarising the day's most important development:
+  • world: the most important world development today
+  • india: the most important India development today
+  • markets: the headline market move today
+  • watch: what to track in the coming days
+
+═══════════════════════════════════════════════
+SOURCING — STRICT WHITELIST
+═══════════════════════════════════════════════
+
+${sourceWhitelistBlock()}
+
+═══════════════════════════════════════════════
+STORY FIELDS (per story object)
+═══════════════════════════════════════════════
+
+- headline: ≤16 words, factual, lead with the subject (country, company, person, number) — not the verb.
+- body: 2-3 factual sentences. Specific numbers, names, dates, locations. NO opinion or framing — just facts.
+- source: publisher name (e.g. "Reuters", "The Hindu")
+- source_url: DIRECT article URL on the publisher's domain. NEVER a homepage, never an aggregator wrapper, never a redirect. Must include the article slug/ID.
+- published_at: ISO date (today's date is acceptable if you can't find the exact published_at).
+- industries, interests, city_tags, topic_tags: see TAGGING block below.
+- must_include: boolean. Set true ONLY for stories that are absolutely critical today (1-3 across the whole fetch — RBI rate decisions, major war escalations, big India policy announcements, IPL final, major disasters). Default false.
+
+${tagsBlockFor(universe)}
+
+═══════════════════════════════════════════════
+HARD RULES
+═══════════════════════════════════════════════
+
+1. WHITELIST: every source_url MUST be from a whitelisted publisher domain. Verify by checking the hostname. If you found a great story but can't find it on a whitelisted source, OMIT it — don't fabricate.
+2. NO FABRICATION: do not invent headlines, URLs, quotes, or facts. If you can't find a section's quota of stories from whitelisted sources, return fewer stories — never pad.
+3. SEARCH DEPTH: do at least 15 distinct searches across topics. The model that fails this task fails by stopping after 1-2 searches. Don't be that model.
+4. DEDUP: no two stories should cover the same event. If a story could fit two sections (e.g. an Indian business story), put it in india only (higher priority).
+5. SPORT AND CULTURE: each is a SINGLE story object with all fields populated (headline, body, source, source_url, published_at, must_include). NEVER undefined fields. If no real whitelisted story is available, omit the key entirely from the JSON.
+6. MARKETS INDICES: must be an ARRAY of objects shaped like: [{"name":"Sensex","value":"74243","change":"-0.16%"}, {"name":"Nifty 50","value":"23366","change":"-0.21%"}, {"name":"Dow Jones","value":"...","change":"..."}, {"name":"Nasdaq","value":"...","change":"..."}]. Never a single object, never a string. Use today's actual closing values.
+7. JSON ONLY: output a single JSON object. No markdown, no preamble, no explanation. Start with { and end with }.
+
+═══════════════════════════════════════════════
+OUTPUT SHAPE
+═══════════════════════════════════════════════
+
+{
+  "major_events": [ ${storyShape(today)}, ... ],
+  "world":        [ ${storyShape(today)}, ... ],
+  "india":        [ ${storyShape(today)}, ... ],
+  "business":     [ ${storyShape(today)}, ... ],
+  "technology":   [ ${storyShape(today)}, ... ],
+  "climate_health": [ ${storyShape(today)}, ... ],
+  "sport":   ${storyShape(today)},
+  "culture": ${storyShape(today)},
+  "markets": {
+    "summary": "2-3 sentence India-anchored summary of today's market action",
+    "indices": [
+      { "name": "Sensex", "change": "+0.5%" },
+      { "name": "Nifty 50", "change": "+0.4%" },
+      { "name": "Dow Jones", "change": "-0.2%" },
+      { "name": "Nasdaq", "change": "+0.1%" }
+    ]
+  },
+  "lens": {
+    "world": "one short sentence ≤14 words",
+    "india": "one short sentence ≤14 words",
+    "markets": "one short sentence ≤14 words",
+    "watch": "one short sentence ≤14 words on what to watch next"
+  }
+}
+
+Begin now. Search the web aggressively. Return only the JSON object.`;
+}
+
 async function fetchNewsFromOpenAI(universe: Universe): Promise<RawStories> {
+  const today = getISTDate();
+
+  // Single big call to gpt-5 with reasoning + web_search.
+  // 'low' effort validated to run in ~175s with 19 searches and quality
+  // ~60/70 on our internal rubric. If quality degrades, bump to 'medium'.
+  const prompt = buildGpt5FetchPrompt(today, universe);
+  const text = await callGpt5Reasoning(prompt, 'low');
+
+  // Parse the JSON. extractJsonObject handles markdown fences + extra prose
+  // around the JSON if the model misbehaves.
+  let parsed: any;
+  try {
+    parsed = extractJsonObject(text);
+  } catch (err: any) {
+    console.error('[gpt-5] JSON parse failed. First 600 chars of output:', text.slice(0, 600));
+    throw new Error(`gpt-5 output not parseable as JSON: ${err.message}`);
+  }
+
+  console.log(`[fetch] gpt-5 raw section counts: ` +
+    `major=${parsed.major_events?.length || 0}, world=${parsed.world?.length || 0}, india=${parsed.india?.length || 0}, ` +
+    `biz=${parsed.business?.length || 0}, tech=${parsed.technology?.length || 0}, climate=${parsed.climate_health?.length || 0}, ` +
+    `sport=${parsed.sport ? 1 : 0}, culture=${parsed.culture ? 1 : 0}, indices=${parsed.markets?.indices?.length || 0}`);
+
+  // Run through the existing dedup + whitelist enforcement pipeline.
+  // (This catches any non-whitelisted URLs gpt-5 may have slipped through.)
+  const cleaned = enforceQualityRules(parsed);
+
+  // Lens: gpt-5 should have produced one in the same call. If it didn't, or
+  // if it's malformed, fall back to the standalone lens synthesiser.
+  const lensFromModel = parsed?.lens;
+  if (lensFromModel && lensFromModel.world && lensFromModel.india && lensFromModel.markets && lensFromModel.watch) {
+    cleaned.lens = lensFromModel;
+  } else {
+    console.warn('[fetch] gpt-5 lens missing/invalid; falling back to fetchLens.');
+    cleaned.lens = await fetchLens(cleaned, today).catch((err) => {
+      console.warn('[fetch:lens] fallback also failed:', err.message);
+      return { world: '', india: '', markets: '', watch: '' };
+    });
+  }
+
+  return cleaned;
+}
+
+// ─── LEGACY (Path A) per-section fetcher — kept for rollback ────────────────
+// To revert: rename this function to `fetchNewsFromOpenAI` (and rename the
+// gpt-5 version above to `fetchNewsFromOpenAI_pathB_legacy` or similar).
+// All downstream code (writers, enforcement, save) is untouched.
+
+async function fetchNewsFromOpenAI_legacy(universe: Universe): Promise<RawStories> {
   const today = getISTDate();
 
   // Section-specific guidance. The prompt is small and focused enough that the
@@ -1336,8 +1588,10 @@ async function runWriterForEdition(
         await saveBriefToSupabase(ed, rawStories, stripped, lens, 'ready');
         return { status: 'ready', content: stripped };
       }
-      lastError = validation.errors;
-      console.warn(`[${ed}] Attempt ${attempt} validation failed: ${validation.errors}`);
+      // Narrowed: validation is the failure branch here.
+      const errMsg = (validation as { ok: false; errors: string }).errors;
+      lastError = errMsg;
+      console.warn(`[${ed}] Attempt ${attempt} validation failed: ${errMsg}`);
     } catch (err: any) {
       lastError = err.message;
       console.warn(`[${ed}] Attempt ${attempt} threw: ${err.message}`);
