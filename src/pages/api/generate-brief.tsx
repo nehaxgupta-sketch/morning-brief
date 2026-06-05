@@ -259,7 +259,7 @@ interface BriefEditorial {
   signature: {
     one_number: { value: string; context: string };
     one_chart: { title: string; description: string };
-    one_quote: { quote: string; attribution: string; context: string };
+    one_quote?: { quote: string; attribution: string; context: string } | null;
   };
 }
 
@@ -375,7 +375,7 @@ const BriefEditorialSchema = z.object({
       quote: z.string().min(10),
       attribution: z.string().min(3),
       context: z.string().min(10),
-    }),
+    }).nullish(),
   }),
 });
 
@@ -897,9 +897,12 @@ function enforceQualityRules(raw: any): RawStories {
 // ─── Phase 3: Edition writers (three different prompts) ─────────────────────
 
 function rawStoriesForWriter(raw: RawStories) {
-  // Compact representation passed to writers. We pass the full thing — the
-  // writers need to see every story they might select from.
-  return raw;
+  // Strip `lens` — it's a four-line home-screen summary, not source material.
+  // Previously the deep writer was treating lens lines as available headlines
+  // and putting them in three_patterns.stories_connected. Writers see stories
+  // and markets only.
+  const { lens, ...storiesOnly } = raw;
+  return storiesOnly;
 }
 
 async function writeQuickEdition(raw: RawStories): Promise<BriefQuick> {
@@ -1021,7 +1024,7 @@ SECTIONS REQUIRED
 
 2. long_read — ONE editorial essay of ${longReadTarget} on the single most important theme of the day.
      - title: distinctive (≤ 12 words). Not a headline. An angle.
-     - body: flowing prose. Pick ONE thread (e.g. "India's inflation-energy-monsoon triangle", "What the Karnataka transition reveals about urban governance"). Go deep. Bring history, scale, second-order implications. Where facts are disputed, hedge. End with a forward-looking sentence.
+     - body: flowing prose, ${longReadTarget}. This is a HARD requirement — do not stop short. Pick ONE thread (e.g. "India's inflation-energy-monsoon triangle", "What the Karnataka transition reveals about urban governance"). Go deep: bring history, scale, second-order implications, named figures or institutions where relevant. Where facts are disputed, hedge explicitly. End with a forward-looking sentence. If you find yourself wrapping up before the word count, you have not gone deep enough — add a paragraph on consequences or counter-arguments.
      - candidate_themes: 2-3 alternative themes you could have chosen instead (for downstream personalisation that may pick a different one).
 
 3. watching_this_week — exactly 5 forward-looking items. Each:
@@ -1032,7 +1035,7 @@ SECTIONS REQUIRED
 4. signature — three small editorial set pieces:
      - one_number: a single number that captures something important today. value is the number with units (e.g. "$87/barrel" or "12%"). context is 1-2 sentences on why this number matters today.
      - one_chart: a chart description (we render it client-side if at all). title is the chart's subject (e.g. "Brent crude, last 30 days"). description is 1-2 sentences on what the chart would show and why it's the right cut today.
-     - one_quote: a quote from THIS WEEK worth sitting with. quote is the quote itself (≤ 40 words). attribution is who said it (name, role, publication). context is 1-2 sentences on why it lands.
+     - one_quote: a quote from THIS WEEK worth sitting with. ONLY use a quote if it appears verbatim in the raw stories below or is a well-documented public statement by a named figure. Do NOT paraphrase a story and attribute it as a quote. Do NOT invent quotes. If no real quote is available, return null for this field — omission is correct. quote is the quote itself (≤ 40 words). attribution is who said it (name, role, publication). context is 1-2 sentences on why it lands.
 
 ═══════════════════════════════════════════════
 HARD RULES
@@ -1061,7 +1064,7 @@ OUTPUT SHAPE:
   "signature": {
     "one_number": { "value": "...", "context": "..." },
     "one_chart": { "title": "...", "description": "..." },
-    "one_quote": { "quote": "...", "attribution": "...", "context": "..." }
+    "one_quote": { "quote": "...", "attribution": "...", "context": "..." }  // or null if no real quote available
   }
 }
 
