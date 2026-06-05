@@ -930,7 +930,8 @@ HARD RULES:
 - USE ONLY THE STORIES PROVIDED IN THE RAW STORIES BELOW. Do not invent, infer, or recall stories from your own knowledge. Every story you output must correspond to a raw story; every source_url must appear VERBATIM in the raw stories. If a section has no usable raw stories, output an empty array — do NOT pad with fabricated entries.
 - ALWAYS include every story flagged must_include: true. If a must_include sits in topics-territory (business/tech/etc.), surface it in topics. Never drop a must_include.
 - Pass through source, source_url, industries, interests, city_tags, topic_tags, must_include UNCHANGED on every story you keep.
-- Output ONLY JSON. No markdown, no commentary.
+- EVERY field on EVERY story is REQUIRED: headline, what_happened, why_it_matters, source, source_url. Do not omit any of these on any story. Empty arrays ([]) for tag fields are fine; null/missing/undefined values for text fields are NOT acceptable and will cause the brief to fail.
+- Output ONLY JSON. No markdown fences, no commentary, no preamble. Start the response with { and end with }.
 
 OUTPUT SHAPE:
 {
@@ -975,7 +976,8 @@ HARD RULES:
 - USE ONLY THE STORIES PROVIDED IN THE RAW STORIES BELOW. Do not invent, infer, or recall stories from your own knowledge. Every story you output must correspond to a raw story; every source_url must appear VERBATIM in the raw stories. If a section has no usable raw stories, output an empty array — do NOT pad with fabricated entries.
 - Carry source, source_url, industries, interests, city_tags, topic_tags, must_include UNCHANGED through every story.
 - Keep markets indices values EXACTLY as in raw data. You may rewrite the markets summary in your voice (2 sentences, India-anchored).
-- Output ONLY JSON. No markdown, no commentary.
+- EVERY field on EVERY story is REQUIRED: headline, facts, background, why_it_matters, what_happens_next, analysis, source, source_url. Do not omit any of these on any story. Empty arrays ([]) for tag fields are fine; null/missing/undefined values for text fields are NOT acceptable and will cause the brief to fail.
+- Output ONLY JSON. No markdown fences, no commentary, no preamble. Start the response with { and end with }.
 
 OUTPUT SHAPE:
 {
@@ -1305,42 +1307,47 @@ async function runWriterForEdition(
   rawStories: RawStories,
   lens: any | null,
 ): Promise<EditionOutcome> {
-  try {
-    console.log(`Writing ${ed}...`);
-    const writer =
-      ed === '5min'  ? writeQuickEdition
-    : ed === '10min' ? writeDailyEdition
-    :                  writeEditorialEdition;
+  const writer =
+    ed === '5min'  ? writeQuickEdition
+  : ed === '10min' ? writeDailyEdition
+  :                  writeEditorialEdition;
 
-    const content = await writer(rawStories);
-    const validation = validateBrief(content, ed);
-    if (validation.ok) {
-      // Post-write source-URL guard: drop any story whose source_url isn't
-      // from a Tier-1 whitelisted publisher (catches writer hallucinations).
-      const { content: stripped, dropped } = stripNonWhitelistedFromContent(validation.data, ed);
-      if (dropped > 0) {
-        console.log(`[${ed}] Post-write strip removed ${dropped} non-whitelisted stories.`);
+  // Two attempts. gpt-4o-mini occasionally returns non-JSON or drops required
+  // fields; one retry catches most of these. We only fall back to yesterday's
+  // brief if BOTH attempts fail.
+  let lastError: string = '';
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      console.log(`Writing ${ed}${attempt === 2 ? ' (retry)' : ''}...`);
+      const content = await writer(rawStories);
+      const validation = validateBrief(content, ed);
+      if (validation.ok) {
+        // Post-write source-URL guard: drop any story whose source_url isn't
+        // from a Tier-1 whitelisted publisher (catches writer hallucinations).
+        const { content: stripped, dropped } = stripNonWhitelistedFromContent(validation.data, ed);
+        if (dropped > 0) {
+          console.log(`[${ed}] Post-write strip removed ${dropped} non-whitelisted stories.`);
+        }
+        await saveBriefToSupabase(ed, rawStories, stripped, lens, 'ready');
+        return { status: 'ready', content: stripped };
       }
-      await saveBriefToSupabase(ed, rawStories, stripped, lens, 'ready');
-      return { status: 'ready', content: stripped };
+      lastError = validation.errors;
+      console.warn(`[${ed}] Attempt ${attempt} validation failed: ${validation.errors}`);
+    } catch (err: any) {
+      lastError = err.message;
+      console.warn(`[${ed}] Attempt ${attempt} threw: ${err.message}`);
     }
-    const prev = await fetchPreviousBrief(ed);
-    if (prev) {
-      await saveBriefToSupabase(ed, rawStories, prev.content, prev.lens, 'fallback');
-      return { status: 'fallback', reason: validation.errors, content: prev.content };
-    }
-    await saveBriefToSupabase(ed, rawStories, null, lens, 'failed');
-    return { status: 'failed', reason: validation.errors };
-  } catch (err: any) {
-    console.error(`Error writing ${ed}:`, err.message);
-    const prev = await fetchPreviousBrief(ed);
-    if (prev) {
-      await saveBriefToSupabase(ed, rawStories, prev.content, prev.lens, 'fallback');
-      return { status: 'fallback', reason: err.message, content: prev.content };
-    }
-    await saveBriefToSupabase(ed, rawStories, null, lens, 'failed');
-    return { status: 'failed', reason: err.message };
   }
+
+  // Both attempts failed — fall back to yesterday's brief, or mark failed.
+  console.error(`[${ed}] Both attempts failed. Last error: ${lastError}`);
+  const prev = await fetchPreviousBrief(ed);
+  if (prev) {
+    await saveBriefToSupabase(ed, rawStories, prev.content, prev.lens, 'fallback');
+    return { status: 'fallback', reason: lastError, content: prev.content };
+  }
+  await saveBriefToSupabase(ed, rawStories, null, lens, 'failed');
+  return { status: 'failed', reason: lastError };
 }
 
 // ─── Mode: fetch ────────────────────────────────────────────────────────────
