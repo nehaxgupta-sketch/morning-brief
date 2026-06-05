@@ -911,10 +911,15 @@ async function writeQuickEdition(raw: RawStories): Promise<BriefQuick> {
 
 VOICE: calm, analytical, newspaper-like — the register of an Economist briefing or an FT lex card. Declarative, sober sentences. Active voice. Plain English. No clickbait, no sensationalism, no conversational fluff ("plus", "also", "by the way"). Explain jargon when used.
 
-FORMAT — each story is a MICRO-ITEM with three short fields:
+FORMAT — each story is a MICRO-ITEM with the following fields. The first three carry the editorial content; the rest are passed through from raw stories unchanged.
+
+Editorial fields (you write these):
 - headline: clear, factual (≤ 14 words). Lead with the subject (country, company, person, number) — not the verb.
 - what_happened: ONE sentence (≤ 22 words). State the news plainly. Use specific numbers, names, dates where they sharpen the story.
-- why_it_matters: ONE sentence (≤ 22 words). ANCHOR TO INDIA. Acceptable hooks: inflation, the rupee, food prices, RBI policy, EMIs, household budgets, jobs, urban life, India's strategic position, or sector impact on Indian companies/markets. A purely global takeaway is NOT enough — make the Indian connection visible. Example to emulate: "Higher oil prices directly affect India's inflation, rupee, and household budgets."
+- why_it_matters: ONE sentence (≤ 22 words) — REQUIRED, never omit. ANCHOR TO INDIA. Acceptable hooks: inflation, the rupee, food prices, RBI policy, EMIs, household budgets, jobs, urban life, India's strategic position, or sector impact on Indian companies/markets. A purely global takeaway is acceptable ONLY if no Indian angle exists; never drop the field. Example to emulate: "Higher oil prices directly affect India's inflation, rupee, and household budgets."
+
+Passthrough fields (copy from raw stories unchanged):
+- source, source_url, industries, interests, city_tags, topic_tags, must_include
 
 SELECTION — be ruthless. This is the skim edition.
 - major_events: TOP 2 — sustained, multi-day themes with the largest real-world consequence (think monsoon, oil shock, war escalation, election outcome, RBI policy).
@@ -946,7 +951,7 @@ OUTPUT SHAPE:
 Raw stories:
 ${JSON.stringify(rawStoriesForWriter(raw))}`;
 
-  return callOpenAIChat('gpt-4o-mini', prompt, 6000, 'The Brief (5min)');
+  return callOpenAIChat('gpt-4o', prompt, 6000, 'The Brief (5min)');
 }
 
 async function writeDailyEdition(raw: RawStories): Promise<BriefDaily> {
