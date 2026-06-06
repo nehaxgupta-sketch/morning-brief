@@ -1,18 +1,17 @@
 // src/pages/onboarding.tsx
 //
 // Multi-step onboarding. Step 0: choose Standard vs Personalised.
-// Personalised: steps 1-5 (about you → cities → work → interests → mood+edition).
-// Standard path jumps from step 0 to step 6 (edition only).
+// Personalised: steps 1-4 (about you → cities → work → interests).
+// Standard: step 0 then finish — no further steps.
 //
-// Sprint 8 changes:
-// - Interests step pre-checks the four "common" interests (opt-out style).
-// - Edition labels updated to "The Brief / The Daily / The Editorial".
-// - Mood UI preserved but dormant in the new pipeline (Sprint 8 note in
-//   MIGRATION.md).
-// Internal edition IDs ('5min' / '10min' / 'deep') unchanged.
+// Sprint 9 changes:
+// - Pre-populates ALL state from existing profile on mount so editing is non-destructive
+// - Removed mood (analysis tone) step entirely
+// - Removed default-edition step entirely
+// - Standard path no longer has an edition step — picks brief_type then finishes
+// - Backfills full_name from auth metadata if missing on the profile row
 
-import { useState } from 'react'
-import { useRouter } from 'next/router'
+import { useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabase'
 
 const C = {
@@ -67,9 +66,6 @@ const STUDY_LEVELS = [
   'PhD / Research', 'Professional Course', 'Other',
 ]
 
-// Interests are shown as a checklist. The first four are PRE-CHECKED by
-// default so personalised readers get markets/business/tech/sport without
-// having to ask for them — opt-out rather than opt-in.
 const INTERESTS_DEFAULT_CHECKED = [
   'Business & Economy',
   'Markets & Investing',
@@ -78,9 +74,7 @@ const INTERESTS_DEFAULT_CHECKED = [
 ]
 
 const INTERESTS_ALL = [
-  // Defaults first
   'Business & Economy', 'Markets & Investing', 'Technology', 'Sport',
-  // Then the rest
   'World Affairs', 'Indian Politics',
   'Science', 'Artificial Intelligence',
   'Health & Wellness', 'Environment & Climate',
@@ -91,19 +85,6 @@ const INTERESTS_ALL = [
   'Parenting', 'Sustainability', 'Gaming',
   'Space & Astronomy',
   'Cricket', 'Football', 'Formula 1',
-]
-
-const MOODS = [
-  { id: 'neutral', label: 'Neutral', desc: 'Balanced, objective framing. Facts first.', icon: '◎' },
-  { id: 'optimistic', label: 'Hopeful', desc: 'Same facts, forward-looking lens. What could go right.', icon: '◑' },
-  { id: 'critical', label: 'Critical', desc: 'Sharper analysis. Questions assumptions.', icon: '◐' },
-]
-
-// Canonical edition IDs (unchanged in DB). Display names are new.
-const EDITIONS = [
-  { id: '5min',  label: 'The Brief',     desc: '5 minutes · headlines + why-it-matters, scannable on a commute', icon: '⚡' },
-  { id: '10min', label: 'The Daily',     desc: '10 minutes · the full daily read with facts, context, and analysis', icon: '◆' },
-  { id: 'deep',  label: 'The Editorial', desc: '15 minutes · patterns, a long read, and one number/chart/quote', icon: '◈' },
 ]
 
 const FEATURES_STANDARD = [
@@ -224,12 +205,28 @@ function Wordmark({ size = 'large' }: { size?: 'large' | 'small' }) {
   )
 }
 
+// ─── Helpers for loading "Other" fields ──────────────────────────────────────
+
+// If the saved value is in the canonical options list, set the main value.
+// If it's a free-text "Other" value, set main to 'Other' and the Other field
+// to the saved string. If null/empty, clear both.
+function setWithOther(
+  saved: string | null | undefined,
+  options: string[],
+  setMain: (s: string) => void,
+  setOther: (s: string) => void,
+) {
+  if (!saved) { setMain(''); setOther(''); return }
+  if (options.includes(saved)) { setMain(saved); setOther('') }
+  else { setMain('Other'); setOther(saved) }
+}
+
 // ─── Page ───────────────────────────────────────────────────────────────────
 
 export default function Onboarding() {
-  const router = useRouter()
   const [step, setStep] = useState(0)
   const [saving, setSaving] = useState(false)
+  const [loading, setLoading] = useState(true)
 
   const [briefType, setBriefType] = useState<'standard' | 'personalised' | ''>('')
   const [age, setAge] = useState('')
@@ -248,14 +245,59 @@ export default function Onboarding() {
   const [studyAreaOther, setStudyAreaOther] = useState('')
   const [studyLevel, setStudyLevel] = useState('')
   const [studyLevelOther, setStudyLevelOther] = useState('')
-  // Interests start with the four defaults pre-checked. The user can untick
-  // these and/or add others.
   const [interests, setInterests] = useState<string[]>([...INTERESTS_DEFAULT_CHECKED])
-  const [mood, setMood] = useState('neutral')
-  const [edition, setEdition] = useState('10min')
 
-  const personalisedSteps = 5
+  const personalisedSteps = 4
   const isWorkingPro = ['early_career', 'mid_career', 'senior'].includes(lifeStage)
+
+  // ─── Pre-populate from existing profile (the fix for "starts from scratch") ─
+  useEffect(() => {
+    const load = async () => {
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) { window.location.href = '/login'; return }
+
+      const { data } = await supabase.from('profiles').select('*').eq('id', user.id).single()
+      if (!data) { setLoading(false); return }
+
+      // Backfill full_name from auth metadata if profile row is missing it.
+      // Fixes the case where the verification trigger overwrote signup's upsert.
+      const metaName = (user.user_metadata as any)?.full_name as string | undefined
+      if (!data.full_name && metaName) {
+        await supabase.from('profiles').update({ full_name: metaName }).eq('id', user.id)
+      }
+
+      // brief_type — only pre-select if it's a valid value
+      if (data.brief_type === 'standard' || data.brief_type === 'personalised') {
+        setBriefType(data.brief_type)
+      }
+
+      if (data.age != null) setAge(String(data.age))
+      if (data.gender) setGender(data.gender)
+      if (data.city_current) setCityCurrent(data.city_current)
+      if (data.city_home) {
+        setCityHome(data.city_home)
+        if (data.city_current && data.city_home === data.city_current) {
+          setSameAsCurrentCity(true)
+        }
+      }
+      if (Array.isArray(data.extra_cities)) {
+        const padded = [...data.extra_cities, '', '', ''].slice(0, 3)
+        setExtraCities(padded)
+      }
+      if (data.life_stage) setLifeStage(data.life_stage)
+      setWithOther(data.work_area, WORK_AREAS, setWorkArea, setWorkAreaOther)
+      setWithOther(data.industry, INDUSTRIES, setIndustry, setIndustryOther)
+      if (data.company) setCompany(data.company)
+      setWithOther(data.study_area, STUDY_AREAS, setStudyArea, setStudyAreaOther)
+      setWithOther(data.study_level, STUDY_LEVELS, setStudyLevel, setStudyLevelOther)
+      if (Array.isArray(data.interests) && data.interests.length > 0) {
+        setInterests(data.interests)
+      }
+
+      setLoading(false)
+    }
+    load()
+  }, [])
 
   const toggleInterest = (i: string) => {
     setInterests(prev => prev.includes(i) ? prev.filter(x => x !== i) : [...prev, i])
@@ -271,31 +313,38 @@ export default function Onboarding() {
     setSaving(true)
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) { window.location.href = '/login'; return }
-    await supabase.from('profiles').update({
+
+    const { error } = await supabase.from('profiles').update({
       age: age ? parseInt(age) : null,
       gender: gender || null,
       city_current: cityCurrent || null,
       city_home: sameAsCurrentCity ? cityCurrent : (cityHome || null),
       extra_cities: extraCities.filter(Boolean),
       life_stage: lifeStage || null,
-      work_area: workArea === 'Other' ? workAreaOther : (workArea || null),
-      industry: industry === 'Other' ? industryOther : (industry || null),
+      work_area: workArea === 'Other' ? (workAreaOther || null) : (workArea || null),
+      industry: industry === 'Other' ? (industryOther || null) : (industry || null),
       company: company || null,
-      study_area: studyArea === 'Other' ? studyAreaOther : (studyArea || null),
-      study_level: studyLevel === 'Other' ? studyLevelOther : (studyLevel || null),
+      study_area: studyArea === 'Other' ? (studyAreaOther || null) : (studyArea || null),
+      study_level: studyLevel === 'Other' ? (studyLevelOther || null) : (studyLevel || null),
       interests,
-      mood_preference: mood,
-      edition_preference: edition,                  // canonical: 5min / 10min / deep
       brief_type: briefType || 'standard',
       onboarding_complete: true,
       updated_at: new Date().toISOString(),
     }).eq('id', user.id)
+
+    if (error) {
+      console.error('Onboarding save failed:', error)
+      setSaving(false)
+      alert('Save failed. Please try again.')
+      return
+    }
     window.location.href = '/home'
   }
 
-  const next = () => {
-    if (briefType === 'standard') { setStep(6) }
-    else { setStep(s => s + 1) }
+  // Standard path: finish immediately after step 0. Personalised: go to step 1.
+  const advanceFromStep0 = () => {
+    if (briefType === 'standard') { handleFinish() }
+    else if (briefType === 'personalised') { setStep(1) }
   }
 
   const back = () => setStep(s => s - 1)
@@ -323,13 +372,19 @@ export default function Onboarding() {
     borderRadius: '3px', minHeight: '54px',
   }
 
+  if (loading) return null
+
+  const isLastPersonalisedStep = step === personalisedSteps
+
   return (
     <div style={containerStyle}>
       <div style={{ maxWidth: '420px', width: '100%', margin: '0 auto', flex: 1 }}>
 
-        {briefType && step > 0 && step !== 6 && <StepDots total={personalisedSteps} current={step - 1} />}
+        {briefType === 'personalised' && step > 0 && (
+          <StepDots total={personalisedSteps} current={step - 1} />
+        )}
 
-        {/* STEP 0 */}
+        {/* STEP 0 — choose brief type */}
         {step === 0 && (
           <div>
             <div style={{ textAlign: 'center', marginBottom: '32px' }}>
@@ -384,8 +439,8 @@ export default function Onboarding() {
             </div>
 
             {briefType && (
-              <button type="button" onClick={next} disabled={saving} style={btnPrimary}>
-                {saving ? 'Setting up...' : briefType === 'standard' ? 'Start Reading →' : 'Set Up My Profile →'}
+              <button type="button" onClick={advanceFromStep0} disabled={saving} style={btnPrimary}>
+                {saving ? 'Saving...' : briefType === 'standard' ? 'Start Reading →' : 'Set Up My Profile →'}
               </button>
             )}
           </div>
@@ -545,7 +600,7 @@ export default function Onboarding() {
           </div>
         )}
 
-        {/* STEP 4 — interests */}
+        {/* STEP 4 — interests (final personalised step) */}
         {step === 4 && briefType === 'personalised' && (
           <div>
             <Wordmark size="small" />
@@ -577,127 +632,21 @@ export default function Onboarding() {
           </div>
         )}
 
-        {/* STEP 5 — mood + edition (personalised) */}
-        {step === 5 && briefType === 'personalised' && (
-          <div>
-            <Wordmark size="small" />
-            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '10px', letterSpacing: '2px', color: C.gold, marginBottom: '14px' }}>STEP 5 OF {personalisedSteps}</div>
-            <h2 style={headStyle}>How do you like your news?</h2>
-            <p style={subStyle}>You can change these any time from your profile.</p>
-
-            <div style={{
-              fontFamily: "'DM Sans', sans-serif", fontSize: '13px',
-              fontWeight: 600, color: C.textSoft, marginBottom: '12px',
-              letterSpacing: '0.5px',
-            }}>Analysis tone</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '32px' }}>
-              {MOODS.map(m => (
-                <button type="button" key={m.id} onClick={() => setMood(m.id)} style={{
-                  padding: '16px',
-                  background: mood === m.id ? C.goldSoft : C.surface,
-                  border: `1px solid ${mood === m.id ? C.gold : C.border}`,
-                  borderRadius: '3px', cursor: 'pointer',
-                  textAlign: 'left', display: 'flex',
-                  gap: '12px', alignItems: 'center', minHeight: '44px',
-                }}>
-                  <span style={{ fontSize: '20px', flexShrink: 0, color: C.gold, width: '24px', textAlign: 'center' }}>{m.icon}</span>
-                  <div>
-                    <div style={{
-                      fontFamily: "'DM Sans', sans-serif", fontSize: '15px',
-                      fontWeight: 600, color: mood === m.id ? C.gold : C.text, marginBottom: '2px',
-                    }}>{m.label}</div>
-                    <div style={{
-                      fontFamily: "'DM Sans', sans-serif", fontSize: '13px',
-                      color: C.textMute, lineHeight: '1.4',
-                    }}>{m.desc}</div>
-                  </div>
-                </button>
-              ))}
-            </div>
-
-            <div style={{
-              fontFamily: "'DM Sans', sans-serif", fontSize: '13px',
-              fontWeight: 600, color: C.textSoft, marginBottom: '12px',
-              letterSpacing: '0.5px',
-            }}>Default reading depth</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-              {EDITIONS.map(e => (
-                <button type="button" key={e.id} onClick={() => setEdition(e.id)} style={{
-                  padding: '16px',
-                  background: edition === e.id ? C.goldSoft : C.surface,
-                  border: `1px solid ${edition === e.id ? C.gold : C.border}`,
-                  borderRadius: '3px', cursor: 'pointer',
-                  textAlign: 'left', display: 'flex',
-                  gap: '12px', alignItems: 'center', minHeight: '44px',
-                }}>
-                  <span style={{ fontSize: '20px', flexShrink: 0, color: C.gold, width: '24px', textAlign: 'center' }}>{e.icon}</span>
-                  <div>
-                    <div style={{
-                      fontFamily: "'DM Sans', sans-serif", fontSize: '15px',
-                      fontWeight: 600, color: edition === e.id ? C.gold : C.text, marginBottom: '2px',
-                    }}>{e.label}</div>
-                    <div style={{
-                      fontFamily: "'DM Sans', sans-serif", fontSize: '13px',
-                      color: C.textMute, lineHeight: '1.4',
-                    }}>{e.desc}</div>
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* STEP 6 — edition (standard path) */}
-        {step === 6 && briefType === 'standard' && (
-          <div>
-            <Wordmark size="small" />
-            <h2 style={headStyle}>How long is your morning?</h2>
-            <p style={subStyle}>Pick your default reading depth. You can change this any time.</p>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-              {EDITIONS.map(e => (
-                <button type="button" key={e.id} onClick={() => setEdition(e.id)} style={{
-                  padding: '16px',
-                  background: edition === e.id ? C.goldSoft : C.surface,
-                  border: `1px solid ${edition === e.id ? C.gold : C.border}`,
-                  borderRadius: '3px', cursor: 'pointer',
-                  textAlign: 'left', display: 'flex',
-                  gap: '12px', alignItems: 'flex-start', minHeight: '44px',
-                }}>
-                  <span style={{ fontSize: '20px', flexShrink: 0, color: C.gold }}>{e.icon}</span>
-                  <div>
-                    <div style={{
-                      fontFamily: "'DM Sans', sans-serif", fontSize: '15px',
-                      fontWeight: 600, color: edition === e.id ? C.gold : C.text, marginBottom: '2px',
-                    }}>{e.label}</div>
-                    <div style={{
-                      fontFamily: "'DM Sans', sans-serif", fontSize: '13px',
-                      color: C.textMute, lineHeight: '1.4',
-                    }}>{e.desc}</div>
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
         {/* Navigation */}
-        <div style={{ display: 'flex', gap: '12px', marginTop: '40px', paddingBottom: '48px' }}>
-          {step > 0 && (
-            <button type="button" onClick={() => step === 6 ? setStep(0) : back()} style={btnSecondary}>← Back</button>
-          )}
-          {step > 0 && (
+        {step > 0 && briefType === 'personalised' && (
+          <div style={{ display: 'flex', gap: '12px', marginTop: '40px', paddingBottom: '48px' }}>
+            <button type="button" onClick={back} style={btnSecondary}>← Back</button>
             <button type="button"
               onClick={() => {
-                if (step === 6) { handleFinish() }
-                else if (step < personalisedSteps) { setStep(s => s + 1) }
-                else { handleFinish() }
+                if (isLastPersonalisedStep) { handleFinish() }
+                else { setStep(s => s + 1) }
               }}
               disabled={saving}
               style={btnPrimary}>
-              {saving ? 'Saving...' : (step === personalisedSteps || step === 6) ? 'Build My Brief →' : 'Continue →'}
+              {saving ? 'Saving...' : isLastPersonalisedStep ? 'Build My Brief →' : 'Continue →'}
             </button>
-          )}
-        </div>
+          </div>
+        )}
 
       </div>
     </div>

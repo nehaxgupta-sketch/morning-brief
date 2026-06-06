@@ -1,9 +1,13 @@
 // src/pages/home.tsx
 //
-// Sprint 8 — home screen with the lens flash card and three edition buttons.
-// The card shows the day's shape at a glance: world / India / markets / watch.
-// Below it, three buttons take the reader straight into The Brief / The Daily
-// / The Editorial.
+// Sprint 9 — home screen with the lens flash card and three edition buttons.
+//
+// Changes from previous build:
+// - Name backfill: if profile.full_name is missing, fall back to the auth
+//   metadata name (and write it back to the profile row). Fixes the case where
+//   the email-verification trigger wiped the name signup originally wrote.
+// - Removed the gold "default" highlight on edition buttons since
+//   edition_preference is no longer collected. All three editions look equal.
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
@@ -21,12 +25,6 @@ interface Lens {
   india?: string
   markets?: string
   watch?: string
-}
-
-function normaliseEdition(raw: string | undefined | null): '5min' | '10min' | 'deep' {
-  const p = raw === 'ultra' ? '5min' : raw
-  if (p === '5min' || p === '10min' || p === 'deep') return p
-  return '10min'
 }
 
 function editionDisplay(e: string) {
@@ -62,6 +60,16 @@ export default function Home() {
 
       const { data } = await supabase.from('profiles').select('*').eq('id', user.id).single()
       if (data && !data.onboarding_complete) { window.location.href = '/onboarding'; return }
+
+      // Name backfill — if the profile row lost full_name (e.g. due to the
+      // email-verification trigger overwriting it), restore it from the auth
+      // user_metadata that signup wrote.
+      const metaName = (user.user_metadata as any)?.full_name as string | undefined
+      if (data && !data.full_name && metaName) {
+        await supabase.from('profiles').update({ full_name: metaName }).eq('id', user.id)
+        data.full_name = metaName
+      }
+
       setProfile(data)
 
       const isPersonalised = data?.brief_type === 'personalised'
@@ -110,13 +118,12 @@ export default function Home() {
 
   if (loading) return null
 
-  const firstName = profile?.full_name?.split(' ')[0] || 'Reader'
+  const firstName = profile?.full_name?.trim().split(' ')[0] || 'Reader'
   const hour = new Date().getHours()
   const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening'
   const isPersonalised = profile?.brief_type === 'personalised'
-  const defaultEdition = normaliseEdition(profile?.edition_preference as string)
 
-  // For the "preparing" preview, show what their personalised brief WILL cover
+  // Preview lines for when the brief isn't ready yet.
   const previewLines: string[] = isPersonalised
     ? [
         `📍 ${profile?.city_current || 'Your city'} local news`,
@@ -125,7 +132,7 @@ export default function Home() {
         profile?.interests?.length
           ? `🎯 ${profile.interests.slice(0, 3).join(', ')}`
           : '🎯 Your interests',
-        `📖 ${editionDisplay(defaultEdition)} as your default`,
+        '📖 Three editions to choose from',
       ]
     : [
         '🔥 Major events worth tracking',
@@ -220,7 +227,7 @@ export default function Home() {
               )}
             </div>
 
-            {/* Edition picker */}
+            {/* Edition picker — all three equal, no default highlight */}
             <div style={{
               fontFamily: "'DM Mono', monospace", fontSize: '10px',
               letterSpacing: '2px', color: C.textMute, marginBottom: '12px',
@@ -229,7 +236,6 @@ export default function Home() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '20px' }}>
               {(['5min', '10min', 'deep'] as const).map((ed) => {
                 const isAvailable = availableEditions.has(ed)
-                const isDefault = ed === defaultEdition
                 return (
                   <Link
                     key={ed}
@@ -239,9 +245,9 @@ export default function Home() {
                       alignItems: 'center',
                       justifyContent: 'space-between',
                       padding: '18px 20px',
-                      background: isDefault ? C.gold : (isAvailable ? C.surface : C.surface2),
-                      color: isDefault ? '#0E0E0E' : (isAvailable ? C.text : C.textDim),
-                      border: `1px solid ${isDefault ? C.gold : C.border}`,
+                      background: isAvailable ? C.surface : C.surface2,
+                      color: isAvailable ? C.text : C.textDim,
+                      border: `1px solid ${C.border}`,
                       textDecoration: 'none',
                       pointerEvents: isAvailable ? 'auto' : 'none',
                       opacity: isAvailable ? 1 : 0.55,
@@ -253,17 +259,17 @@ export default function Home() {
                         fontFamily: "'Playfair Display', Georgia, serif",
                         fontSize: '18px', fontWeight: 700,
                         marginBottom: '2px',
-                        color: isDefault ? '#0E0E0E' : (isAvailable ? C.text : C.textDim),
+                        color: isAvailable ? C.text : C.textDim,
                       }}>{editionDisplay(ed)}</div>
                       <div style={{
                         fontFamily: "'DM Mono', monospace", fontSize: '10px',
                         letterSpacing: '1.5px',
-                        color: isDefault ? '#0E0E0E' : C.textMute,
+                        color: C.textMute,
                       }}>{editionTagline(ed).toUpperCase()}</div>
                     </div>
                     <span style={{
                       fontFamily: "'DM Mono', monospace", fontSize: '14px',
-                      color: isDefault ? '#0E0E0E' : (isAvailable ? C.gold : C.textDim),
+                      color: isAvailable ? C.gold : C.textDim,
                     }}>{isAvailable ? '→' : '—'}</span>
                   </Link>
                 )
