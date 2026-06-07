@@ -98,6 +98,65 @@ function hasLens(lens: any): boolean {
   return !!(lens && (lens.world || lens.india || lens.markets || lens.watch))
 }
 
+// ─── Sprint 11 types + helpers ──────────────────────────────────────────────
+
+type CostRow = {
+  id: number
+  date: string
+  phase: string
+  model: string
+  input_tokens: number
+  output_tokens: number
+  reasoning_tokens: number
+  usd_cost: number
+  detail: string | null
+  created_at: string
+}
+
+type ScoreRow = {
+  id: number
+  date: string
+  edition: string
+  dim_coverage: number | null
+  dim_field_completeness: number | null
+  dim_india_anchor: number | null
+  dim_source_quality: number | null
+  dim_editorial_sharpness: number | null
+  dim_currentness: number | null
+  dim_relevance: number | null
+  total: number | null
+  max_score: number
+  notes: string | null
+}
+
+function formatUSD(n: number): string {
+  if (n < 0.01) return `$${n.toFixed(4)}`
+  if (n < 1) return `$${n.toFixed(3)}`
+  return `$${n.toFixed(2)}`
+}
+
+function formatINR(usd: number): string {
+  const inr = usd * 83
+  if (inr < 1) return `₹${inr.toFixed(2)}`
+  return `₹${inr.toFixed(0)}`
+}
+
+function scoreColor(n: number | null): string {
+  if (n === null || n === undefined) return C.textDim
+  if (n >= 8) return C.ok
+  if (n >= 6) return C.gold
+  if (n >= 4) return C.warn
+  return C.err
+}
+
+function totalColor(total: number | null): string {
+  if (!total) return C.textDim
+  if (total >= 60) return C.ok
+  if (total >= 50) return C.gold
+  if (total >= 40) return C.warn
+  return C.err
+}
+
 export default function AdminPage() {
   const [authorized, setAuthorized] = useState<boolean | null>(null)
   const [email, setEmail] = useState<string>('')
@@ -112,6 +171,15 @@ export default function AdminPage() {
   const [personalisedToday, setPersonalisedToday] = useState<{ users: number; ready: number; withCity: number }>({ users: 0, ready: 0, withCity: 0 })
   const [runningPersonalisation, setRunningPersonalisation] = useState(false)
   const [personaliseResult, setPersonaliseResult] = useState<string>('')
+
+  // ─── Sprint 11: cost / score / tail state ───────────────────────────────
+  const [costsToday, setCostsToday] = useState<CostRow[]>([])
+  const [costs7d, setCosts7d] = useState<CostRow[]>([])
+  const [scoresToday, setScoresToday] = useState<ScoreRow[]>([])
+  const [scores7d, setScores7d] = useState<ScoreRow[]>([])
+  const [tailCounts, setTailCounts] = useState<Record<string, number>>({})
+  const [scoring, setScoring] = useState(false)
+  const [scoreResult, setScoreResult] = useState<string>('')
 
   useEffect(() => {
     const checkAuth = async () => {
@@ -132,6 +200,7 @@ export default function AdminPage() {
       loadBriefs()
       loadHistory()
       loadPersonalisedStats()
+      loadCostAndScoreData()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authorized, selectedDate])
@@ -221,6 +290,7 @@ export default function AdminPage() {
           writes: writeResults,
         }, null, 2))
         await loadBriefs()
+        await loadCostAndScoreData()
       }
     } catch (e: any) {
       setRegenResult('Error: ' + e.message)
@@ -279,10 +349,58 @@ export default function AdminPage() {
       const data = await res.json()
       setPersonaliseResult(JSON.stringify(data, null, 2))
       await loadPersonalisedStats()
+      await loadCostAndScoreData()
     } catch (e: any) {
       setPersonaliseResult('Error: ' + e.message)
     }
     setRunningPersonalisation(false)
+  }
+
+  // ─── Sprint 11 loaders ─────────────────────────────────────────────────
+  async function loadCostAndScoreData() {
+    const sevenDaysAgo = getISTDate(-7)
+
+    const [todayCosts, weekCosts, todayScores, weekScores, personalisedRows] = await Promise.all([
+      supabase.from('brief_costs').select('*').eq('date', selectedDate).order('created_at', { ascending: true }),
+      supabase.from('brief_costs').select('*').gte('date', sevenDaysAgo).order('date', { ascending: true }),
+      supabase.from('brief_scores').select('*').eq('date', selectedDate).order('edition'),
+      supabase.from('brief_scores').select('*').gte('date', sevenDaysAgo).order('date', { ascending: true }),
+      supabase.from('personalised_briefs').select('content').eq('date', selectedDate).eq('edition', '10min'),
+    ])
+
+    setCostsToday((todayCosts.data || []) as CostRow[])
+    setCosts7d((weekCosts.data || []) as CostRow[])
+    setScoresToday((todayScores.data || []) as ScoreRow[])
+    setScores7d((weekScores.data || []) as ScoreRow[])
+
+    const counts: Record<string, number> = {}
+    for (const row of personalisedRows.data || []) {
+      const status = (row as any).content?.tail_status || 'unknown'
+      counts[status] = (counts[status] || 0) + 1
+    }
+    setTailCounts(counts)
+  }
+
+  async function triggerScoring() {
+    setScoring(true)
+    setScoreResult('Scoring…')
+    try {
+      const res = await fetch('/api/generate-brief', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'score' }),
+      })
+      const data = await res.json()
+      if (data.ok) {
+        setScoreResult('Scoring complete.')
+        await loadCostAndScoreData()
+      } else {
+        setScoreResult('Failed: ' + (data.error || JSON.stringify(data)))
+      }
+    } catch (e: any) {
+      setScoreResult('Error: ' + e.message)
+    }
+    setScoring(false)
   }
 
   if (authorized === null) return <CenteredMsg>Checking access…</CenteredMsg>
@@ -542,6 +660,354 @@ export default function AdminPage() {
             }}>{personaliseResult}</pre>
           )}
         </div>
+
+        {/* ─── Sprint 11: Cost panel ──────────────────────────────────── */}
+        <div style={{ marginTop: '36px', paddingTop: '28px', borderTop: `1px solid ${C.border}` }}>
+          <div style={{
+            fontFamily: "'DM Mono', monospace", fontSize: '11px',
+            letterSpacing: '2.5px', color: C.gold, marginBottom: '16px',
+          }}>COST · {selectedDate}</div>
+
+          {(() => {
+            const total = costsToday.reduce((s, r) => s + Number(r.usd_cost), 0)
+            return (
+              <>
+                <div style={{
+                  fontFamily: "'Playfair Display', serif",
+                  fontSize: '34px', fontWeight: 700, color: C.gold,
+                  lineHeight: 1.1, marginBottom: '4px',
+                }}>{formatUSD(total)}</div>
+                <div style={{
+                  fontFamily: "'DM Mono', monospace", fontSize: '12px',
+                  color: C.textMute, marginBottom: '20px',
+                }}>
+                  ≈ {formatINR(total)} · {costsToday.length} API call{costsToday.length === 1 ? '' : 's'}
+                </div>
+              </>
+            )
+          })()}
+
+          {/* Per-phase breakdown */}
+          {costsToday.length > 0 && (() => {
+            const byPhase = new Map<string, { phase: string; calls: number; inputTokens: number; outputTokens: number; reasoningTokens: number; usd: number }>()
+            for (const r of costsToday) {
+              const cur = byPhase.get(r.phase) || { phase: r.phase, calls: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, usd: 0 }
+              cur.calls += 1
+              cur.inputTokens += r.input_tokens
+              cur.outputTokens += r.output_tokens
+              cur.reasoningTokens += r.reasoning_tokens || 0
+              cur.usd += Number(r.usd_cost)
+              byPhase.set(r.phase, cur)
+            }
+            const phases = Array.from(byPhase.values()).sort((a, b) => b.usd - a.usd)
+            return (
+              <div style={{ border: `1px solid ${C.border}`, background: C.surface2 }}>
+                <div style={{
+                  display: 'grid', gridTemplateColumns: '1.2fr 0.6fr 1fr 1fr 0.8fr',
+                  gap: '12px', padding: '12px 16px', borderBottom: `1px solid ${C.border}`,
+                  fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                  letterSpacing: '1.5px', color: C.textMute,
+                }}>
+                  <div>PHASE</div>
+                  <div style={{ textAlign: 'right' }}>CALLS</div>
+                  <div style={{ textAlign: 'right' }}>IN TOKENS</div>
+                  <div style={{ textAlign: 'right' }}>OUT TOKENS</div>
+                  <div style={{ textAlign: 'right' }}>USD</div>
+                </div>
+                {phases.map(p => (
+                  <div key={p.phase} style={{
+                    display: 'grid', gridTemplateColumns: '1.2fr 0.6fr 1fr 1fr 0.8fr',
+                    gap: '12px', padding: '12px 16px',
+                    borderBottom: `1px solid ${C.border}`,
+                    fontFamily: "'DM Mono', monospace", fontSize: '12px',
+                    color: C.textSoft,
+                  }}>
+                    <div style={{ color: C.gold, letterSpacing: '1px' }}>{p.phase.toUpperCase()}</div>
+                    <div style={{ textAlign: 'right' }}>{p.calls}</div>
+                    <div style={{ textAlign: 'right' }}>{p.inputTokens.toLocaleString()}</div>
+                    <div style={{ textAlign: 'right' }}>{(p.outputTokens + p.reasoningTokens).toLocaleString()}</div>
+                    <div style={{ textAlign: 'right', color: C.text, fontWeight: 700 }}>{formatUSD(p.usd)}</div>
+                  </div>
+                ))}
+              </div>
+            )
+          })()}
+
+          {costsToday.length === 0 && (
+            <div style={{
+              border: `1px solid ${C.border}`, padding: '20px', color: C.textMute,
+              fontFamily: "'DM Sans', sans-serif", fontSize: '14px',
+              background: C.surface2, fontStyle: 'italic',
+            }}>
+              No API calls logged for {selectedDate}. The fetch cron runs at 6:30 IST. Cost data tracked from Sprint 11 onwards.
+            </div>
+          )}
+
+          {/* 7-day cost trend */}
+          {(() => {
+            const byDay = new Map<string, number>()
+            for (const r of costs7d) byDay.set(r.date, (byDay.get(r.date) || 0) + Number(r.usd_cost))
+            const days: { date: string; usd: number }[] = []
+            for (let i = -7; i <= 0; i++) {
+              const d = getISTDate(i)
+              days.push({ date: d, usd: byDay.get(d) || 0 })
+            }
+            const maxDay = Math.max(0.01, ...days.map(d => d.usd))
+            const weekTotal = days.reduce((s, d) => s + d.usd, 0)
+            return (
+              <div style={{ marginTop: '20px' }}>
+                <div style={{
+                  fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                  letterSpacing: '2px', color: C.textMute, marginBottom: '12px',
+                }}>8-DAY TREND · TOTAL {formatUSD(weekTotal)}</div>
+                <div style={{ display: 'flex', alignItems: 'flex-end', gap: '6px', height: '70px' }}>
+                  {days.map(d => {
+                    const heightPct = (d.usd / maxDay) * 100
+                    const isSelected = d.date === selectedDate
+                    return (
+                      <div key={d.date} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
+                        <div style={{
+                          width: '100%',
+                          height: `${Math.max(2, heightPct)}%`,
+                          background: isSelected ? C.gold : C.borderHi,
+                          minHeight: '2px',
+                        }} title={`${d.date}: ${formatUSD(d.usd)}`} />
+                        <div style={{
+                          fontFamily: "'DM Mono', monospace", fontSize: '9px',
+                          color: isSelected ? C.gold : C.textDim,
+                        }}>{d.date.slice(8, 10)}</div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })()}
+        </div>
+
+        {/* ─── Sprint 11: Quality scores panel ────────────────────────── */}
+        <div style={{ marginTop: '36px', paddingTop: '28px', borderTop: `1px solid ${C.border}` }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '12px', marginBottom: '16px' }}>
+            <div style={{
+              fontFamily: "'DM Mono', monospace", fontSize: '11px',
+              letterSpacing: '2.5px', color: C.gold,
+            }}>QUALITY SCORES · {selectedDate}</div>
+            <button onClick={triggerScoring} disabled={scoring} style={{
+              background: 'none', border: `1px solid ${C.gold}`, color: C.gold,
+              padding: '10px 16px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
+              letterSpacing: '2px',
+              cursor: scoring ? 'not-allowed' : 'pointer',
+              opacity: scoring ? 0.5 : 1, minHeight: '44px',
+            }}>{scoring ? 'SCORING…' : 'RUN SCORING NOW'}</button>
+          </div>
+
+          {scoreResult && (
+            <div style={{
+              padding: '10px 14px', marginBottom: '16px',
+              border: `1px solid ${scoreResult.startsWith('Failed') || scoreResult.startsWith('Error') ? C.err : C.border}`,
+              background: C.surface2,
+              fontFamily: "'DM Mono', monospace", fontSize: '12px',
+              color: scoreResult.startsWith('Failed') || scoreResult.startsWith('Error') ? C.err : C.textSoft,
+            }}>{scoreResult}</div>
+          )}
+
+          {scoresToday.length === 0 && (
+            <div style={{
+              border: `1px solid ${C.border}`, padding: '20px', color: C.textMute,
+              fontFamily: "'DM Sans', sans-serif", fontSize: '14px',
+              background: C.surface2, fontStyle: 'italic',
+            }}>
+              No scores yet for {selectedDate}. Click "Run Scoring Now" — uses gpt-4o-mini to score all 3 ready editions against the 7-dim rubric (~$0.005, 10-20s).
+            </div>
+          )}
+
+          {scoresToday.length > 0 && (
+            <div style={{ border: `1px solid ${C.border}`, background: C.surface2, overflowX: 'auto' }}>
+              <div style={{
+                display: 'grid', gridTemplateColumns: '1.6fr repeat(7, 0.5fr) 0.7fr',
+                gap: '8px', padding: '12px 14px', borderBottom: `1px solid ${C.border}`,
+                fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                letterSpacing: '1.2px', color: C.textMute, minWidth: '560px',
+              }}>
+                <div>EDITION</div>
+                <div style={{ textAlign: 'center' }} title="Coverage">COV</div>
+                <div style={{ textAlign: 'center' }} title="Field Completeness">FLD</div>
+                <div style={{ textAlign: 'center' }} title="India Anchor">IND</div>
+                <div style={{ textAlign: 'center' }} title="Source Quality">SRC</div>
+                <div style={{ textAlign: 'center' }} title="Editorial Sharpness">EDT</div>
+                <div style={{ textAlign: 'center' }} title="Currentness">CUR</div>
+                <div style={{ textAlign: 'center' }} title="Relevance">REL</div>
+                <div style={{ textAlign: 'right' }}>TOTAL</div>
+              </div>
+              {scoresToday.map(s => (
+                <div key={s.edition} style={{
+                  display: 'grid', gridTemplateColumns: '1.6fr repeat(7, 0.5fr) 0.7fr',
+                  gap: '8px', padding: '14px',
+                  borderBottom: `1px solid ${C.border}`,
+                  fontFamily: "'DM Mono', monospace", fontSize: '13px',
+                  alignItems: 'center', minWidth: '560px',
+                }}>
+                  <div style={{ fontFamily: "'Playfair Display', serif", fontSize: '15px', fontWeight: 700, color: C.text }}>
+                    {s.edition === '5min' ? 'The Brief' : s.edition === '10min' ? 'The Daily' : 'The Editorial'}
+                  </div>
+                  <div style={{ textAlign: 'center', color: scoreColor(s.dim_coverage) }}>{s.dim_coverage ?? '—'}</div>
+                  <div style={{ textAlign: 'center', color: scoreColor(s.dim_field_completeness) }}>{s.dim_field_completeness ?? '—'}</div>
+                  <div style={{ textAlign: 'center', color: scoreColor(s.dim_india_anchor) }}>{s.dim_india_anchor ?? '—'}</div>
+                  <div style={{ textAlign: 'center', color: scoreColor(s.dim_source_quality) }}>{s.dim_source_quality ?? '—'}</div>
+                  <div style={{ textAlign: 'center', color: scoreColor(s.dim_editorial_sharpness) }}>{s.dim_editorial_sharpness ?? '—'}</div>
+                  <div style={{ textAlign: 'center', color: scoreColor(s.dim_currentness) }}>{s.dim_currentness ?? '—'}</div>
+                  <div style={{ textAlign: 'center', color: scoreColor(s.dim_relevance) }}>{s.dim_relevance ?? '—'}</div>
+                  <div style={{ textAlign: 'right', fontSize: '14px', fontWeight: 700, color: totalColor(s.total) }}>
+                    {s.total ?? '—'}/{s.max_score}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Scorer notes */}
+          {scoresToday.filter(s => s.notes).length > 0 && (
+            <div style={{ marginTop: '16px' }}>
+              {scoresToday.filter(s => s.notes).map(s => (
+                <div key={`notes-${s.edition}`} style={{ marginBottom: '12px' }}>
+                  <div style={{
+                    fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                    letterSpacing: '1.5px', color: C.textMute, marginBottom: '4px',
+                  }}>{s.edition === '5min' ? 'BRIEF' : s.edition === '10min' ? 'DAILY' : 'EDITORIAL'} · SCORER NOTES</div>
+                  <div style={{
+                    fontFamily: "'DM Sans', sans-serif", fontSize: '13px',
+                    color: C.textSoft, lineHeight: 1.55, fontStyle: 'italic',
+                  }}>{s.notes}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* 7-day score trend */}
+          {scores7d.length > 0 && (() => {
+            const groups: Record<string, ScoreRow[]> = { '5min': [], '10min': [], 'deep': [] }
+            for (const s of scores7d) {
+              if (groups[s.edition]) groups[s.edition].push(s)
+            }
+            return (
+              <div style={{ marginTop: '24px' }}>
+                <div style={{
+                  fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                  letterSpacing: '2px', color: C.textMute, marginBottom: '12px',
+                }}>8-DAY AVERAGES</div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px' }}>
+                  {(['5min', '10min', 'deep'] as const).map(ed => {
+                    const pts = groups[ed]
+                    const avg = pts.length > 0 ? pts.reduce((s, p) => s + (p.total || 0), 0) / pts.length : 0
+                    return (
+                      <div key={ed} style={{
+                        border: `1px solid ${C.border}`, background: C.surface2, padding: '14px',
+                      }}>
+                        <div style={{
+                          fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                          letterSpacing: '1.5px', color: C.textMute, marginBottom: '6px',
+                        }}>{ed === '5min' ? 'BRIEF' : ed === '10min' ? 'DAILY' : 'EDITORIAL'}</div>
+                        <div style={{
+                          fontFamily: "'Playfair Display', serif", fontSize: '24px',
+                          fontWeight: 700, color: totalColor(avg), lineHeight: 1.1,
+                        }}>
+                          {avg > 0 ? avg.toFixed(1) : '—'}
+                          <span style={{ fontSize: '13px', color: C.textMute }}>/70</span>
+                        </div>
+                        <div style={{
+                          fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                          color: C.textDim, marginTop: '4px',
+                        }}>{pts.length} day{pts.length === 1 ? '' : 's'} sampled</div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })()}
+        </div>
+
+        {/* ─── Sprint 11: Tail status panel ───────────────────────────── */}
+        <div style={{ marginTop: '36px', paddingTop: '28px', borderTop: `1px solid ${C.border}` }}>
+          <div style={{
+            fontFamily: "'DM Mono', monospace", fontSize: '11px',
+            letterSpacing: '2.5px', color: C.gold, marginBottom: '16px',
+          }}>TAIL STATUS · PERSONALISATION HEALTH</div>
+
+          {Object.keys(tailCounts).length === 0 ? (
+            <div style={{
+              border: `1px solid ${C.border}`, padding: '20px', color: C.textMute,
+              fontFamily: "'DM Sans', sans-serif", fontSize: '14px',
+              background: C.surface2, fontStyle: 'italic',
+            }}>
+              No personalised briefs produced for {selectedDate} yet. Tail status is logged from Sprint 11 onwards.
+            </div>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px' }}>
+              {(['ok', 'partial_city_failed', 'partial_interest_failed', 'partial_both'] as const).map(status => {
+                const n = tailCounts[status] || 0
+                const label =
+                  status === 'ok' ? 'HEALTHY' :
+                  status === 'partial_city_failed' ? 'CITY FAIL' :
+                  status === 'partial_interest_failed' ? 'INTEREST FAIL' : 'BOTH FAIL'
+                const colour =
+                  status === 'ok' ? C.ok :
+                  status === 'partial_both' ? C.err : C.warn
+                return (
+                  <div key={status} style={{
+                    border: `1px solid ${C.border}`, padding: '14px',
+                    background: C.surface2, borderLeft: `3px solid ${colour}`,
+                  }}>
+                    <div style={{
+                      fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                      letterSpacing: '1.5px', color: colour, marginBottom: '6px',
+                    }}>{label}</div>
+                    <div style={{
+                      fontFamily: "'Playfair Display', serif", fontSize: '22px',
+                      fontWeight: 700, color: colour,
+                    }}>{n}</div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* ─── Sprint 11: Today's call log ────────────────────────────── */}
+        {costsToday.length > 0 && (
+          <div style={{ marginTop: '36px', paddingTop: '28px', borderTop: `1px solid ${C.border}` }}>
+            <div style={{
+              fontFamily: "'DM Mono', monospace", fontSize: '11px',
+              letterSpacing: '2.5px', color: C.gold, marginBottom: '16px',
+            }}>CALL LOG · {selectedDate}</div>
+            <div style={{
+              border: `1px solid ${C.border}`, background: C.surface2,
+              maxHeight: '320px', overflowY: 'auto',
+            }}>
+              {costsToday.slice().reverse().map(r => {
+                const t = new Date(r.created_at)
+                const istT = new Date(t.getTime() + 5.5 * 60 * 60 * 1000)
+                const hhmm = istT.toISOString().slice(11, 16)
+                return (
+                  <div key={r.id} style={{
+                    display: 'grid', gridTemplateColumns: '0.5fr 0.7fr 0.8fr 1fr 0.5fr',
+                    gap: '10px', padding: '10px 14px',
+                    borderBottom: `1px solid ${C.border}`,
+                    fontFamily: "'DM Mono', monospace", fontSize: '11px',
+                    alignItems: 'center',
+                  }}>
+                    <div style={{ color: C.textMute }}>{hhmm}</div>
+                    <div style={{ color: C.gold, letterSpacing: '1px' }}>{r.phase.toUpperCase()}</div>
+                    <div style={{ color: C.textSoft }}>{r.model}</div>
+                    <div style={{ color: C.textSoft, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.detail || '—'}</div>
+                    <div style={{ color: C.text, textAlign: 'right', fontWeight: 600 }}>{formatUSD(Number(r.usd_cost))}</div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
       </div>
     </>
   )

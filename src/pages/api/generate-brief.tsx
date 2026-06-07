@@ -28,6 +28,18 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { createClient } from '@supabase/supabase-js';
 import { z } from 'zod';
+// Sprint 11: shared whitelist module. Source-of-truth for all source-URL
+// validation across generate-brief and personalise-briefs.
+import {
+  isWhitelistedSource,
+  publisherKey,
+} from '@/lib/whitelist';
+// Sprint 11: per-call cost capture.
+import {
+  logOpenAICost,
+  extractUsageFromChatCompletion,
+  extractUsageFromResponses,
+} from '@/lib/cost-log';
 
 // 300s = 5min. Vercel Pro caps at 300; Hobby with Fluid Compute enabled also
 // reaches 300. gpt-5 with reasoning web_search at 'low' effort runs ~150-200s.
@@ -60,109 +72,10 @@ function isWeekend(): boolean {
   return dow === 0 || dow === 6;
 }
 
-// ─── Source whitelist (Tier 1) ──────────────────────────────────────────────
-
-// Tier-1 hostnames the post-fetch validator accepts. Everything else gets
-// flagged and the story is dropped before the brief is written. Keep this
-// in sync with the in-prompt whitelist (sourcing instructions in fetchNews).
-const TIER_1_DOMAINS = new Set<string>([
-  // Global wires + papers of record
-  'reuters.com',
-  'apnews.com',
-  'bloomberg.com',
-  'ft.com',
-  'wsj.com',
-  'nytimes.com',
-  'washingtonpost.com',
-  'bbc.com',
-  'bbc.co.uk',
-  'economist.com',
-  'theguardian.com',
-  'aljazeera.com',
-  'abc.net.au',
-  // India — wires + papers of record
-  'ptinews.com',          // Press Trust of India (wire)
-  'aninews.in',           // Asian News International
-  'thehindu.com',
-  'thehindubusinessline.com',
-  'indianexpress.com',
-  'newindianexpress.com',
-  'hindustantimes.com',
-  'ndtv.com',
-  'timesofindia.indiatimes.com',
-  'deccanherald.com',
-  'telegraphindia.com',   // Kolkata/East India
-  'tribuneindia.com',     // Punjab/Haryana/Himachal strong
-  // India — business / markets
-  'livemint.com',
-  'business-standard.com',
-  'economictimes.indiatimes.com',
-  'financialexpress.com',
-  'moneycontrol.com',
-  'businesstoday.in',
-  // India — digital + magazine journalism
-  'theprint.in',
-  'scroll.in',
-  'thewire.in',
-  'indiatoday.in',
-  'outlookindia.com',
-  'thequint.com',
-  'caravanmagazine.in',
-  'thenewsminute.com',    // South India regional
-  // India — specialist (legal, environment)
-  'livelaw.in',           // Court/legal news
-  'barandbench.com',      // Court/legal news
-  'downtoearth.org.in',   // Environment / public health
-  // Government / institutional primary sources
-  'rbi.org.in',
-  'sebi.gov.in',
-  'mospi.gov.in',         // Ministry of Statistics
-  'pib.gov.in',           // Press Information Bureau
-  'bls.gov',              // US Bureau of Labor Statistics
-  'treasury.gov',
-  'federalreserve.gov',
-  'imf.org',
-  'worldbank.org',
-  'who.int',
-  // Specialist (allowed where general sources don't cover)
-  'espncricinfo.com',
-  'espn.com',
-  'variety.com',
-  'hollywoodreporter.com',
-  'nature.com',
-  'science.org',
-  'statnews.com',
-  'techcrunch.com',
-  'theverge.com',
-  'arstechnica.com',
-  'wired.com',
-]);
-
-function extractHostname(url: string): string | null {
-  try {
-    const u = new URL(url);
-    // Strip www./m./amp. prefixes — mobile and AMP subdomains of whitelisted
-    // publishers (e.g. m.economictimes.com) should pass whitelist check.
-    return u.hostname.toLowerCase()
-      .replace(/^www\./, '')
-      .replace(/^m\./, '')
-      .replace(/^amp\./, '');
-  } catch {
-    return null;
-  }
-}
-
-function isWhitelistedSource(url: string | undefined | null): boolean {
-  if (!url || typeof url !== 'string') return false;
-  const host = extractHostname(url);
-  if (!host) return false;
-  // Accept exact match or any subdomain of a whitelisted domain.
-  // Array.from() avoids downlevel-iteration error on Set<string>.
-  for (const allowed of Array.from(TIER_1_DOMAINS)) {
-    if (host === allowed || host.endsWith('.' + allowed)) return true;
-  }
-  return false;
-}
+// ─── Source whitelist ───────────────────────────────────────────────────────
+// Sprint 11: moved to @/lib/whitelist (shared with personalise-briefs.tsx).
+// TIER_1_DOMAINS, extractHostname, isWhitelistedSource, publisherKey are
+// imported at the top of this file.
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -723,6 +636,18 @@ Return ONLY this JSON, no markdown:
     }),
   });
   const data = await response.json();
+
+  // Sprint 11: cost log.
+  const usage = extractUsageFromResponses(data);
+  void logOpenAICost({
+    phase: 'lens',
+    model: 'gpt-4o-mini',
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    reasoningTokens: usage.reasoningTokens,
+    detail: 'fallback lens',
+  });
+
   const text = data.output?.find((o: any) => o.type === 'message')?.content?.[0]?.text;
   if (!text) return { world: '', india: '', markets: '', watch: '' };
   try {
@@ -748,6 +673,7 @@ Return ONLY this JSON, no markdown:
 async function callGpt5Reasoning(
   prompt: string,
   reasoningEffort: 'low' | 'medium' | 'high' = 'medium',
+  costPhase: 'fetch' | 'lens' = 'fetch',
 ): Promise<string> {
   const t0 = Date.now();
   console.log(`[gpt-5] Starting reasoning fetch (effort=${reasoningEffort}). This typically takes 60-180s.`);
@@ -774,6 +700,17 @@ async function callGpt5Reasoning(
   if (response.status !== 200) {
     throw new Error(`gpt-5 returned status ${response.status}. Body: ${JSON.stringify(data).slice(0, 600)}`);
   }
+
+  // Sprint 11: log cost. Fire-and-forget — never blocks the pipeline.
+  const usage = extractUsageFromResponses(data);
+  void logOpenAICost({
+    phase: costPhase,
+    model: 'gpt-5',
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    reasoningTokens: usage.reasoningTokens,
+    detail: `effort=${reasoningEffort}`,
+  });
 
   // Count what happened for visibility in Vercel logs.
   const items = Array.isArray(data.output) ? data.output : [];
@@ -919,14 +856,15 @@ HARD RULES
 1. WHITELIST: every source_url MUST be from a whitelisted publisher domain. Verify by checking the hostname. If you found a great story but can't find it on a whitelisted source, OMIT it — don't fabricate.
 2. NO FABRICATION: do not invent headlines, URLs, quotes, or facts. If you can't find a section's quota of stories from whitelisted sources, return fewer stories — never pad.
 3. SEARCH DEPTH: do at least 15 distinct searches across topics. The model that fails this task fails by stopping after 1-2 searches. Don't be that model.
-4. DEDUP — STRICT. No two stories may cover the same underlying event, even from different publishers. Specifically:
+4. PUBLISHER DIVERSITY: across the entire fetch, NO publisher may contribute more than 3 stories. If you find Indian Express has 6 great India stories, pick the 3 strongest and find the rest from other whitelisted publishers (The Hindu, Hindustan Times, Mint, The Print, NDTV, Times of India, etc.). A brief dominated by one publisher fails the source-diversity dimension of our quality rubric.
+5. DEDUP — STRICT. No two stories may cover the same underlying event, even from different publishers. Specifically:
    a) major_events owns ALL sustained narratives (wars, RBI policy cycles, ongoing elections, IPL playoffs, multi-day disasters). If a 24-hour news development belongs to one of these narratives, EMBED it into that major_events story's body — do NOT also list it as a world or india entry. world/india are reserved for stories OUTSIDE the major_events set.
    b) An Indian business story belongs in india (not business) if it has national-policy or macro significance. Pure corporate news (earnings, M&A) belongs in business.
    c) If a story could fit two sections, pick ONE — the higher-priority section by this order: major_events > india > world > business > technology > climate_health > sport > culture.
    d) Run a self-check before returning: read every world and india headline, ask "is this an update on a story I already listed in major_events?" If yes, remove it from world/india and fold its key fact into the major_events story body.
-5. SPORT AND CULTURE: each is an ARRAY of 3-4 story objects with all fields populated (headline, body, source, source_url, published_at, must_include). NEVER undefined fields. If fewer real whitelisted stories are available, return a shorter array. If none are available, return an empty array — do NOT omit the key.
-6. MARKETS INDICES: must be an ARRAY of objects shaped like: [{"name":"Sensex","value":"74243","change":"-0.16%"}, {"name":"Nifty 50","value":"23366","change":"-0.21%"}, {"name":"Dow Jones","value":"...","change":"..."}, {"name":"Nasdaq","value":"...","change":"..."}]. Never a single object, never a string. Use today's actual closing values.
-7. JSON ONLY: output a single JSON object. No markdown, no preamble, no explanation. Start with { and end with }.
+6. SPORT AND CULTURE: each is an ARRAY of 3-4 story objects with all fields populated (headline, body, source, source_url, published_at, must_include). NEVER undefined fields. If fewer real whitelisted stories are available, return a shorter array. If none are available, return an empty array — do NOT omit the key.
+7. MARKETS INDICES: must be an ARRAY of objects shaped like: [{"name":"Sensex","value":"74243","change":"-0.16%"}, {"name":"Nifty 50","value":"23366","change":"-0.21%"}, {"name":"Dow Jones","value":"...","change":"..."}, {"name":"Nasdaq","value":"...","change":"..."}]. Never a single object, never a string. Use today's actual closing values.
+8. JSON ONLY: output a single JSON object. No markdown, no preamble, no explanation. Start with { and end with }.
 
 ═══════════════════════════════════════════════
 OUTPUT SHAPE
@@ -1310,6 +1248,65 @@ function enforceQualityRules(raw: any): RawStories {
     console.warn('Markets indices count off — got', cleaned.markets.indices?.length);
   }
 
+  // ─── Sprint 11: publisher diversity cap ─────────────────────────────────
+  // Cap at max 3 stories from any one publisher across the FULL fetch (not
+  // per section). Applied AFTER recency + whitelist + dedup filters so we
+  // only drop excess stories, never quality stories. must_include stories
+  // are exempt (they're flagged as undroppable upstream — 1-3 per fetch).
+  //
+  // Risk: on heavy days dominated by one publisher, post-cap count can dip
+  // below 15 stories. That's logged but accepted — the prompt-level rule
+  // ("no more than 3 from any one publisher in the final fetch") addresses
+  // root cause. This cap is the safety net.
+  const PUBLISHER_CAP = 3;
+  const publisherCount = new Map<string, number>();
+  let publisherDropped = 0;
+
+  function applyPublisherCap(arr: any[], section: string): RawStory[] {
+    const out: RawStory[] = [];
+    for (const story of arr) {
+      const key = publisherKey(story?.source_url) || 'unknown';
+      const used = publisherCount.get(key) || 0;
+      if (!story?.must_include && used >= PUBLISHER_CAP) {
+        console.log(`[publisher-cap] dropping ${section} story (publisher ${key} already at cap=${PUBLISHER_CAP}): "${(story?.headline || '').slice(0, 70)}"`);
+        publisherDropped++;
+        dropped.push({
+          section,
+          reason: `publisher diversity cap (${key} at ${PUBLISHER_CAP})`,
+          headline: story.headline,
+          url: story.source_url,
+        });
+        continue;
+      }
+      publisherCount.set(key, used + 1);
+      out.push(story);
+    }
+    return out;
+  }
+
+  // Walk in priority order — higher-priority sections claim publisher slots
+  // first, lower-priority sections lose excess.
+  for (const sec of priority) {
+    (cleaned as any)[sec] = applyPublisherCap((cleaned as any)[sec] || [], sec);
+  }
+
+  if (publisherDropped > 0) {
+    const distribution = Array.from(publisherCount.entries())
+      .filter(([, n]) => n > 0)
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, n]) => `${k}=${n}`)
+      .join(', ');
+    console.log(`[publisher-cap] dropped ${publisherDropped} stories to enforce max ${PUBLISHER_CAP}/publisher. Final distribution: ${distribution}`);
+  }
+
+  // Final story-count check — warn if cap dropped us below 15 (the 5min cap).
+  const totalKept = priority.reduce(
+    (n, sec) => n + ((cleaned as any)[sec]?.length || 0), 0,
+  );
+  if (totalKept < 15) {
+    console.warn(`[publisher-cap] post-cap story count ${totalKept} below the 15-story 5min target. Consider relaxing the cap if this recurs.`);
+  }
+
   // Count must_include flags
   let mustCount = 0;
   for (const sec of priority) {
@@ -1439,7 +1436,7 @@ OUTPUT SHAPE:
 Raw stories:
 ${JSON.stringify(rawStoriesForWriter(raw))}`;
 
-  return callOpenAIChat('gpt-4o', prompt, 6000, 'The Brief (5min)');
+  return callOpenAIChat('gpt-4o', prompt, 6000, 'The Brief (5min)', '5min');
 }
 
 async function writeDailyEdition(raw: RawStories): Promise<BriefDaily> {
@@ -1483,8 +1480,18 @@ OUTPUT SHAPE:
   "markets":        { "summary": "rewritten 2-sentence India-anchored summary", "indices": [ /* unchanged */ ] },
   "technology":     [ /* same shape */ ],
   "climate_health": [ /* same shape */ ],
-  "sport":   [ /* array of 2-4 stories across different sports, same shape */ ],
-  "culture": [ /* array of 2-4 stories across different culture types, same shape */ ],
+  "sport":   [
+    { "headline": "story 1 — same shape", "facts": "...", "background": "...", "why_it_matters": "...", "what_happens_next": "...", "analysis": "...", "source": "...", "source_url": "...", "industries": [], "interests": [], "city_tags": [], "topic_tags": [], "must_include": false },
+    { "headline": "story 2 — same shape", "facts": "...", "background": "...", "why_it_matters": "...", "what_happens_next": "...", "analysis": "...", "source": "...", "source_url": "...", "industries": [], "interests": [], "city_tags": [], "topic_tags": [], "must_include": false },
+    { "headline": "story 3 — same shape", "facts": "...", "background": "...", "why_it_matters": "...", "what_happens_next": "...", "analysis": "...", "source": "...", "source_url": "...", "industries": [], "interests": [], "city_tags": [], "topic_tags": [], "must_include": false },
+    { "headline": "story 4 — same shape", "facts": "...", "background": "...", "why_it_matters": "...", "what_happens_next": "...", "analysis": "...", "source": "...", "source_url": "...", "industries": [], "interests": [], "city_tags": [], "topic_tags": [], "must_include": false }
+  ],
+  "culture": [
+    { "headline": "story 1 — same shape", "facts": "...", "background": "...", "why_it_matters": "...", "what_happens_next": "...", "analysis": "...", "source": "...", "source_url": "...", "industries": [], "interests": [], "city_tags": [], "topic_tags": [], "must_include": false },
+    { "headline": "story 2 — same shape", "facts": "...", "background": "...", "why_it_matters": "...", "what_happens_next": "...", "analysis": "...", "source": "...", "source_url": "...", "industries": [], "interests": [], "city_tags": [], "topic_tags": [], "must_include": false },
+    { "headline": "story 3 — same shape", "facts": "...", "background": "...", "why_it_matters": "...", "what_happens_next": "...", "analysis": "...", "source": "...", "source_url": "...", "industries": [], "interests": [], "city_tags": [], "topic_tags": [], "must_include": false },
+    { "headline": "story 4 — same shape", "facts": "...", "background": "...", "why_it_matters": "...", "what_happens_next": "...", "analysis": "...", "source": "...", "source_url": "...", "industries": [], "interests": [], "city_tags": [], "topic_tags": [], "must_include": false }
+  ],
   "closer": {
     "headlines_to_remember": ["...", "...", "...", "...", "..."],
     "things_to_watch": ["...", "...", "..."],
@@ -1492,10 +1499,12 @@ OUTPUT SHAPE:
   }
 }
 
+IMPORTANT FOR SPORT AND CULTURE: the output shape above shows 4 slots for clarity. If raw has 4 sport stories, output ALL 4. If raw has 3, output 3. If raw has 2, output 2. Do NOT compress 4 raw stories down to 1 — that drops content the reader paid for. Same rule for culture.
+
 Raw stories:
 ${JSON.stringify(rawStoriesForWriter(raw))}`;
 
-  return callOpenAIChat('gpt-4o-mini', prompt, 14000, 'The Daily (10min)');
+  return callOpenAIChat('gpt-4o-mini', prompt, 14000, 'The Daily (10min)', '10min');
 }
 
 async function writeEditorialEdition(raw: RawStories): Promise<BriefEditorial> {
@@ -1566,7 +1575,7 @@ OUTPUT SHAPE:
 Raw stories:
 ${JSON.stringify(rawStoriesForWriter(raw))}`;
 
-  return callOpenAIChat('gpt-4o', prompt, 12000, 'The Editorial (deep)');
+  return callOpenAIChat('gpt-4o', prompt, 12000, 'The Editorial (deep)', 'deep');
 }
 
 async function callOpenAIChat(
@@ -1574,6 +1583,7 @@ async function callOpenAIChat(
   prompt: string,
   maxTokens: number,
   label: string,
+  costPhase?: '5min' | '10min' | 'deep' | 'score',
 ): Promise<any> {
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
@@ -1591,6 +1601,19 @@ async function callOpenAIChat(
 
   const data = await response.json();
   console.log(`${label} status:`, response.status, 'model:', model);
+
+  // Sprint 11: log cost. Fire-and-forget.
+  if (costPhase) {
+    const usage = extractUsageFromChatCompletion(data);
+    void logOpenAICost({
+      phase: costPhase,
+      model,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      reasoningTokens: usage.reasoningTokens,
+      detail: label,
+    });
+  }
 
   const text = data.choices?.[0]?.message?.content;
   if (!text) {
@@ -2047,6 +2070,163 @@ async function modePush() {
   }
 }
 
+// ─── Mode: score (Sprint 11) ────────────────────────────────────────────────
+//
+// LLM-based 7-dimension quality scoring against the Sprint 10 rubric.
+// Reads all three ready briefs for today and writes one row per edition to
+// brief_scores. Costs ~$0.005 per run with gpt-4o-mini.
+//
+// Trigger: cron #7 at 6:50 IST (after writes finish ~6:41) OR manual button
+// from /admin/ops. Re-running on the same day overwrites previous score
+// (UNIQUE constraint on date+edition).
+//
+// Output: { date, perEdition: { '5min': {...scores}, '10min': {...}, 'deep': {...} } }
+
+async function scoreBriefWithLLM(
+  edition: Edition,
+  content: any,
+): Promise<{
+  dim_coverage: number;
+  dim_field_completeness: number;
+  dim_india_anchor: number;
+  dim_source_quality: number;
+  dim_editorial_sharpness: number;
+  dim_currentness: number;
+  dim_relevance: number;
+  total: number;
+  notes: string;
+}> {
+  // Prepare a compact representation of the brief for the scorer. Strip
+  // fields the scorer doesn't need (tags, must_include flags) to keep input
+  // tokens low. The scorer reads headlines, bodies, sources, and structure.
+  const compact = JSON.stringify(content, null, 0).slice(0, 28000);
+
+  const prompt = `You are the quality auditor for Morning Brief, a daily news digest for thoughtful urban Indian professionals (25-45). You score one edition against a 7-dimension rubric. Be honest and discerning. Most production briefs score 50-62/70. A score of 70/70 is rare and reserved for exceptional days.
+
+EDITION SCORED: ${edition === '5min' ? 'The Brief (5min commute skim)' : edition === '10min' ? 'The Daily (10min full edition)' : 'The Editorial (deep synthesis)'}
+
+RUBRIC — score each dimension 0-10:
+
+1. COVERAGE: Does the brief cover the day's most consequential stories? Are there any glaring omissions (e.g. RBI rate decision, major war development, big election result that other outlets are leading with)? Higher = more comprehensive.
+
+2. FIELD COMPLETENESS: Are all required fields populated on every story? For 10min: headline, facts, background, why_it_matters, what_happens_next, analysis. For 5min: headline, what_happened, why_it_matters. For deep: title, body, stories_connected. Empty/null/placeholder text on any field reduces this score significantly.
+
+3. INDIA ANCHOR: Do stories — even global ones — explicitly connect to India? "Oil prices spike" should mention rupee/CAD/inflation impact. "US Fed decision" should mention RBI implications. Higher = stronger Indian transmission channels named in every story.
+
+4. SOURCE QUALITY: Are sources diverse (no single publisher dominating) and authoritative (Tier-1 wires, papers of record, specialist outlets)? Penalise heavy dependence on ONE publisher (e.g. >40% from Indian Express alone). Penalise weak sources (aggregators, blogs, press releases dressed as news).
+
+5. EDITORIAL SHARPNESS: Is the voice intelligent and specific? Or does it read like rewritten wire copy? Sharp analysis, specific names/numbers/dates, calibrated uncertainty score high. Generic phrases ("amid rising tensions", "stay tuned for more") score low.
+
+6. CURRENTNESS: Do headlines describe today's DEVELOPMENT, not the underlying narrative? "Tehran signals back-channel talks" (good) vs "Iran-US tensions continue" (bad). Any story that feels like yesterday's news drops this score.
+
+7. RELEVANCE: Is the brief well-targeted at urban Indian professionals (25-45)? Is the mix of world/India/business/tech/sport/culture right for that audience? Or does it over-index on a niche topic, miss obvious appeal, or skew too foreign / too political?
+
+BRIEF CONTENT:
+${compact}
+
+OUTPUT — return ONLY this JSON, no preamble, no markdown:
+{
+  "dim_coverage": <integer 0-10>,
+  "dim_field_completeness": <integer 0-10>,
+  "dim_india_anchor": <integer 0-10>,
+  "dim_source_quality": <integer 0-10>,
+  "dim_editorial_sharpness": <integer 0-10>,
+  "dim_currentness": <integer 0-10>,
+  "dim_relevance": <integer 0-10>,
+  "notes": "<2-3 sentence overall assessment naming the brief's strongest dimension and its weakest>"
+}`;
+
+  const parsed = await callOpenAIChat(
+    'gpt-4o-mini',
+    prompt,
+    1500,
+    `score-${edition}`,
+    'score',
+  );
+
+  const clamp = (n: any) => {
+    const v = typeof n === 'number' ? Math.round(n) : parseInt(String(n || 0), 10);
+    if (isNaN(v)) return 0;
+    return Math.max(0, Math.min(10, v));
+  };
+
+  const dim_coverage            = clamp(parsed?.dim_coverage);
+  const dim_field_completeness  = clamp(parsed?.dim_field_completeness);
+  const dim_india_anchor        = clamp(parsed?.dim_india_anchor);
+  const dim_source_quality      = clamp(parsed?.dim_source_quality);
+  const dim_editorial_sharpness = clamp(parsed?.dim_editorial_sharpness);
+  const dim_currentness         = clamp(parsed?.dim_currentness);
+  const dim_relevance           = clamp(parsed?.dim_relevance);
+
+  const total =
+    dim_coverage + dim_field_completeness + dim_india_anchor +
+    dim_source_quality + dim_editorial_sharpness + dim_currentness + dim_relevance;
+
+  return {
+    dim_coverage,
+    dim_field_completeness,
+    dim_india_anchor,
+    dim_source_quality,
+    dim_editorial_sharpness,
+    dim_currentness,
+    dim_relevance,
+    total,
+    notes: typeof parsed?.notes === 'string' ? parsed.notes.slice(0, 800) : '',
+  };
+}
+
+async function modeScore() {
+  const today = getISTDate();
+  const { data, error } = await supabase
+    .from('briefs')
+    .select('edition, content, status')
+    .eq('date', today)
+    .eq('status', 'ready');
+
+  if (error) {
+    return { ok: false as const, error: `Read failed: ${error.message}` };
+  }
+  if (!data || data.length === 0) {
+    return { ok: false as const, error: 'No ready briefs for today; nothing to score.' };
+  }
+
+  const editions: Edition[] = ['5min', '10min', 'deep'];
+  const results: Record<string, any> = {};
+
+  await Promise.all(
+    editions.map(async (ed) => {
+      const row = data.find((r) => r.edition === ed);
+      if (!row || !row.content) {
+        results[ed] = { status: 'skipped', reason: 'no ready brief' };
+        return;
+      }
+      try {
+        const scored = await scoreBriefWithLLM(ed, row.content);
+        const { error: insErr } = await supabase
+          .from('brief_scores')
+          .upsert(
+            {
+              date: today,
+              edition: ed,
+              ...scored,
+              max_score: 70,
+            },
+            { onConflict: 'date,edition' },
+          );
+        if (insErr) {
+          results[ed] = { status: 'db_error', reason: insErr.message };
+          return;
+        }
+        results[ed] = { status: 'ready', total: scored.total, notes: scored.notes };
+      } catch (e: any) {
+        results[ed] = { status: 'failed', reason: e?.message || String(e) };
+      }
+    }),
+  );
+
+  return { ok: true as const, date: today, results };
+}
+
 // ─── Mode: full (LEGACY) ────────────────────────────────────────────────────
 //
 // Old behaviour. Will TIMEOUT on Vercel Hobby (60s cap) on most days. Kept
@@ -2137,6 +2317,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(result.ok ? 200 : 500).json(result);
     }
 
+    if (mode === 'score') {
+      const result = await modeScore();
+      return res.status(result.ok ? 200 : 500).json(result);
+    }
+
     if (mode === 'full') {
       const result = await modeFull(skipPush);
       return res.status(200).json(result);
@@ -2144,7 +2329,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     return res.status(400).json({
       ok: false,
-      error: `Unknown mode: ${mode}. Use 'fetch', 'write', 'push', or 'full'.`,
+      error: `Unknown mode: ${mode}. Use 'fetch', 'write', 'push', 'score', or 'full'.`,
     });
   } catch (error: any) {
     console.error('Top-level error:', error.message);

@@ -26,6 +26,11 @@
 
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { createClient } from '@supabase/supabase-js';
+// Sprint 11: shared whitelist module — fixes the Sprint 10 Law & Policy gap
+// caused by a smaller, drifted whitelist copy. Single source of truth now.
+import { isWhitelistedSource } from '@/lib/whitelist';
+// Sprint 11: per-call cost capture.
+import { logOpenAICost, extractUsageFromResponses } from '@/lib/cost-log';
 
 export const config = { maxDuration: 60 };
 
@@ -114,6 +119,12 @@ export const DEFAULT_INTERESTS: string[] = [
 ];
 
 // ─── Phase 2.5: City news fetch ─────────────────────────────────────────────
+//
+// Sprint 11: TIER_1_HOSTS and isWhitelistedSource moved to @/lib/whitelist
+// (imported at top). The old inline copy here was missing Live Law, Bar &
+// Bench, PIB, RBI, and other specialist sources — which caused the Law &
+// Policy interest to return 0 hits in Sprint 10. Now both files share the
+// same 47-domain whitelist.
 
 interface CityStory {
   headline: string;
@@ -121,31 +132,6 @@ interface CityStory {
   source: string;
   source_url: string;
   published_at?: string;
-}
-
-const TIER_1_HOSTS = new Set<string>([
-  'reuters.com','apnews.com','bloomberg.com','ft.com','wsj.com','nytimes.com',
-  'washingtonpost.com','bbc.com','bbc.co.uk','economist.com','theguardian.com',
-  'aljazeera.com','thehindu.com','indianexpress.com','hindustantimes.com',
-  'livemint.com','business-standard.com','theprint.in','scroll.in',
-  'timesofindia.indiatimes.com','deccanherald.com','thewire.in','moneycontrol.com',
-  'espncricinfo.com','variety.com','hollywoodreporter.com','nature.com',
-  'science.org','statnews.com','techcrunch.com','theverge.com',
-  'arstechnica.com','wired.com',
-]);
-
-function isWhitelistedSource(url?: string): boolean {
-  if (!url) return false;
-  try {
-    const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
-    // Array.from() avoids downlevel-iteration error on Set<string>.
-    for (const allowed of Array.from(TIER_1_HOSTS)) {
-      if (host === allowed || host.endsWith('.' + allowed)) return true;
-    }
-    return false;
-  } catch {
-    return false;
-  }
 }
 
 async function fetchCityStories(city: string): Promise<CityStory[]> {
@@ -156,8 +142,11 @@ Look for: civic and municipal news, major events in the city, notable incidents,
 
 If nothing genuinely newsworthy happened, return an empty array. Do not pad with national stories.
 
-SOURCE RULES — use ONLY direct article links from these publishers:
-The Hindu, Indian Express, Hindustan Times, Mint, Business Standard, The Print, Scroll, Times of India, Deccan Herald, The Wire, Moneycontrol. No aggregators, no social media, no Google News redirects.
+SOURCE RULES — use ONLY direct article links from these whitelisted Tier-1 publishers:
+National papers: The Hindu, Indian Express, Hindustan Times, Mint, Business Standard, The Print, Scroll, Times of India, Deccan Herald, The Wire, NDTV, Moneycontrol, India Today, The Quint, Outlook India.
+Regional: Telegraph India (East), Tribune India (North), The News Minute (South), New Indian Express.
+Wires: PTI, ANI.
+No aggregators, no social media, no Google News redirects.
 
 Return ONLY a JSON object — no markdown, no commentary:
 {
@@ -192,6 +181,18 @@ Return ONLY a JSON object — no markdown, no commentary:
     return [];
   }
   const data = await response.json();
+
+  // Sprint 11: cost capture.
+  const usage = extractUsageFromResponses(data);
+  void logOpenAICost({
+    phase: 'city',
+    model: 'gpt-4o',
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    reasoningTokens: usage.reasoningTokens,
+    detail: city,
+  });
+
   const text = data.output?.find((o: any) => o.type === 'message')?.content?.[0]?.text;
   if (!text) return [];
 
@@ -218,7 +219,18 @@ Return ONLY a JSON object — no markdown, no commentary:
   }
 }
 
-async function buildCityCache(uniqueCities: string[]): Promise<Map<string, CityStory[]>> {
+// Sprint 11: track which city/interest fetches errored vs returned empty.
+// Errored = network/parse failure (worth flagging to user). Empty = the
+// model just didn't find news today (not a failure — could be a quiet day).
+export interface TailFailureSets {
+  cityErrors: Set<string>;     // keys of cities whose fetch THREW (not just returned empty)
+  interestErrors: Set<string>; // names of interests whose fetch THREW
+}
+
+async function buildCityCache(
+  uniqueCities: string[],
+  failures: TailFailureSets,
+): Promise<Map<string, CityStory[]>> {
   const cache = new Map<string, CityStory[]>();
   if (uniqueCities.length === 0) return cache;
 
@@ -229,6 +241,7 @@ async function buildCityCache(uniqueCities: string[]): Promise<Map<string, CityS
         return [cityKey(city), stories] as const;
       } catch (e: any) {
         console.warn(`City fetch error for ${city}:`, e?.message || e);
+        failures.cityErrors.add(cityKey(city));
         return [cityKey(city), [] as CityStory[]] as const;
       }
     }),
@@ -246,14 +259,44 @@ interface InterestStory extends CityStory {}
 
 async function fetchInterestStories(interest: string): Promise<InterestStory[]> {
   const today = getISTDate();
+
+  // Sprint 11: topic-specific source hints. Some interests benefit from
+  // specialist publishers. Law & Policy is the canonical example — without
+  // naming Live Law and Bar & Bench explicitly, gpt-4o tends to look only at
+  // mainstream papers and miss the actual legal news. This was the root of
+  // Sprint 10's "Law & Policy returned 0 hits" issue, alongside the
+  // (separate) whitelist drift that also dropped these sources.
+  const interestLower = interest.toLowerCase();
+  let specialistHint = '';
+  if (interestLower.includes('law') || interestLower.includes('policy') || interestLower.includes('legal')) {
+    specialistHint = `\nSPECIALIST PRIORITY for this topic: Live Law (livelaw.in) and Bar & Bench (barandbench.com) are THE primary sources for Indian court rulings, legal news, and law-and-policy developments. Search there FIRST. Also check The Hindu Legal, Indian Express, The Wire, and Caravan for policy analysis. PIB (pib.gov.in) for official government notifications.`;
+  } else if (interestLower.includes('parenting') || interestLower.includes('education')) {
+    specialistHint = `\nSPECIALIST PRIORITY for this topic: The Hindu, Indian Express, and Hindustan Times education desks. Scroll and The Wire for analytical takes. Down To Earth for child-health stories.`;
+  } else if (interestLower.includes('environment') || interestLower.includes('climate') || interestLower.includes('sustain')) {
+    specialistHint = `\nSPECIALIST PRIORITY for this topic: Down To Earth (downtoearth.org.in), Reuters Climate, Nature, BBC environment desk, plus The Hindu, Mint, and Scroll for India-specific environmental policy and pollution stories.`;
+  } else if (interestLower.includes('health') || interestLower.includes('medic') || interestLower.includes('wellness')) {
+    specialistHint = `\nSPECIALIST PRIORITY for this topic: STAT News, Nature, Science.org for research and drug approvals. The Hindu, Indian Express, NDTV health desks for India angles. WHO for outbreak updates.`;
+  } else if (interestLower.includes('startup') || interestLower.includes('entrepren')) {
+    specialistHint = `\nSPECIALIST PRIORITY for this topic: TechCrunch, The Verge, Wired for global. Moneycontrol, Mint, Economic Times, Business Standard, Inc42-adjacent reporting from mainstream papers for Indian startups.`;
+  } else if (interestLower.includes('film') || interestLower.includes('ott') || interestLower.includes('music') || interestLower.includes('book') || interestLower.includes('art') || interestLower.includes('cultur')) {
+    specialistHint = `\nSPECIALIST PRIORITY for this topic: Variety, Hollywood Reporter for global film/TV. The Hindu, Indian Express, Mint Lounge, Caravan, Outlook India, The Quint, India Today, Scroll for Indian cultural reporting.`;
+  } else if (interestLower.includes('sport') || interestLower.includes('cricket') || interestLower.includes('football') || interestLower.includes('formula')) {
+    specialistHint = `\nSPECIALIST PRIORITY for this topic: ESPNCricinfo, ESPN.com, plus the sports desks of The Hindu, Times of India, NDTV, Indian Express.`;
+  }
+
   const prompt = `You are sourcing news stories specifically about "${interest}". Search the web for the 1-3 most consequential stories on this topic from the last 24-72 hours. Include both India-focused and global stories where relevant.
 
 If nothing genuinely newsworthy happened in this niche, return an empty array. Do not pad.
+${specialistHint}
 
 SOURCE RULES — only direct article links from Tier-1 publishers:
-Global: Reuters, AP, Bloomberg, FT, WSJ, NYT, WaPo, BBC, The Guardian, The Economist.
-India: The Hindu, Indian Express, HT, Mint, Business Standard, The Print, Scroll, Deccan Herald, The Wire.
-Specialist (only where general sources don't cover): Nature, Science, STAT, TechCrunch, The Verge, Wired, Variety, Hollywood Reporter, ESPNCricinfo.
+Global: Reuters, AP, Bloomberg, FT, WSJ, NYT, WaPo, BBC, The Guardian, The Economist, Al Jazeera, ABC News Australia.
+India national: The Hindu, Indian Express, Hindustan Times, Mint, Business Standard, The Print, Scroll, Deccan Herald, The Wire, NDTV, India Today, The Quint, Outlook India, Caravan, Moneycontrol, Financial Express, Business Today, Economic Times, New Indian Express, Telegraph India, Tribune India, The News Minute.
+India wires: PTI, ANI.
+India legal: Live Law, Bar & Bench.
+India environment/health: Down To Earth.
+Government primary: PIB, RBI, SEBI, MOSPI.
+Specialist (only where general sources don't cover): Nature, Science, STAT, TechCrunch, The Verge, Wired, Variety, Hollywood Reporter, ESPNCricinfo, ESPN.
 
 Return ONLY a JSON object — no markdown:
 {
@@ -282,6 +325,18 @@ Return ONLY a JSON object — no markdown:
     return [];
   }
   const data = await response.json();
+
+  // Sprint 11: cost capture.
+  const usage = extractUsageFromResponses(data);
+  void logOpenAICost({
+    phase: 'interest',
+    model: 'gpt-4o',
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    reasoningTokens: usage.reasoningTokens,
+    detail: interest,
+  });
+
   const text = data.output?.find((o: any) => o.type === 'message')?.content?.[0]?.text;
   if (!text) return [];
 
@@ -308,7 +363,10 @@ Return ONLY a JSON object — no markdown:
   }
 }
 
-async function buildInterestCache(uniqueInterests: string[]): Promise<Map<string, InterestStory[]>> {
+async function buildInterestCache(
+  uniqueInterests: string[],
+  failures: TailFailureSets,
+): Promise<Map<string, InterestStory[]>> {
   const cache = new Map<string, InterestStory[]>();
   const nonStandard = uniqueInterests.filter((i) => !STANDARD_INTEREST_MAP[i]);
   if (nonStandard.length === 0) return cache;
@@ -320,6 +378,7 @@ async function buildInterestCache(uniqueInterests: string[]): Promise<Map<string
         return [interest, stories] as const;
       } catch (e: any) {
         console.warn(`Interest fetch error for "${interest}":`, e?.message || e);
+        failures.interestErrors.add(interest);
         return [interest, [] as InterestStory[]] as const;
       }
     }),
@@ -1006,11 +1065,23 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   console.log(`Unique cities to fetch: ${uniqueCities.length} — ${uniqueCities.join(', ')}`);
   console.log(`Unique interests: ${uniqueInterests.length} (${uniqueInterests.filter((i) => !STANDARD_INTEREST_MAP[i]).length} non-standard need fetch)`);
 
-  // 4) Build caches in parallel — cities and non-standard interests
+  // 4) Build caches in parallel — cities and non-standard interests.
+  // Sprint 11: track which fetches threw (vs returned empty). Errored fetches
+  // affect that user's tail_status; empty-but-not-errored is normal.
+  const failures: TailFailureSets = {
+    cityErrors: new Set<string>(),
+    interestErrors: new Set<string>(),
+  };
   const [cityCache, interestCache] = await Promise.all([
-    buildCityCache(uniqueCities),
-    buildInterestCache(uniqueInterests),
+    buildCityCache(uniqueCities, failures),
+    buildInterestCache(uniqueInterests, failures),
   ]);
+  if (failures.cityErrors.size > 0) {
+    console.warn(`[tail] city fetch errors: ${Array.from(failures.cityErrors).join(', ')}`);
+  }
+  if (failures.interestErrors.size > 0) {
+    console.warn(`[tail] interest fetch errors: ${Array.from(failures.interestErrors).join(', ')}`);
+  }
 
   const results: any[] = [];
 
@@ -1035,6 +1106,24 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const cityStories = userCityKey ? (cityCache.get(userCityKey) || []) : [];
     const homeStories = userHomeKey && userHomeKey !== userCityKey ? (cityCache.get(userHomeKey) || []) : [];
 
+    // Sprint 11: per-user tail_status derived from this user's specific
+    // city/interest needs vs which fetches errored. We DON'T flag empty-but-
+    // successful fetches — those represent quiet news days, not failures.
+    const userInterestList = (profile.interests || []) as string[];
+    const userNonStdInterests = userInterestList.filter((i) => !STANDARD_INTEREST_MAP[i]);
+    const cityFailed =
+      (userCityKey && failures.cityErrors.has(userCityKey)) ||
+      (userHomeKey && userHomeKey !== userCityKey && failures.cityErrors.has(userHomeKey));
+    const interestFailed = userNonStdInterests.some((i) => failures.interestErrors.has(i));
+
+    let tailStatus: 'ok' | 'partial_city_failed' | 'partial_interest_failed' | 'partial_both';
+    if (cityFailed && interestFailed)      tailStatus = 'partial_both';
+    else if (cityFailed)                   tailStatus = 'partial_city_failed';
+    else if (interestFailed)               tailStatus = 'partial_interest_failed';
+    else                                   tailStatus = 'ok';
+
+    userResult.tailStatus = tailStatus;
+
     try {
       await Promise.all(
         EDITIONS.map(async (edition) => {
@@ -1054,8 +1143,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             built = buildEditorialPersonalised(shared, profile);
           }
 
+          // Sprint 11: write tail_status into content JSONB so admin
+          // dashboard can read it without a new column.
+          (built.content as any).tail_status = tailStatus;
+
           if (dryRun) {
-            userResult.editions[edition] = { status: 'dry_run', ...built.stats };
+            userResult.editions[edition] = { status: 'dry_run', tail_status: tailStatus, ...built.stats };
             return;
           }
 
@@ -1064,7 +1157,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             userResult.editions[edition] = { status: 'db_error', reason: saved.error };
             return;
           }
-          userResult.editions[edition] = { status: 'ready', ...built.stats };
+          userResult.editions[edition] = { status: 'ready', tail_status: tailStatus, ...built.stats };
         }),
       );
     } catch (e: any) {
@@ -1079,6 +1172,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     0,
   );
 
+  // Sprint 11: per-status counts so admin dashboard can show degradation.
+  const tailStatusCounts = results.reduce((acc: Record<string, number>, r) => {
+    const k = r.tailStatus || 'unknown';
+    acc[k] = (acc[k] || 0) + 1;
+    return acc;
+  }, {});
+
   return res.status(200).json({
     success: true,
     date,
@@ -1087,6 +1187,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     uniqueInterests,
     cityHits: Object.fromEntries(Array.from(cityCache.entries()).map(([c, s]) => [c, s.length])),
     interestHits: Object.fromEntries(Array.from(interestCache.entries()).map(([i, s]) => [i, s.length])),
+    tailFailures: {
+      cityErrors: Array.from(failures.cityErrors),
+      interestErrors: Array.from(failures.interestErrors),
+    },
+    tailStatusCounts,
     processed: results.length,
     editionsReady,
     results,
