@@ -320,6 +320,9 @@ export default function ProfilePage() {
                   }}
                   disabled={savingField}
                   style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'flex-start',
                     padding: '16px 12px',
                     background: selected ? C.goldSoft : C.surface2,
                     border: `1px solid ${selected ? C.gold : C.border}`,

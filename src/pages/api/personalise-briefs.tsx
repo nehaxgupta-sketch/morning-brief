@@ -477,24 +477,30 @@ function buildQuickPersonalised(
   homeCityStories: CityStory[],
   interestCache: Map<string, InterestStory[]>,
 ): BuildResult {
-  // The Brief (5min) personalised shape:
-  //  - major_events (universal, reordered)
-  //  - world (universal, reordered, top 3)
-  //  - india (universal, reordered, top 2)
-  //  - your_city (1 micro)
-  //  - your_interests (max 1 section × 1 story)
+  // The Brief (5min) personalised shape — per Sprint 9 spec:
+  //  - major_events (universal, reordered) — KEEP ALL
+  //  - world (universal, reordered) — KEEP ALL
+  //  - india (universal, reordered) — KEEP ALL
+  //  - your_city (1 micro story)
+  //  - your_interests (interest sections, 1 story per section)
+  //  - NO `topics` section (replaced by personal sections)
+  // Total story cap: 20. If universal + personal exceeds 20, trim from the
+  // lowest-priority interest sections first.
+  const TOTAL_CAP = 20;
   const scorer = (s: any) => scoreStory(s, profile);
 
   const major = reorderByScore(shared.major_events || [], scorer);
   const world = reorderByScore(shared.world || [], scorer);
   const india = reorderByScore(shared.india || [], scorer);
 
-  // Don't reduce here — keep all entries; The Brief shared brief already trimmed.
+  const universalCount = major.length + world.length + india.length;
+  let personalBudget = Math.max(0, TOTAL_CAP - universalCount);
 
   const personal: PersonalSection[] = [];
 
+  // Your city — 1 story, highest personal priority.
   const usersCity = normaliseStr(profile?.city_current);
-  if (usersCity && cityStories.length > 0) {
+  if (usersCity && cityStories.length > 0 && personalBudget > 0) {
     personal.push({
       id: 'your_city',
       label: usersCity,
@@ -502,34 +508,42 @@ function buildQuickPersonalised(
       kind: 'list',
       stories: [cityToMicro(cityStories[0])],
     });
+    personalBudget -= 1;
   }
 
-  // Your interests — at most 1 section, 1 story (for 5min).
-  const interestSection = pickFirstInterestSection(profile, shared, interestCache, 'micro', 1);
-  if (interestSection) personal.push(interestSection);
+  // Your interests — fill remaining personal budget. 1 story per section.
+  const userInterests = (profile?.interests || []) as string[];
+  for (const interest of userInterests) {
+    if (personalBudget <= 0) break;
+    const section = makeInterestSection(interest, shared, interestCache, 'micro', 1);
+    if (section) {
+      personal.push(section);
+      personalBudget -= section.stories.length;
+    }
+  }
+
+  console.log(`[personalise:5min] universal=${universalCount}, personal=${TOTAL_CAP - universalCount - personalBudget}, total=${TOTAL_CAP - personalBudget}, cap=${TOTAL_CAP}`);
 
   const picks: string[] = [];
   if (major[0]?.headline) picks.push(major[0].headline);
   if (world[0]?.headline) picks.push(world[0].headline);
   if (personal[0]?.stories?.[0]?.headline) picks.push(personal[0].stories[0].headline);
 
-  // 5min has no closer, no quick_personal_relevance.
-  // We still set it as a courtesy field; client may ignore for 5min.
   const content = {
     edition: '5min',
     date: shared.date,
     major_events: major,
     world,
     india,
-    topics: shared.topics || [],
+    // topics section deliberately dropped for personalised users — replaced by personal_sections.
     personal_sections: personal,
   };
 
   return {
     content,
     stats: {
-      sectionsKept: 4,
-      sectionsDropped: 0,
+      sectionsKept: 3,
+      sectionsDropped: 1, // topics
       personalSectionsAdded: personal.length,
       citySpliced: personal.some((p) => p.id === 'your_city'),
       homeCitySpliced: false,
@@ -546,39 +560,45 @@ function buildDailyPersonalised(
   homeCityStories: CityStory[],
   interestCache: Map<string, InterestStory[]>,
 ): BuildResult {
-  // The Daily (10min) personalised shape:
-  //  - major_events (universal, reordered)
-  //  - world (universal, reordered)
-  //  - india (universal, reordered)
+  // The Daily (10min) personalised shape — per Sprint 9 spec:
+  //  - major_events (universal, reordered) — KEEP ALL
+  //  - world (universal, reordered) — KEEP ALL
+  //  - india (universal, reordered) — KEEP ALL
   //  - your_city (max 2 full stories)
   //  - your_home_city (max 1 full story if different from current)
-  //  - your_interests (max 2 sections × 2 stories each)
+  //  - your_interests (interest sections filling remaining budget)
   //  - closer (universal, verbatim)
   //  - quick_personal_relevance (templated)
-  // We DROP business/markets/technology/climate_health/sport/culture from
-  // standard sections — but each may surface as an interest section if user
-  // has it in their interests array.
+  // Total story cap: 20. Standard topic sections (business/markets/technology/
+  // climate_health/sport/culture) are DROPPED — each may surface as an interest
+  // section if user has it in their interests array.
+  const TOTAL_CAP = 20;
   const scorer = (s: any) => scoreStory(s, profile);
 
   const major = reorderByScore(shared.major_events || [], scorer);
   const world = reorderByScore(shared.world || [], scorer);
   const india = reorderByScore(shared.india || [], scorer);
 
+  const universalCount = major.length + world.length + india.length;
+  let personalBudget = Math.max(0, TOTAL_CAP - universalCount);
+
   const personal: PersonalSection[] = [];
 
   const usersCity = normaliseStr(profile?.city_current);
-  if (usersCity && cityStories.length > 0) {
+  if (usersCity && cityStories.length > 0 && personalBudget > 0) {
+    const slots = Math.min(2, personalBudget, cityStories.length);
     personal.push({
       id: 'your_city',
       label: usersCity,
       icon: '📍',
       kind: 'list',
-      stories: cityStories.slice(0, 2).map(cityToFull),
+      stories: cityStories.slice(0, slots).map(cityToFull),
     });
+    personalBudget -= slots;
   }
 
   const usersHome = normaliseStr(profile?.city_home);
-  if (usersHome && usersHome.toLowerCase() !== usersCity.toLowerCase() && homeCityStories.length > 0) {
+  if (usersHome && usersHome.toLowerCase() !== usersCity.toLowerCase() && homeCityStories.length > 0 && personalBudget > 0) {
     personal.push({
       id: 'your_home_city',
       label: `${usersHome} (home)`,
@@ -586,12 +606,22 @@ function buildDailyPersonalised(
       kind: 'list',
       stories: homeCityStories.slice(0, 1).map(cityToFull),
     });
+    personalBudget -= 1;
   }
 
-  // Up to 2 interest sections × 2 stories each.
+  // Interest sections — fill remaining budget. Up to 2 stories per section.
   const userInterests = (profile?.interests || []) as string[];
-  const interestSections = pickInterestSections(userInterests, shared, interestCache, 'full', 2, 2);
-  for (const sec of interestSections) personal.push(sec);
+  for (const interest of userInterests) {
+    if (personalBudget <= 0) break;
+    const slotsPerSection = Math.min(2, personalBudget);
+    const sec = makeInterestSection(interest, shared, interestCache, 'full', slotsPerSection);
+    if (sec) {
+      personal.push(sec);
+      personalBudget -= sec.stories.length;
+    }
+  }
+
+  console.log(`[personalise:10min] universal=${universalCount}, personal=${TOTAL_CAP - universalCount - personalBudget}, total=${TOTAL_CAP - personalBudget}, cap=${TOTAL_CAP}`);
 
   // Templated paragraph
   const picks: string[] = [];
@@ -613,8 +643,8 @@ function buildDailyPersonalised(
     closer,
     quick_personal_relevance,
   };
-  // NOTE: we deliberately do NOT carry over business/markets/technology/
-  // climate_health/sport/culture into the personalised brief. They reach the
+  // Standard topic sections (business/markets/technology/climate_health/sport/
+  // culture) are deliberately dropped for personalised users. They reach the
   // user only as interest-mapped sections (if the user opted in).
 
   return {
@@ -806,10 +836,10 @@ function makeInterestSection(
       // Limit
       stories = stories.slice(0, storiesPerSection);
     } else if (sec === 'sport' || sec === 'culture') {
-      // Single-story sections.
-      const single = shared[sec];
-      if (!single || !single.headline) return null;
-      stories = [shape === 'micro' ? fullToMicro(single) : single].slice(0, storiesPerSection);
+      // Sport/culture are arrays of 2-4 stories as of Sprint 9.
+      const arr = Array.isArray(shared[sec]) ? shared[sec] : [];
+      if (arr.length === 0) return null;
+      stories = (shape === 'micro' ? arr.map(fullToMicro) : arr).slice(0, storiesPerSection);
     } else if (sec === 'world' || sec === 'india') {
       // Skip — already in standard slot for personalised users.
       return null;

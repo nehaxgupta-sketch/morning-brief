@@ -78,8 +78,8 @@ interface BriefContent {
   technology?: any[]
   climate_health?: any[]
   markets?: { summary: string; indices: MarketIndex[] }
-  sport?: any
-  culture?: any
+  sport?: any[]
+  culture?: any[]
   // Editorial:
   three_patterns?: Pattern[]
   long_read?: LongRead
@@ -132,8 +132,8 @@ const DAILY_SECTIONS: SectionDef[] = [
   { id: 'markets',        label: 'Markets',      icon: '📈', kind: 'markets' },
   { id: 'technology',     label: 'Technology',   icon: '💻', kind: 'list' },
   { id: 'climate_health', label: 'Climate & Health', icon: '🌱', kind: 'list' },
-  { id: 'sport',          label: 'Sport',        icon: '🏏', kind: 'single' },
-  { id: 'culture',        label: 'Culture',      icon: '🎭', kind: 'single' },
+  { id: 'sport',          label: 'Sport',        icon: '🏏', kind: 'list' },
+  { id: 'culture',        label: 'Culture',      icon: '🎭', kind: 'list' },
   // Legacy — hidden when empty:
   { id: 'bengaluru',      label: 'Bengaluru',    icon: '🏙️', kind: 'list' },
   { id: 'delhi',          label: 'Delhi',        icon: '🏛️', kind: 'list' },

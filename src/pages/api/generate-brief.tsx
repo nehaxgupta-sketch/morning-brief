@@ -193,8 +193,8 @@ interface RawStories {
   business: RawStory[];
   technology: RawStory[];
   climate_health: RawStory[];
-  sport?: RawStory;
-  culture?: RawStory;
+  sport: RawStory[];      // Was single; now array (Sprint 9) — 2-4 stories across different sports.
+  culture: RawStory[];    // Was single; now array (Sprint 9) — 2-4 stories across different culture types.
   markets: { summary: string; indices: MarketIndex[] };
   // Lens — the four-line summary used by the home flash card.
   lens: {
@@ -335,9 +335,13 @@ const MarketIndexSchema = z.object({
   change: z.string().min(1),
 });
 
+// Closer schema: permissive on counts so the entire 10min brief doesn't fail
+// when gpt-4o-mini returns 4 or 6 headlines instead of exactly 5. The writer
+// prompt still asks for "exactly 5" / "exactly 3" — the schema just stops
+// strict counts from being a brief-killer on quiet news days.
 const CloserSchema = z.object({
-  headlines_to_remember: z.array(z.string().min(5)).length(5),
-  things_to_watch: z.array(z.string().min(5)).length(3),
+  headlines_to_remember: z.array(z.string().min(5)).min(3).max(7),
+  things_to_watch: z.array(z.string().min(5)).min(2).max(5),
   conversation_insight: z.string().min(20),
 });
 
@@ -361,14 +365,14 @@ const BriefDailySchema = z.object({
   business: z.array(FullStorySchema),
   markets: z.object({
     summary: z.string().min(10),
-    indices: z.array(MarketIndexSchema).min(2).max(6),
+    indices: z.array(MarketIndexSchema).min(1).max(6),
   }),
   technology: z.array(FullStorySchema),
   climate_health: z.array(FullStorySchema),
-  // sport/culture optional — when OpenAI can't source a story from a whitelisted publisher,
-  // we omit the section entirely rather than fail the whole brief.
-  sport: FullStorySchema.optional(),
-  culture: FullStorySchema.optional(),
+  // sport/culture became arrays in Sprint 9 to support breadth across multiple
+  // sports/culture types. Permissive on count — empty on quiet days is fine.
+  sport: z.array(FullStorySchema).max(6),
+  culture: z.array(FullStorySchema).max(6),
   closer: CloserSchema,
 });
 
@@ -586,7 +590,12 @@ async function fetchListSection(
   count: string,
   universe: Universe,
   today: string,
+  excludeContext?: string,
 ): Promise<any[]> {
+  const exclusionBlock = excludeContext
+    ? `\n${excludeContext}\n`
+    : '';
+
   const prompt = `You are a senior news editor for an India-based daily brief. Today is ${today}.
 
 Your job: produce the "${section}" section. Use the web_search_preview tool to find real articles. Run multiple searches if needed — do not stop at the first roundup page.
@@ -594,7 +603,7 @@ Your job: produce the "${section}" section. Use the web_search_preview tool to f
 ${guidance}
 
 TARGET COUNT: ${count} stories. If genuine news doesn't support the full count, return fewer — never fabricate to fill quota.
-
+${exclusionBlock}
 ${sourceWhitelistBlock()}
 
 RECENCY: every story published within the last 48 hours (major_events allows up to 7 days for sustained themes).
@@ -799,24 +808,44 @@ function buildGpt5FetchPrompt(today: string, universe: Universe): string {
 Your job: search the web aggressively for today's most consequential news and return ONE JSON object with all sections filled. Use the web_search tool. Perform AT LEAST 15-20 distinct searches across topics — depth matters; do not stop early.
 
 ═══════════════════════════════════════════════
-SECTIONS TO COLLECT
+RECENCY — STRICT 24-HOUR RULE
 ═══════════════════════════════════════════════
 
-- major_events: 3-4 stories. SUSTAINED, multi-day themes shaping the week — ongoing wars (Russia-Ukraine, Middle East), IPL playoffs/finals, election cycles, major policy rollouts (RBI policy, budget, big regulatory moves), multi-day disasters. NOT 24-hour news.
+Every story must represent a development WITHIN THE LAST 24 HOURS.
 
-- world: EXACTLY 5 stories. 24-hour global news from OUTSIDE India. Spread across regions — avoid all 5 from one country unless it's a genuinely dominant news day there. Cover: US politics, major elections abroad, big government decisions, international relations, cross-border business moves, climate/disaster events, major court rulings, big tech moves abroad.
+This is about NARRATIVE freshness, not just publish date. Specifically:
+- For a one-off event (election result, court ruling, earnings report): the event itself must have happened in the last 24 hours, AND the article must be published in the last 24 hours.
+- For a sustained narrative (war, IPL season, RBI policy cycle): there MUST be a FRESH development today (new strike, today's match, follow-up policy move, retirement, welcome ceremony, controversy, post-match analysis published today). If only the underlying event from days ago exists with no fresh angle in the last 24h, OMIT the story — do NOT report stale news.
 
-- india: EXACTLY 5 stories. 24-hour national news. Government actions, court rulings, state-level developments of national significance (Bengaluru, Mumbai, Delhi, Chennai, Hyderabad, Pune, Kolkata, Ahmedabad all qualify), business deals, accidents/disasters, social/political events. Include RBI rate decisions, monsoon updates, major Indian corporate news.
+Concrete examples:
+- IPL final was 2 days ago, no follow-up news today → OMIT. Do NOT report "Team X won IPL".
+- IPL final was 2 days ago, but today's news has the winning team's welcome ceremony → INCLUDE that follow-up.
+- A war story from 3 days ago with no new development today → OMIT.
+- The same war story with a new strike, casualty figure, or diplomatic move today → INCLUDE the today's development.
 
-- business: 2-3 stories. Corporate news, earnings, M&A, regulatory actions, major financial moves. Indian AND global. Skip pure markets summaries (handled separately).
+If you cannot find a story with a 24-hour development for a section, return fewer stories or leave it empty. Reasoning: if a story is big enough to matter, there is always a 24-hour development. If no one wrote about it today, it is not big enough for this brief.
 
-- technology: 1-2 stories. Significant product launches, major AI developments, big-tech regulation, cybersecurity events. Skip rumour/speculation.
+═══════════════════════════════════════════════
+SECTIONS TO COLLECT — OVER-FETCH
+═══════════════════════════════════════════════
 
-- climate_health: 1-2 stories. Climate disasters, environmental policy, major health stories (outbreaks, drug approvals, research with real implications). Stories with concrete real-world impact.
+OVER-FETCHING IS REQUIRED. After your output, downstream filters drop stories that fail the source whitelist, recency check, or semantic-dedup against major_events. The final brief targets 20 surviving stories. Aim for the upper bound of every range below.
 
-- sport: 1 story. THE single biggest sport story of the day. On Indian summer days (April-June), this is very often an IPL match — especially finals/playoffs. Major tennis/football/cricket fixtures, world records also qualify.
+- major_events: 4-5 stories. SUSTAINED, multi-day themes shaping the week — ongoing wars, IPL playoffs/finals, election cycles, major policy rollouts (RBI policy, budget, big regulatory moves), multi-day disasters. Each entry MUST have a fresh 24-hour development (today's strike, today's match, today's policy step). Do NOT list a theme without a today-development.
 
-- culture: 1 story. THE single biggest culture/entertainment story (film releases, major awards, big music/arts news).
+- world: 7-8 stories. 24-hour global news from OUTSIDE India. Spread across regions — avoid all 7 from one country unless it's a genuinely dominant news day there. Cover: US politics, major elections abroad, big government decisions, international relations, cross-border business moves, climate/disaster events, major court rulings, big tech moves abroad.
+
+- india: 7-8 stories. 24-hour national news. Government actions, court rulings, state-level developments of national significance (Bengaluru, Mumbai, Delhi, Chennai, Hyderabad, Pune, Kolkata, Ahmedabad all qualify), business deals, accidents/disasters, social/political events. Include RBI rate decisions, monsoon updates, major Indian corporate news.
+
+- business: 4-5 stories. Corporate news, earnings, M&A, regulatory actions, major financial moves. Indian AND global. Skip pure markets summaries (handled separately).
+
+- technology: 3-4 stories. Significant product launches, major AI developments, big-tech regulation, cybersecurity events. Skip rumour/speculation.
+
+- climate_health: 3-4 stories. Climate disasters, environmental policy, major health stories (outbreaks, drug approvals, research with real implications). Stories with concrete real-world impact.
+
+- sport: 3-4 stories ACROSS DIFFERENT SPORTS. Cricket, football, tennis, F1, badminton, hockey, kabaddi, Olympics, athletics, golf, esports — pick the day's biggest from as many different sports as the day's news supports. Do NOT submit 4 cricket stories; if cricket has the biggest story, include ONE cricket story and fill the rest from other sports.
+
+- culture: 3-4 stories ACROSS DIFFERENT CULTURE TYPES. Films, OTT, music, books, theatre, visual arts, awards. Like sport — don't submit 4 film stories; aim for breadth across culture types where the day's news supports it.
 
 - markets: ONE object with summary + indices. Find today's closing values for Sensex, Nifty 50, Dow Jones, Nasdaq Composite. Write a 2-3 sentence India-anchored summary of today's market action.
 
@@ -853,7 +882,11 @@ HARD RULES
 1. WHITELIST: every source_url MUST be from a whitelisted publisher domain. Verify by checking the hostname. If you found a great story but can't find it on a whitelisted source, OMIT it — don't fabricate.
 2. NO FABRICATION: do not invent headlines, URLs, quotes, or facts. If you can't find a section's quota of stories from whitelisted sources, return fewer stories — never pad.
 3. SEARCH DEPTH: do at least 15 distinct searches across topics. The model that fails this task fails by stopping after 1-2 searches. Don't be that model.
-4. DEDUP: no two stories should cover the same event. If a story could fit two sections (e.g. an Indian business story), put it in india only (higher priority).
+4. DEDUP — STRICT. No two stories may cover the same underlying event, even from different publishers. Specifically:
+   a) major_events owns ALL sustained narratives (wars, RBI policy cycles, ongoing elections, IPL playoffs, multi-day disasters). If a 24-hour news development belongs to one of these narratives, EMBED it into that major_events story's body — do NOT also list it as a world or india entry. world/india are reserved for stories OUTSIDE the major_events set.
+   b) An Indian business story belongs in india (not business) if it has national-policy or macro significance. Pure corporate news (earnings, M&A) belongs in business.
+   c) If a story could fit two sections, pick ONE — the higher-priority section by this order: major_events > india > world > business > technology > climate_health > sport > culture.
+   d) Run a self-check before returning: read every world and india headline, ask "is this an update on a story I already listed in major_events?" If yes, remove it from world/india and fold its key fact into the major_events story body.
 5. SPORT AND CULTURE: each is a SINGLE story object with all fields populated (headline, body, source, source_url, published_at, must_include). NEVER undefined fields. If no real whitelisted story is available, omit the key entirely from the JSON.
 6. MARKETS INDICES: must be an ARRAY of objects shaped like: [{"name":"Sensex","value":"74243","change":"-0.16%"}, {"name":"Nifty 50","value":"23366","change":"-0.21%"}, {"name":"Dow Jones","value":"...","change":"..."}, {"name":"Nasdaq","value":"...","change":"..."}]. Never a single object, never a string. Use today's actual closing values.
 7. JSON ONLY: output a single JSON object. No markdown, no preamble, no explanation. Start with { and end with }.
@@ -1041,7 +1074,98 @@ async function fetchNewsFromOpenAI_legacy(universe: Universe): Promise<RawStorie
 // ─── Post-fetch enforcement ─────────────────────────────────────────────────
 // Source-whitelist + dedup + must_include count, applied to fetched raw stories.
 
+// ─── Recency window check ───────────────────────────────────────────────────
+//
+// Returns true if a story's published_at is within the last 24 hours (or 72h
+// for major_events, which are explicitly sustained narratives — but their
+// LATEST development must still be within the last 24h, enforced in the
+// prompt). We're permissive on parse failures: if published_at is missing or
+// unparseable, keep the story rather than drop on a date format issue. The
+// LLM is instructed to use today's date if it can't determine actual
+// published_at, so missing dates trend "fresh".
+const RECENCY_HOURS_DEFAULT = 24;
+const RECENCY_HOURS_MAJOR = 72;
+
+function isWithinRecencyWindow(publishedAt: any, section: string): boolean {
+  if (!publishedAt || typeof publishedAt !== 'string') return true; // permissive on missing
+  const ts = Date.parse(publishedAt);
+  if (isNaN(ts)) return true; // permissive on unparseable
+  const hours = section === 'major_events' ? RECENCY_HOURS_MAJOR : RECENCY_HOURS_DEFAULT;
+  const ageHours = (Date.now() - ts) / (1000 * 60 * 60);
+  return ageHours <= hours;
+}
+
+// ─── Semantic dedup: major_events ↔ world/india ─────────────────────────────
+//
+// gpt-5 sometimes returns the same underlying story in both major_events and
+// world/india with different headlines or sources. Fingerprint dedup catches
+// only exact URL matches; this catches semantic duplicates by comparing
+// significant-word overlap between headlines. Keep in major_events (higher
+// priority), drop from world/india.
+const STOPWORDS = new Set([
+  'a','an','the','of','in','on','at','to','for','and','or','but','with','by',
+  'from','as','is','are','was','were','be','been','being','has','have','had',
+  'do','does','did','will','would','could','should','may','might','must','can',
+  'this','that','these','those','it','its','their','his','her','our','your',
+  'over','under','into','out','up','down','off','about','than','then','also',
+  'new','says','said','set','vs','v','amid','after','before','today','yesterday',
+]);
+
+function significantWords(headline: string): Set<string> {
+  if (!headline || typeof headline !== 'string') return new Set();
+  const tokens = headline
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length >= 3 && !STOPWORDS.has(w));
+  return new Set(tokens);
+}
+
+const SEMANTIC_DEDUP_THRESHOLD = 3;
+
+function semanticOverlap(a: Set<string>, b: Set<string>): number {
+  let n = 0;
+  for (const w of Array.from(a)) if (b.has(w)) n++;
+  return n;
+}
+
+function dropSemanticDuplicatesAgainstMajor(raw: any): { kept: any; droppedCount: number } {
+  const majorSets = (raw.major_events || []).map((s: any) => significantWords(s?.headline || ''));
+  if (majorSets.length === 0) return { kept: raw, droppedCount: 0 };
+
+  let droppedCount = 0;
+  const filterSection = (arr: any[], sectionName: string): any[] => {
+    if (!Array.isArray(arr)) return arr;
+    return arr.filter((story) => {
+      const set = significantWords(story?.headline || '');
+      for (const mset of majorSets) {
+        if (semanticOverlap(set, mset) >= SEMANTIC_DEDUP_THRESHOLD) {
+          console.log(`[semantic-dedup] dropping ${sectionName} story (overlaps major_events): "${(story?.headline || '').slice(0, 80)}"`);
+          droppedCount++;
+          return false;
+        }
+      }
+      return true;
+    });
+  };
+
+  const kept = {
+    ...raw,
+    world: filterSection(raw.world, 'world'),
+    india: filterSection(raw.india, 'india'),
+  };
+  return { kept, droppedCount };
+}
+
 function enforceQualityRules(raw: any): RawStories {
+  // First pass: semantic dedup of world/india against major_events.
+  const { kept: rawAfterSemanticDedup, droppedCount: semanticDropped } =
+    dropSemanticDuplicatesAgainstMajor(raw);
+  if (semanticDropped > 0) {
+    console.log(`[enforce] Semantic dedup dropped ${semanticDropped} world/india stories overlapping major_events.`);
+  }
+  raw = rawAfterSemanticDedup;
+
   const dropped: { section: string; reason: string; headline?: string; url?: string }[] = [];
   const seenFingerprints = new Set<string>();
 
@@ -1062,6 +1186,13 @@ function enforceQualityRules(raw: any): RawStories {
       // Source whitelist check
       if (!isWhitelistedSource(story.source_url)) {
         dropped.push({ section, reason: 'non-whitelisted source', headline: story.headline, url: story.source_url });
+        continue;
+      }
+
+      // Recency check — 24h default, 72h for major_events
+      if (!isWithinRecencyWindow(story.published_at, section)) {
+        console.log(`[recency] dropping ${section} story (older than window): "${(story.headline || '').slice(0, 80)}" published_at=${story.published_at}`);
+        dropped.push({ section, reason: 'outside recency window', headline: story.headline });
         continue;
       }
 
@@ -1092,6 +1223,11 @@ function enforceQualityRules(raw: any): RawStories {
       dropped.push({ section, reason: 'non-whitelisted source', headline: story.headline, url: story.source_url });
       return undefined;
     }
+    if (!isWithinRecencyWindow(story.published_at, section)) {
+      console.warn(`Single-section ${section} dropped (outside recency window): published_at=${story.published_at}`);
+      dropped.push({ section, reason: 'outside recency window', headline: story.headline });
+      return undefined;
+    }
     const fp = fingerprint(story);
     if (seenFingerprints.has(fp)) {
       console.warn(`Single-section ${section} duplicated a higher-priority story; keeping anyway.`);
@@ -1108,22 +1244,17 @@ function enforceQualityRules(raw: any): RawStories {
     business: [],
     technology: [],
     climate_health: [],
-    sport: undefined,
-    culture: undefined,
+    sport: [],
+    culture: [],
     markets: raw?.markets || { summary: '', indices: [] },
     lens: raw?.lens || { world: '', india: '', markets: '', watch: '' },
   };
 
   // Walk priority order so dedup picks the highest-priority section first.
+  // All sections including sport/culture are arrays as of Sprint 9.
   for (const sec of priority) {
-    if (sec === 'sport') {
-      cleaned.sport = processSingle('sport', raw?.sport);
-    } else if (sec === 'culture') {
-      cleaned.culture = processSingle('culture', raw?.culture);
-    } else {
-      const arr = raw?.[sec];
-      (cleaned as any)[sec] = processList(sec, Array.isArray(arr) ? arr : []);
-    }
+    const arr = raw?.[sec];
+    (cleaned as any)[sec] = processList(sec, Array.isArray(arr) ? arr : []);
   }
 
   // Markets indices sanity
@@ -1157,37 +1288,94 @@ function rawStoriesForWriter(raw: RawStories) {
   return storiesOnly;
 }
 
+// ─── Deterministic post-filter subset builder ───────────────────────────────
+//
+// After enforceQualityRules drops non-whitelisted, stale, and semantically-
+// duplicate stories, we still typically have more raw stories than each
+// edition wants. This builder walks raw in priority order and takes the
+// top-N stories overall (cap). Per Sprint 9 spec: 5min cap=15, 10min cap=20.
+// The 5min set is a strict subset of the 10min set by construction.
+//
+// Priority order: major_events → india → world → business → technology →
+// climate_health → sport → culture. Sport and culture are arrays of 2-4
+// stories across different sports/culture types; they're consumed in order.
+function buildSubset(raw: RawStories, cap: number): RawStories {
+  let used = 0;
+  const room = () => Math.max(0, cap - used);
+
+  const take = (arr: RawStory[] | undefined): RawStory[] => {
+    if (!arr || arr.length === 0) return [];
+    const r = room();
+    if (r <= 0) return [];
+    const slice = arr.slice(0, r);
+    used += slice.length;
+    return slice;
+  };
+
+  // Priority order, highest first.
+  const major_events = take(raw.major_events);
+  const india        = take(raw.india);
+  const world        = take(raw.world);
+  const business     = take(raw.business);
+  const technology   = take(raw.technology);
+  const climate      = take(raw.climate_health);
+  const sport        = take(raw.sport);
+  const culture      = take(raw.culture);
+
+  console.log(`[subset:cap=${cap}] picked ${used} stories — ` +
+    `major=${major_events.length}, india=${india.length}, world=${world.length}, ` +
+    `biz=${business.length}, tech=${technology.length}, climate=${climate.length}, ` +
+    `sport=${sport.length}, culture=${culture.length}`);
+
+  return {
+    major_events,
+    india,
+    world,
+    business,
+    technology,
+    climate_health: climate,
+    sport,
+    culture,
+    markets: raw.markets,
+    lens: raw.lens,
+  };
+}
+
 async function writeQuickEdition(raw: RawStories): Promise<BriefQuick> {
   const today = getISTDate();
+
+  // The 5min writer receives a pre-selected subset built by buildQuickSubset.
+  // Its only job is to rewrite each story in MicroStory shape — same set of
+  // stories that appear in the 10min edition, just shorter prose. This
+  // guarantees 5min ⊆ 10min by construction.
   const prompt = `You are writing THE BRIEF — the 5-minute commute edition of Morning Brief, a daily news digest for thoughtful Indian readers (urban, professional, 25-45). Today is ${today}.
 
 VOICE: calm, analytical, newspaper-like — the register of an Economist briefing or an FT lex card. Declarative, sober sentences. Active voice. Plain English. No clickbait, no sensationalism, no conversational fluff ("plus", "also", "by the way"). Explain jargon when used.
 
-FORMAT — each story is a MICRO-ITEM with the following fields. The first three carry the editorial content; the rest are passed through from raw stories unchanged.
+YOUR JOB: rewrite EVERY story from the raw stories below in MICRO-ITEM shape. Do NOT select, drop, or reorder. The selection has already been done; you are a rewriter, not an editor. One raw story in → one micro-item out.
+
+FORMAT — each micro-item has the following fields:
 
 Editorial fields (you write these):
 - headline: clear, factual (≤ 14 words). Lead with the subject (country, company, person, number) — not the verb.
 - what_happened: ONE sentence (≤ 22 words). State the news plainly. Use specific numbers, names, dates where they sharpen the story.
 - why_it_matters: ONE sentence (≤ 22 words) — REQUIRED, never omit. ANCHOR TO INDIA. Acceptable hooks: inflation, the rupee, food prices, RBI policy, EMIs, household budgets, jobs, urban life, India's strategic position, or sector impact on Indian companies/markets. A purely global takeaway is acceptable ONLY if no Indian angle exists; never drop the field. Example to emulate: "Higher oil prices directly affect India's inflation, rupee, and household budgets."
 
-Passthrough fields (copy from raw stories unchanged):
+Passthrough fields (copy from raw stories UNCHANGED):
 - source, source_url, industries, interests, city_tags, topic_tags, must_include
 
-SELECTION — be ruthless. This is the skim edition.
-- major_events: TOP 2 — sustained, multi-day themes with the largest real-world consequence (think monsoon, oil shock, war escalation, election outcome, RBI policy).
-- world:        TOP 3 — distinct stories from different regions. Pick consequence over novelty.
-- india:        TOP 2 — national stories with material impact on policy, business, or daily life.
-- topics:       exactly 5 — the most consequential developments across business, markets, technology, climate, health, sport, culture. Pick stories that connect to inflation, the rupee, jobs, urban India, or sectors that move Indian household economics or daily life. Skip filler.
-
-ORDER WITHIN EACH SECTION: most consequential first. Index 0 is what a newscast would lead with.
-
-NO DUPLICATION ACROSS SECTIONS: a story belongs in ONLY ONE section across the whole brief. If you place it in major_events, do NOT also list it in world or india or topics. Use the most appropriate single section.
+SECTION MAPPING — output sections are derived from raw sections as follows:
+- raw.major_events  → 5min.major_events  (preserve order, 1:1)
+- raw.world         → 5min.world         (preserve order, 1:1)
+- raw.india         → 5min.india         (preserve order, 1:1)
+- raw.business + raw.technology + raw.climate_health + raw.sport + raw.culture → 5min.topics
+  (concatenate IN THAT ORDER. business stories first, then technology, then climate_health, then sport (if present), then culture (if present). Do NOT reorder.)
 
 HARD RULES:
-- USE ONLY THE STORIES PROVIDED IN THE RAW STORIES BELOW. Do not invent, infer, or recall stories from your own knowledge. Every story you output must correspond to a raw story; every source_url must appear VERBATIM in the raw stories. If a section has no usable raw stories, output an empty array — do NOT pad with fabricated entries.
-- ALWAYS include every story flagged must_include: true. If a must_include sits in topics-territory (business/tech/etc.), surface it in topics. Never drop a must_include.
-- Pass through source, source_url, industries, interests, city_tags, topic_tags, must_include UNCHANGED on every story you keep.
-- EVERY field on EVERY story is REQUIRED: headline, what_happened, why_it_matters, source, source_url. Do not omit any of these on any story. Empty arrays ([]) for tag fields are fine; null/missing/undefined values for text fields are NOT acceptable and will cause the brief to fail.
+- 1:1 MAPPING. If raw has 12 stories, output 12 stories. If raw has 15, output 15. Never add, never drop. Stories already passed source-whitelist and selection upstream.
+- Every output story's source_url MUST appear verbatim in the raw stories below — never invent.
+- Pass through source, source_url, industries, interests, city_tags, topic_tags, must_include UNCHANGED on every story.
+- EVERY editorial field (headline, what_happened, why_it_matters) is REQUIRED. Empty arrays ([]) for tag fields are fine; null/missing/undefined values for text fields are NOT acceptable and will cause the brief to fail.
 - Output ONLY JSON. No markdown fences, no commentary, no preamble. Start the response with { and end with }.
 
 OUTPUT SHAPE:
@@ -1195,9 +1383,9 @@ OUTPUT SHAPE:
   "edition": "5min",
   "date": "${today}",
   "major_events": [{ "headline": "...", "what_happened": "...", "why_it_matters": "...", "source": "...", "source_url": "...", "industries": [], "interests": [], "city_tags": [], "topic_tags": [], "must_include": false }],
-  "world":   [ /* 3 */ ],
-  "india":   [ /* 2 */ ],
-  "topics":  [ /* 5 */ ]
+  "world":   [ /* 1:1 from raw.world */ ],
+  "india":   [ /* 1:1 from raw.india */ ],
+  "topics":  [ /* business → technology → climate_health → sport → culture, concatenated */ ]
 }
 
 Raw stories:
@@ -1220,7 +1408,7 @@ FORMAT — each story has FIVE labelled fields:
 - what_happens_next: 1-2 sentences. The SPECIFIC developments to track this week (named hearings, policy decisions, data releases, fixtures). Avoid "stay tuned" generalities.
 - analysis: 1-2 sentences. Concise interpretation, clearly marked as opinion. Acknowledge uncertainty where appropriate. Make a point rather than restating facts.
 
-SELECTION: Include EVERY story from the raw stories. Do not drop anything. Maintain the ordering from the raw stories within each section (raw is already impact-ordered). If raw stories has no "sport" or "culture" key (or the value is empty/missing), OMIT that field from your output entirely — do NOT fabricate a story.
+SELECTION: Include EVERY story from the raw stories. Do not drop anything. Maintain the ordering from the raw stories within each section (raw is already impact-ordered). If raw stories has empty "sport" or "culture" arrays, output empty arrays for those keys — do NOT fabricate stories to fill them.
 
 NO DUPLICATION ACROSS SECTIONS: a story belongs in ONLY ONE section. If raw stories has duplicate-feeling entries across sections, pick the section that fits best and skip the others.
 
@@ -1247,8 +1435,8 @@ OUTPUT SHAPE:
   "markets":        { "summary": "rewritten 2-sentence India-anchored summary", "indices": [ /* unchanged */ ] },
   "technology":     [ /* same shape */ ],
   "climate_health": [ /* same shape */ ],
-  "sport":   { /* single story, same shape */ },
-  "culture": { /* single story, same shape */ },
+  "sport":   [ /* array of 2-4 stories across different sports, same shape */ ],
+  "culture": [ /* array of 2-4 stories across different culture types, same shape */ ],
   "closer": {
     "headlines_to_remember": ["...", "...", "...", "...", "..."],
     "things_to_watch": ["...", "...", "..."],
@@ -1426,21 +1614,9 @@ function stripNonWhitelistedFromContent(
     content.business = filterArr(content.business, 'business');
     content.technology = filterArr(content.technology, 'technology');
     content.climate_health = filterArr(content.climate_health, 'climate_health');
-    // sport/culture are single-story optional fields — delete if non-whitelisted.
-    if (content.sport && !isWhitelistedSource(content.sport?.source_url)) {
-      dropped++;
-      console.warn(
-        `[${edition}] Post-write strip — dropping sport: "${content.sport?.headline}" | url: ${content.sport?.source_url}`,
-      );
-      delete content.sport;
-    }
-    if (content.culture && !isWhitelistedSource(content.culture?.source_url)) {
-      dropped++;
-      console.warn(
-        `[${edition}] Post-write strip — dropping culture: "${content.culture?.headline}" | url: ${content.culture?.source_url}`,
-      );
-      delete content.culture;
-    }
+    // sport/culture are arrays as of Sprint 9 — filter same as other sections.
+    content.sport = filterArr(content.sport, 'sport');
+    content.culture = filterArr(content.culture, 'culture');
   }
   // 'deep' has no story-level source_urls — three_patterns/long_read are pure
   // synthesis. Nothing to strip here.
@@ -1450,24 +1626,25 @@ function stripNonWhitelistedFromContent(
 
 // ─── Fallback fetch ─────────────────────────────────────────────────────────
 
-async function fetchPreviousBrief(edition: Edition): Promise<{ content: BriefContent; lens: any } | null> {
-  for (let daysAgo = 1; daysAgo <= 2; daysAgo++) {
-    const date = getISTDate(-daysAgo);
-    const { data, error } = await supabase
-      .from('briefs')
-      .select('content, status')
-      .eq('date', date)
-      .eq('edition', edition)
-      .in('status', ['ready', 'fallback'])
-      .maybeSingle();
+async function fetchPreviousBrief(edition: Edition): Promise<{ content: BriefContent; lens: any; status: string } | null> {
+  // Only look back ONE day. If yesterday's brief is itself a fallback, we
+  // refuse to use it — we want fresh content or none at all. The runWriter
+  // caller checks status === 'ready' before using.
+  const date = getISTDate(-1);
+  const { data, error } = await supabase
+    .from('briefs')
+    .select('content, status')
+    .eq('date', date)
+    .eq('edition', edition)
+    .in('status', ['ready', 'fallback'])
+    .maybeSingle();
 
-    if (!error && data?.content) {
-      console.log(`Fallback: using ${edition} brief from ${date} (status ${data.status})`);
-      const content = data.content as any;
-      // Lens lives inside content JSONB since Sprint 8.
-      const lens = content?.lens ?? null;
-      return { content: content as BriefContent, lens };
-    }
+  if (!error && data?.content) {
+    console.log(`Previous-day ${edition} brief from ${date} found (status=${data.status}).`);
+    const content = data.content as any;
+    // Lens lives inside content JSONB since Sprint 8.
+    const lens = content?.lens ?? null;
+    return { content: content as BriefContent, lens, status: data.status };
   }
   return null;
 }
@@ -1569,6 +1746,14 @@ async function runWriterForEdition(
   : ed === '10min' ? writeDailyEdition
   :                  writeEditorialEdition;
 
+  // Per Sprint 9 spec: 5min capped at 15 stories, 10min capped at 20. Both
+  // are deterministic subsets of the raw pool, computed in code (not LLM) so
+  // 5min ⊆ 10min by construction. Deep gets the full raw pool unchanged.
+  const writerInput =
+    ed === '5min'  ? buildSubset(rawStories, 15)
+  : ed === '10min' ? buildSubset(rawStories, 20)
+  :                  rawStories;
+
   // Two attempts. gpt-4o-mini occasionally returns non-JSON or drops required
   // fields; one retry catches most of these. We only fall back to yesterday's
   // brief if BOTH attempts fail.
@@ -1576,7 +1761,7 @@ async function runWriterForEdition(
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       console.log(`Writing ${ed}${attempt === 2 ? ' (retry)' : ''}...`);
-      const content = await writer(rawStories);
+      const content = await writer(writerInput);
       const validation = validateBrief(content, ed);
       if (validation.ok) {
         // Post-write source-URL guard: drop any story whose source_url isn't
@@ -1585,6 +1770,8 @@ async function runWriterForEdition(
         if (dropped > 0) {
           console.log(`[${ed}] Post-write strip removed ${dropped} non-whitelisted stories.`);
         }
+        // Save the FULL rawStories (not the subset) into the brief row so
+        // downstream consumers see the same raw for every edition.
         await saveBriefToSupabase(ed, rawStories, stripped, lens, 'ready');
         return { status: 'ready', content: stripped };
       }
@@ -1598,12 +1785,19 @@ async function runWriterForEdition(
     }
   }
 
-  // Both attempts failed — fall back to yesterday's brief, or mark failed.
+  // Both attempts failed — fall back to yesterday's brief, but only if
+  // yesterday's brief is itself fresh (status='ready'). If yesterday was
+  // already a fallback, we'd be inheriting stale content from days ago — stop
+  // the chain and mark today 'failed' so the UI shows "no fresh brief today"
+  // instead of week-old stories.
   console.error(`[${ed}] Both attempts failed. Last error: ${lastError}`);
   const prev = await fetchPreviousBrief(ed);
-  if (prev) {
+  if (prev && prev.status === 'ready') {
     await saveBriefToSupabase(ed, rawStories, prev.content, prev.lens, 'fallback');
     return { status: 'fallback', reason: lastError, content: prev.content };
+  }
+  if (prev && prev.status !== 'ready') {
+    console.warn(`[${ed}] Previous brief was status=${prev.status}, not 'ready'. Refusing to chain-fallback; marking today as failed.`);
   }
   await saveBriefToSupabase(ed, rawStories, null, lens, 'failed');
   return { status: 'failed', reason: lastError };
@@ -1668,8 +1862,8 @@ async function modeFetch() {
       business:      rawStories.business.length,
       technology:    rawStories.technology.length,
       climate_health: rawStories.climate_health.length,
-      sport:         rawStories.sport   ? 1 : 0,
-      culture:       rawStories.culture ? 1 : 0,
+      sport:         rawStories.sport.length,
+      culture:       rawStories.culture.length,
       markets_indices: rawStories.markets.indices.length,
     },
     next: "POST { mode: 'write', edition: '5min' | '10min' | 'deep' } in parallel for each edition.",
@@ -1700,13 +1894,13 @@ async function modeWrite(edition: Edition) {
   if (!raw) {
     console.warn(`modeWrite: no raw_stories for ${edition} on ${today}. Did fetch run?`);
     const prev = await fetchPreviousBrief(edition);
-    if (prev) {
+    if (prev && prev.status === 'ready') {
       await saveBriefToSupabase(edition, null, prev.content, prev.lens, 'fallback');
       return {
         ok: true as const,
         edition,
         status: 'fallback' as const,
-        reason: 'No raw_stories for today; restored previous brief. Run mode=fetch first to get fresh news.',
+        reason: 'No raw_stories for today; restored previous ready brief. Run mode=fetch first to get fresh news.',
       };
     }
     await saveBriefToSupabase(edition, null, null, null, 'failed');
@@ -1803,12 +1997,12 @@ async function modeFull(skipPush: boolean | undefined) {
       let r: EditionOutcome;
       if (!raw) {
         const prev = await fetchPreviousBrief(ed);
-        if (prev) {
+        if (prev && prev.status === 'ready') {
           await saveBriefToSupabase(ed, null, prev.content, prev.lens, 'fallback');
           r = { status: 'fallback', reason: 'OpenAI fetch failed', content: prev.content };
         } else {
           await saveBriefToSupabase(ed, null, null, lens, 'failed');
-          r = { status: 'failed', reason: 'OpenAI fetch failed and no previous brief' };
+          r = { status: 'failed', reason: 'OpenAI fetch failed and no previous ready brief' };
         }
       } else {
         r = await runWriterForEdition(ed, raw, lens);
