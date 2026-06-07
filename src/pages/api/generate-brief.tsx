@@ -811,19 +811,55 @@ Your job: search the web aggressively for today's most consequential news and re
 RECENCY — STRICT 24-HOUR RULE
 ═══════════════════════════════════════════════
 
-Every story must represent a development WITHIN THE LAST 24 HOURS.
+Every story must represent a development WITHIN THE LAST 24 HOURS. This applies to EVERY section including major_events.
 
 This is about NARRATIVE freshness, not just publish date. Specifically:
+
 - For a one-off event (election result, court ruling, earnings report): the event itself must have happened in the last 24 hours, AND the article must be published in the last 24 hours.
+
 - For a sustained narrative (war, IPL season, RBI policy cycle): there MUST be a FRESH development today (new strike, today's match, follow-up policy move, retirement, welcome ceremony, controversy, post-match analysis published today). If only the underlying event from days ago exists with no fresh angle in the last 24h, OMIT the story — do NOT report stale news.
 
-Concrete examples:
-- IPL final was 2 days ago, no follow-up news today → OMIT. Do NOT report "Team X won IPL".
-- IPL final was 2 days ago, but today's news has the winning team's welcome ceremony → INCLUDE that follow-up.
-- A war story from 3 days ago with no new development today → OMIT.
-- The same war story with a new strike, casualty figure, or diplomatic move today → INCLUDE the today's development.
+═══════════════════════════════════════════════
+HEADLINE SHAPE — DESCRIBE TODAY'S DEVELOPMENT
+═══════════════════════════════════════════════
 
-If you cannot find a story with a 24-hour development for a section, return fewer stories or leave it empty. Reasoning: if a story is big enough to matter, there is always a 24-hour development. If no one wrote about it today, it is not big enough for this brief.
+When a sustained narrative does have a fresh 24h development, the HEADLINE must describe today's development — NOT the underlying narrative.
+
+The underlying narrative is context. The development is the news. Get this wrong and the brief reads like yesterday's paper.
+
+GOOD vs BAD examples:
+- ✅ "RCB victory parade draws lakhs to Bengaluru streets" (Day +2: parade is the fresh development)
+- ❌ "RCB wins maiden IPL title" (Day +2: this is old news pretending to be today's)
+- ✅ "US strikes Iranian drone facility in Bandar Abbas overnight" (fresh military action)
+- ✅ "Tehran signals openness to back-channel talks via Oman" (fresh diplomatic move)
+- ❌ "Iran-US tensions continue" (no actual development — status, not news)
+- ❌ "Russia-Ukraine war enters fourth year" (no fresh development — anniversary framing)
+- ✅ "Ukraine signs new $50bn EU defence pact" (fresh policy move in ongoing war)
+- ✅ "RBI holds repo rate at 6.5%, signals neutral stance" (fresh policy decision)
+- ❌ "RBI continues to fight inflation" (no event today)
+
+═══════════════════════════════════════════════
+ONE-SHOT EVENTS — NATURAL DECAY
+═══════════════════════════════════════════════
+
+Events that climax and end (finals, summits, launches, weddings, funerals, product unveilings) get major_events real estate ONLY while they're producing genuinely new developments.
+
+- Day of event → include (the event itself is the development).
+- Day +1 → include only if there's real follow-on news (a parade, a controversy, a policy consequence, an analytical reframing by a credible outlet). Not "people are still talking about it."
+- Day +2 onwards → drop, unless a substantial new chapter has opened (e.g. a player's retirement announcement triggered by the win, a summit-driven sanctions package signed, a launch revealing a fatal flaw).
+
+A story that was huge yesterday but generated no real follow-on today does NOT belong in today's brief. Empty section beats stale story.
+
+═══════════════════════════════════════════════
+DEAD-NEWS TEST (apply to every story before including it)
+═══════════════════════════════════════════════
+
+Ask: "If a reader saw this brief but already read yesterday's news, would the headline tell them something new?"
+
+If yes → include.
+If no → omit, even if the underlying story is important. Importance ≠ recency.
+
+If you cannot find a section's quota of stories that pass this test, return fewer stories. Better to under-fill a section than pad with stale narrative.
 
 ═══════════════════════════════════════════════
 SECTIONS TO COLLECT — OVER-FETCH
@@ -831,7 +867,7 @@ SECTIONS TO COLLECT — OVER-FETCH
 
 OVER-FETCHING IS REQUIRED. After your output, downstream filters drop stories that fail the source whitelist, recency check, or semantic-dedup against major_events. The final brief targets 20 surviving stories. Aim for the upper bound of every range below.
 
-- major_events: 4-5 stories. SUSTAINED, multi-day themes shaping the week — ongoing wars, IPL playoffs/finals, election cycles, major policy rollouts (RBI policy, budget, big regulatory moves), multi-day disasters. Each entry MUST have a fresh 24-hour development (today's strike, today's match, today's policy step). Do NOT list a theme without a today-development.
+- major_events: 4-5 stories. SUSTAINED, multi-day themes shaping the week — ongoing wars, IPL playoffs/finals (only while still producing genuine follow-on news), election cycles, major policy rollouts (RBI policy, budget, big regulatory moves), multi-day disasters. Each entry MUST have a fresh 24-hour development AND the headline must describe that development (e.g. "Tehran signals openness to back-channel talks" — NOT "Iran-US tensions continue"). Apply the dead-news test. A theme without a today-development does NOT belong here. Empty beats stale.
 
 - world: 7-8 stories. 24-hour global news from OUTSIDE India. Spread across regions — avoid all 7 from one country unless it's a genuinely dominant news day there. Cover: US politics, major elections abroad, big government decisions, international relations, cross-border business moves, climate/disaster events, major court rulings, big tech moves abroad.
 
@@ -845,7 +881,7 @@ OVER-FETCHING IS REQUIRED. After your output, downstream filters drop stories th
 
 - sport: 3-4 stories ACROSS DIFFERENT SPORTS. Cricket, football, tennis, F1, badminton, hockey, kabaddi, Olympics, athletics, golf, esports — pick the day's biggest from as many different sports as the day's news supports. Do NOT submit 4 cricket stories; if cricket has the biggest story, include ONE cricket story and fill the rest from other sports.
 
-- culture: 3-4 stories ACROSS DIFFERENT CULTURE TYPES. Films, OTT, music, books, theatre, visual arts, awards. Like sport — don't submit 4 film stories; aim for breadth across culture types where the day's news supports it.
+- culture: 3-4 stories ACROSS DIFFERENT CULTURE TYPES. Films, OTT, music, books, theatre, visual arts, awards — AND viral trends or internet phenomena WHEN they've crossed into mainstream coverage (covered by The Hindu, Mint, India Today, Indian Express, The Print, Reuters, BBC etc., not just social media) and have a fresh 24h development. The headline must describe today's development (a deal, a controversy, a milestone, a brand collaboration), not the underlying trend's existence — e.g. "Vada Pav Girl signs Netflix reality TV deal" NOT "Vada Pav Girl is famous." Like sport, aim for breadth across culture types where the day's news supports it. Most days the slot will be film/OTT/music/books; viral moments qualify only when genuinely dominant.
 
 - markets: ONE object with summary + indices. Find today's closing values for Sensex, Nifty 50, Dow Jones, Nasdaq Composite. Write a 2-3 sentence India-anchored summary of today's market action.
 
@@ -887,7 +923,7 @@ HARD RULES
    b) An Indian business story belongs in india (not business) if it has national-policy or macro significance. Pure corporate news (earnings, M&A) belongs in business.
    c) If a story could fit two sections, pick ONE — the higher-priority section by this order: major_events > india > world > business > technology > climate_health > sport > culture.
    d) Run a self-check before returning: read every world and india headline, ask "is this an update on a story I already listed in major_events?" If yes, remove it from world/india and fold its key fact into the major_events story body.
-5. SPORT AND CULTURE: each is a SINGLE story object with all fields populated (headline, body, source, source_url, published_at, must_include). NEVER undefined fields. If no real whitelisted story is available, omit the key entirely from the JSON.
+5. SPORT AND CULTURE: each is an ARRAY of 3-4 story objects with all fields populated (headline, body, source, source_url, published_at, must_include). NEVER undefined fields. If fewer real whitelisted stories are available, return a shorter array. If none are available, return an empty array — do NOT omit the key.
 6. MARKETS INDICES: must be an ARRAY of objects shaped like: [{"name":"Sensex","value":"74243","change":"-0.16%"}, {"name":"Nifty 50","value":"23366","change":"-0.21%"}, {"name":"Dow Jones","value":"...","change":"..."}, {"name":"Nasdaq","value":"...","change":"..."}]. Never a single object, never a string. Use today's actual closing values.
 7. JSON ONLY: output a single JSON object. No markdown, no preamble, no explanation. Start with { and end with }.
 
@@ -902,8 +938,8 @@ OUTPUT SHAPE
   "business":     [ ${storyShape(today)}, ... ],
   "technology":   [ ${storyShape(today)}, ... ],
   "climate_health": [ ${storyShape(today)}, ... ],
-  "sport":   ${storyShape(today)},
-  "culture": ${storyShape(today)},
+  "sport":   [ ${storyShape(today)}, ... ],
+  "culture": [ ${storyShape(today)}, ... ],
   "markets": {
     "summary": "2-3 sentence India-anchored summary of today's market action",
     "indices": [
@@ -928,10 +964,12 @@ async function fetchNewsFromOpenAI(universe: Universe): Promise<RawStories> {
   const today = getISTDate();
 
   // Single big call to gpt-5 with reasoning + web_search.
-  // 'low' effort validated to run in ~175s with 19 searches and quality
-  // ~60/70 on our internal rubric. If quality degrades, bump to 'medium'.
+  // 'medium' effort: 'low' was returning only ~8 searches against a 15-20
+  // search instruction, producing near-empty section arrays. 'medium' pushes
+  // the model to actually do the over-fetch the prompt requires. Latency
+  // rises from ~65s to ~120-180s, still well under Vercel's 300s cap.
   const prompt = buildGpt5FetchPrompt(today, universe);
-  const text = await callGpt5Reasoning(prompt, 'low');
+  const text = await callGpt5Reasoning(prompt, 'medium');
 
   // Parse the JSON. extractJsonObject handles markdown fences + extra prose
   // around the JSON if the model misbehaves.
@@ -946,7 +984,7 @@ async function fetchNewsFromOpenAI(universe: Universe): Promise<RawStories> {
   console.log(`[fetch] gpt-5 raw section counts: ` +
     `major=${parsed.major_events?.length || 0}, world=${parsed.world?.length || 0}, india=${parsed.india?.length || 0}, ` +
     `biz=${parsed.business?.length || 0}, tech=${parsed.technology?.length || 0}, climate=${parsed.climate_health?.length || 0}, ` +
-    `sport=${parsed.sport ? 1 : 0}, culture=${parsed.culture ? 1 : 0}, indices=${parsed.markets?.indices?.length || 0}`);
+    `sport=${parsed.sport?.length || 0}, culture=${parsed.culture?.length || 0}, indices=${parsed.markets?.indices?.length || 0}`);
 
   // Run through the existing dedup + whitelist enforcement pipeline.
   // (This catches any non-whitelisted URLs gpt-5 may have slipped through.)
@@ -1088,7 +1126,16 @@ const RECENCY_HOURS_MAJOR = 72;
 
 function isWithinRecencyWindow(publishedAt: any, section: string): boolean {
   if (!publishedAt || typeof publishedAt !== 'string') return true; // permissive on missing
-  const ts = Date.parse(publishedAt);
+  // Date-only strings (YYYY-MM-DD) must be parsed as end-of-day IST, not
+  // midnight UTC. Without this, "2026-06-06" parses as 5:30 AM IST on 6 June,
+  // which at any IST morning cron run (e.g. 6:38 AM on 7 June) lands ~25h
+  // old and gets dropped from the 24h-window sections — killing every story
+  // gpt-5 dates as "yesterday" even if the event was actually 8 PM yesterday.
+  let normalized = publishedAt.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    normalized = `${normalized}T23:59:59+05:30`;
+  }
+  const ts = Date.parse(normalized);
   if (isNaN(ts)) return true; // permissive on unparseable
   const hours = section === 'major_events' ? RECENCY_HOURS_MAJOR : RECENCY_HOURS_DEFAULT;
   const ageHours = (Date.now() - ts) / (1000 * 60 * 60);
