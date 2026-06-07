@@ -1598,6 +1598,41 @@ async function callOpenAIChat(
   return extractJsonObject(text);
 }
 
+// ─── Pre-validation repair ──────────────────────────────────────────────────
+//
+// gpt-4o-mini occasionally drops the `markets` object on the 10min edition
+// when the story payload is large (~20+ stories). The writer is forbidden
+// from modifying market indices anyway (must carry from raw verbatim), so
+// re-attaching from raw when the writer omits it is safe and zero-risk.
+// Without this, the brief fails validation and the whole 10min edition is
+// lost, cascading to all personalised 10min editions being skipped.
+
+function repairCommonOmissions(content: any, edition: Edition, raw: RawStories): any {
+  if (!content || typeof content !== 'object') return content;
+
+  // 10min: re-attach markets if dropped or malformed.
+  if (edition === '10min') {
+    const hasMarkets =
+      content.markets &&
+      typeof content.markets === 'object' &&
+      typeof content.markets.summary === 'string' &&
+      Array.isArray(content.markets.indices);
+    if (!hasMarkets) {
+      console.warn('[10min] Writer dropped/malformed markets — re-attaching from raw.');
+      content.markets = {
+        summary: content.markets?.summary || raw.markets?.summary || 'Markets summary unavailable today.',
+        indices: raw.markets?.indices || [],
+      };
+    } else {
+      // Writer kept the object but may have mutated indices. Force indices
+      // back to raw (prompt requires this anyway) to prevent drift.
+      content.markets.indices = raw.markets?.indices || content.markets.indices;
+    }
+  }
+
+  return content;
+}
+
 // ─── Validation ─────────────────────────────────────────────────────────────
 
 function validateBrief(content: any, edition: Edition):
@@ -1809,7 +1844,8 @@ async function runWriterForEdition(
     try {
       console.log(`Writing ${ed}${attempt === 2 ? ' (retry)' : ''}...`);
       const content = await writer(writerInput);
-      const validation = validateBrief(content, ed);
+      const repaired = repairCommonOmissions(content, ed, writerInput);
+      const validation = validateBrief(repaired, ed);
       if (validation.ok) {
         // Post-write source-URL guard: drop any story whose source_url isn't
         // from a Tier-1 whitelisted publisher (catches writer hallucinations).
