@@ -634,6 +634,7 @@ async function fetchSingleSection(
 
 Your job: produce the single "${section}" story for today. Use the web_search_preview tool — run multiple searches if needed.
 
+
 ${guidance}
 
 ${sourceWhitelistBlock()}
