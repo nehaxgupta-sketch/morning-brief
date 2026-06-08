@@ -753,7 +753,7 @@ async function callGpt5Reasoning(
 // Each phase enforces ≤3 stories per publisher within its scope. Across the
 // full brief that theoretically allows up to 6 per publisher, but per-section
 // caps keep it well under that in practice.
-function buildGpt5FetchPrompt(today: string, universe: Universe, phase: 'universal' | 'topical-a' | 'topical-b' = 'universal'): string {
+function buildGpt5FetchPrompt(today: string, universe: Universe, phase: 'universal' | 'topical' = 'universal'): string {
   const sharedHeader = `You are the fetcher for Morning Brief, India's daily news digest for thoughtful urban professionals (25-45, urban, English-reading). Today is ${today} (IST).
 
 Your job: search the web aggressively for today's most consequential news and return ONE JSON object. Use the web_search tool. Perform AT LEAST 10-12 distinct searches across the sections you've been assigned.
@@ -855,31 +855,37 @@ OUTPUT SHAPE
 Begin now. Search aggressively. Return ONLY the JSON object.`;
   }
 
-  // Sprint 12: TWO topical phases run in parallel, splitting the work to
-  // give gpt-5 a smaller search budget per call. Sprint 11 with a single
-  // topical phase across 6 sections produced under-fetched output (typical
-  // 7 stories vs target 16). Splitting business+tech+climate (A) from
-  // sport+culture+markets (B) lets each phase iterate searches more
-  // aggressively for fewer sections.
+  // Sprint 12.1 (post-mortem fix): reverted to unified topical phase after
+  // Vercel logs showed 429 rate-limiting when 3 parallel gpt-5 calls hit
+  // OpenAI's per-org concurrency cap. Single topical call avoids that
+  // entirely. Combined with sequential execution + reasoning_effort='medium'
+  // in fetchNewsFromOpenAI, this restores Sprint 11.5's working baseline
+  // and adds quality headroom from the higher reasoning effort.
 
-  if (phase === 'topical-a') {
-    return `${sharedHeader}
+  // phase === 'topical'
+  return `${sharedHeader}
 
 ═══════════════════════════════════════════════
-SECTIONS — TOPICAL PHASE A (business + technology + climate_health)
+SECTIONS — TOPICAL PHASE (business + technology + climate_health + sport + culture + markets)
 ═══════════════════════════════════════════════
 
-You are responsible for THREE sections: business, technology, climate_health. Other fetchers handle universal (major/world/india/lens) AND topical-B (sport, culture, markets) in parallel — do NOT include those.
+You are responsible for SIX sections (business, technology, climate_health, sport, culture, markets). Another fetcher handles major_events, world, india and the lens in parallel — do NOT include those.
 
 OVER-FETCHING IS REQUIRED. Downstream filters will drop stories that fail the whitelist or recency check. Aim for the upper bound below.
 
-EMPTY ARRAYS ARE A LAST RESORT. Business, technology, and climate/health news happen every single day globally. Returning an empty array signals that your search did not find the right angle — not that nothing happened. Before returning empty for any section, run AT LEAST 2 distinct searches for that section with different keywords.
+EMPTY ARRAYS ARE A LAST RESORT. Business, technology, climate/health, sport, and culture news happen every single day globally. Returning an empty array signals that your search did not find the right angle — not that nothing happened. Before returning empty for any section, run AT LEAST 2 distinct searches for that section with different keywords. Examples: for sport, try "cricket news today", "IPL today", "tennis today", "football news today" — not just one generic "sport news" query.
 
-- business: 5-6 stories. Corporate news, earnings, M&A, regulatory actions, major financial moves. Indian AND global. Skip pure markets summaries (markets is owned by phase B).
+- business: 5-6 stories. Corporate news, earnings, M&A, regulatory actions, major financial moves. Indian AND global. Skip pure markets summaries (markets is a separate section in this same response).
 
 - technology: 4-5 stories. Significant product launches, major AI developments, big-tech regulation, cybersecurity events. Skip rumour/speculation. RECENCY: 24h preferred, 48h acceptable if no fresh 24h development exists today.
 
 - climate_health: 4-5 stories. Climate disasters, environmental policy, major health stories (outbreaks, drug approvals, research with real implications). Concrete real-world impact.
+
+- sport: 4-5 stories ACROSS DIFFERENT SPORTS. Cricket, football, tennis, F1, badminton, hockey, kabaddi, Olympics, athletics, golf, esports — pick the day's biggest from as many different sports as the day's news supports. Do NOT submit 4 cricket stories; aim for breadth. RECENCY: 24h preferred, 48h acceptable. Mid-week and off-season days often only have 24-48h-old developments — INCLUDE them rather than returning empty. Sport happens globally every single day; an empty sport array means the search failed, not that nothing happened.
+
+- culture: 4-5 stories ACROSS DIFFERENT CULTURE TYPES. Films, OTT, music, books, theatre, visual arts, awards. Don't submit 4 film stories; aim for breadth. RECENCY: 24h preferred, 48h acceptable. Culture announcements aren't always daily — a 36h-old film release or award is fine if it's still the freshest available. Empty culture array signals search failure, not a quiet day.
+
+- markets: ONE object with summary + indices. Find the MOST RECENT closing values for Sensex, Nifty 50, Dow Jones, Nasdaq Composite. IMPORTANT: This brief runs at ~6:38 AM IST. At that hour, Indian markets have NOT opened yet (they open 9:15 AM IST and close 3:30 PM IST) — so use YESTERDAY's close for Sensex and Nifty. US markets close around 1:30 AM IST — use the most recent US session close (which is the night just past). NEVER return empty indices because "today's close doesn't exist yet"; use the most recent available session close in every case. Write a 2-3 sentence India-anchored summary covering yesterday's Indian session and the overnight US session.
 
 ${sharedFooterRules}
 
@@ -887,12 +893,14 @@ ${sharedFooterRules}
 HARD RULES
 ═══════════════════════════════════════════════
 
-1. WHITELIST: every source_url MUST be from a whitelisted publisher.
-2. NO FABRICATION: never invent. If a section quota can't be filled, return fewer.
-3. SEARCH DEPTH: at least 8 distinct searches across the three sections.
+1. WHITELIST: every source_url MUST be from a whitelisted publisher. OMIT stories you can't source.
+2. NO FABRICATION: never invent. If a section quota can't be filled from whitelisted sources, return fewer (but never zero unless truly nothing exists).
+3. SEARCH DEPTH: at least 12 distinct searches across the six sections — 2 minimum per section.
 4. PUBLISHER DIVERSITY: NO publisher may contribute more than 3 stories within this fetch.
-5. DEDUP: each story in ONE section only (business > technology > climate_health).
-6. JSON ONLY: output ONE JSON object. No markdown, no preamble.
+5. DEDUP: each story in ONE section only (business > technology > climate_health > sport > culture).
+6. SPORT AND CULTURE ARE ARRAYS of 3-5 story objects.
+7. MARKETS INDICES: ARRAY of objects shaped [{"name":"Sensex","value":"74243","change":"-0.16%"}, ...]. Never a single object or string.
+8. JSON ONLY: output ONE JSON object. No markdown, no preamble. Start with { and end with }.
 
 ═══════════════════════════════════════════════
 OUTPUT SHAPE
@@ -901,52 +909,9 @@ OUTPUT SHAPE
 {
   "business":       [ ${storyShape(today)}, ... ],
   "technology":     [ ${storyShape(today)}, ... ],
-  "climate_health": [ ${storyShape(today)}, ... ]
-}
-
-Begin now. Search aggressively. Return ONLY the JSON object.`;
-  }
-
-  // phase === 'topical-b'
-  return `${sharedHeader}
-
-═══════════════════════════════════════════════
-SECTIONS — TOPICAL PHASE B (sport + culture + markets)
-═══════════════════════════════════════════════
-
-You are responsible for THREE sections: sport, culture, markets. Other fetchers handle universal (major/world/india/lens) AND topical-A (business, technology, climate_health) in parallel — do NOT include those.
-
-OVER-FETCHING IS REQUIRED. Downstream filters will drop stories that fail the whitelist or recency check.
-
-EMPTY ARRAYS ARE A LAST RESORT for sport and culture. These categories produce news every single day globally. Returning an empty array signals that your search did not find the right angle — not that nothing happened. Before returning empty, run AT LEAST 2 distinct searches with different keywords. Examples: for sport, try "cricket news today", "IPL today", "tennis today", "football news today" — not just one generic "sport news" query.
-
-- sport: 4-5 stories ACROSS DIFFERENT SPORTS. Cricket, football, tennis, F1, badminton, hockey, kabaddi, Olympics, athletics, golf, esports — pick the day's biggest from as many different sports as the day's news supports. Do NOT submit 4 cricket stories; aim for breadth. RECENCY: 24h preferred, 48h acceptable. Mid-week and off-season days often only have 24-48h-old developments — INCLUDE them rather than returning empty.
-
-- culture: 4-5 stories ACROSS DIFFERENT CULTURE TYPES. Films, OTT, music, books, theatre, visual arts, awards. Don't submit 4 film stories; aim for breadth. RECENCY: 24h preferred, 48h acceptable. A 36h-old film release or award is fine if it's still the freshest available.
-
-- markets: ONE object with summary + indices. Find the MOST RECENT closing values for Sensex, Nifty 50, Dow Jones, Nasdaq Composite. IMPORTANT: This brief runs at ~6:38 AM IST. At that hour, Indian markets have NOT opened yet (they open 9:15 AM IST and close 3:30 PM IST) — so use YESTERDAY's close for Sensex and Nifty. US markets close around 1:30 AM IST — use the most recent US session close. NEVER return empty indices because "today's close doesn't exist yet"; use the most recent available session close in every case. Write a 2-3 sentence India-anchored summary covering yesterday's Indian session and the overnight US session.
-
-${sharedFooterRules}
-
-═══════════════════════════════════════════════
-HARD RULES
-═══════════════════════════════════════════════
-
-1. WHITELIST: every source_url MUST be from a whitelisted publisher.
-2. NO FABRICATION: never invent.
-3. SEARCH DEPTH: at least 6 distinct searches across the three sections.
-4. PUBLISHER DIVERSITY: NO publisher may contribute more than 3 stories within this fetch.
-5. SPORT AND CULTURE ARE ARRAYS of 3-5 story objects. Never fabricate to pad.
-6. MARKETS INDICES: ARRAY of objects shaped [{"name":"Sensex","value":"74243","change":"-0.16%"}, ...]. Never a single object or string.
-7. JSON ONLY: output ONE JSON object. No markdown, no preamble.
-
-═══════════════════════════════════════════════
-OUTPUT SHAPE
-═══════════════════════════════════════════════
-
-{
-  "sport":   [ ${storyShape(today)}, ... ],
-  "culture": [ ${storyShape(today)}, ... ],
+  "climate_health": [ ${storyShape(today)}, ... ],
+  "sport":          [ ${storyShape(today)}, ... ],
+  "culture":        [ ${storyShape(today)}, ... ],
   "markets": {
     "summary": "2-3 sentence India-anchored summary of yesterday's session + overnight US",
     "indices": [
@@ -964,36 +929,47 @@ Begin now. Search aggressively. Return ONLY the JSON object.`;
 async function fetchNewsFromOpenAI(universe: Universe): Promise<RawStories> {
   const today = getISTDate();
 
-  // Sprint 12: THREE parallel gpt-5 calls. Wall-clock = max(phase1, phase2,
-  // phase3) ≈ 100-130s on 'low' effort. Splitting topical into A/B halved
-  // each call's search budget but increased total stories fetched from ~13
-  // to ~25-30 in early testing.
-  console.log('[fetch] Starting three-phase parallel gpt-5 fetch (Sprint 12)...');
-  const universalPrompt  = buildGpt5FetchPrompt(today, universe, 'universal');
-  const topicalAPrompt   = buildGpt5FetchPrompt(today, universe, 'topical-a');
-  const topicalBPrompt   = buildGpt5FetchPrompt(today, universe, 'topical-b');
+  // Sprint 12.1 (post-mortem fix):
+  //   - SEQUENTIAL execution (not parallel). Vercel logs showed 429 rate-
+  //     limiting when 3 parallel gpt-5 calls hit OpenAI's per-org concurrent
+  //     request cap. Sequential = zero contention with self.
+  //   - TWO phases (universal + topical), not three. Splitting topical into
+  //     A/B was unnecessary once the actual problem (concurrency) was found.
+  //   - reasoning_effort BUMPED from 'low' to 'medium'. Recurring Sprint 11
+  //     lesson: 'low' undershoots; 'medium' is the production floor. With
+  //     cost no longer a constraint per Sprint 12.1 decision, no reason to
+  //     stay at 'low'.
+  //
+  // Wall clock estimate: universal ~70-90s + topical ~80-100s = 150-190s.
+  // Comfortable inside Vercel's 300s function limit with margin.
+  //
+  // Quality estimate: should produce 3-5 stories per topical section vs the
+  // 0-2 we saw at 'low'. Combined with the anti-empty + recency-softening
+  // prompt fixes, expect to clear the 60/70 rubric benchmark.
 
-  const [universalText, topicalAText, topicalBText] = await Promise.all([
-    callGpt5Reasoning(universalPrompt, 'low').catch((err) => {
-      console.error('[fetch:universal] gpt-5 failed:', err.message);
-      return '';
-    }),
-    callGpt5Reasoning(topicalAPrompt, 'low').catch((err) => {
-      console.error('[fetch:topical-a] gpt-5 failed:', err.message);
-      return '';
-    }),
-    callGpt5Reasoning(topicalBPrompt, 'low').catch((err) => {
-      console.error('[fetch:topical-b] gpt-5 failed:', err.message);
-      return '';
-    }),
-  ]);
+  console.log('[fetch] Starting SEQUENTIAL two-phase gpt-5 fetch (Sprint 12.1, medium effort)...');
+  const universalPrompt = buildGpt5FetchPrompt(today, universe, 'universal');
+  const topicalPrompt   = buildGpt5FetchPrompt(today, universe, 'topical');
+
+  const tUni = Date.now();
+  const universalText = await callGpt5Reasoning(universalPrompt, 'medium').catch((err) => {
+    console.error('[fetch:universal] gpt-5 failed:', err.message);
+    return '';
+  });
+  console.log(`[fetch:universal] complete in ${Math.round((Date.now() - tUni) / 1000)}s, ${universalText.length} chars`);
+
+  const tTop = Date.now();
+  const topicalText = await callGpt5Reasoning(topicalPrompt, 'medium').catch((err) => {
+    console.error('[fetch:topical] gpt-5 failed:', err.message);
+    return '';
+  });
+  console.log(`[fetch:topical] complete in ${Math.round((Date.now() - tTop) / 1000)}s, ${topicalText.length} chars`);
 
   const safeParse = (text: string, label: string): any => {
     if (!text) {
       console.error(`[fetch:${label}] EMPTY response text — call either errored (see prior log) or model returned no text. Returning {}.`);
       return {};
     }
-    // Diagnostic: log a preview of any suspiciously short response.
     if (text.length < 600) {
       console.warn(`[fetch:${label}] SHORT response (${text.length} chars). Preview: ${text.slice(0, 600)}`);
     }
@@ -1007,26 +983,20 @@ async function fetchNewsFromOpenAI(universe: Universe): Promise<RawStories> {
   };
 
   const universalParsed = safeParse(universalText, 'universal');
-  const topicalAParsed  = safeParse(topicalAText,  'topical-a');
-  const topicalBParsed  = safeParse(topicalBText,  'topical-b');
+  const topicalParsed   = safeParse(topicalText,   'topical');
 
-  // Diagnostic: warn loudly if either topical phase came back empty.
-  const topicalAStoryCount =
-    (topicalAParsed.business?.length || 0) +
-    (topicalAParsed.technology?.length || 0) +
-    (topicalAParsed.climate_health?.length || 0);
-  const topicalBStoryCount =
-    (topicalBParsed.sport?.length || 0) +
-    (topicalBParsed.culture?.length || 0);
-  const topicalBIndicesCount = topicalBParsed.markets?.indices?.length || 0;
-
-  if (topicalAStoryCount === 0) {
-    console.error(`[fetch:topical-a] ALL SECTIONS EMPTY (0 stories). Topical A produced nothing. Raw text length=${topicalAText.length}. Investigate the response preview logged above.`);
-  }
-  if (topicalBStoryCount === 0 && topicalBIndicesCount === 0) {
-    console.error(`[fetch:topical-b] ALL SECTIONS EMPTY (0 stories, 0 indices). Topical B produced nothing. Raw text length=${topicalBText.length}. Investigate the response preview logged above.`);
-  } else if (topicalBStoryCount === 0) {
-    console.warn(`[fetch:topical-b] sport+culture empty (markets indices=${topicalBIndicesCount}). Investigate.`);
+  // Diagnostic: warn loudly if topical came back fully empty across all sections.
+  const topicalStoryCount =
+    (topicalParsed.business?.length || 0) +
+    (topicalParsed.technology?.length || 0) +
+    (topicalParsed.climate_health?.length || 0) +
+    (topicalParsed.sport?.length || 0) +
+    (topicalParsed.culture?.length || 0);
+  const topicalIndicesCount = topicalParsed.markets?.indices?.length || 0;
+  if (topicalStoryCount === 0 && topicalIndicesCount === 0) {
+    console.error(`[fetch:topical] ALL TOPICAL SECTIONS EMPTY (0 stories, 0 indices). Raw text length=${topicalText.length}. Investigate.`);
+  } else if (topicalStoryCount === 0) {
+    console.warn(`[fetch:topical] All topical story sections empty (markets indices=${topicalIndicesCount}). Investigate.`);
   }
 
   // Merge into single RawStories shape. Empty arrays for missing sections.
@@ -1034,16 +1004,16 @@ async function fetchNewsFromOpenAI(universe: Universe): Promise<RawStories> {
     major_events:   universalParsed.major_events || [],
     world:          universalParsed.world        || [],
     india:          universalParsed.india        || [],
-    business:       topicalAParsed.business      || [],
-    technology:     topicalAParsed.technology    || [],
-    climate_health: topicalAParsed.climate_health|| [],
-    sport:          topicalBParsed.sport         || [],
-    culture:        topicalBParsed.culture       || [],
-    markets:        topicalBParsed.markets       || { summary: '', indices: [] },
+    business:       topicalParsed.business       || [],
+    technology:     topicalParsed.technology     || [],
+    climate_health: topicalParsed.climate_health || [],
+    sport:          topicalParsed.sport          || [],
+    culture:        topicalParsed.culture        || [],
+    markets:        topicalParsed.markets        || { summary: '', indices: [] },
     lens:           universalParsed.lens         || null,
   };
 
-  console.log(`[fetch] gpt-5 merged raw section counts (Sprint 12 three-phase): ` +
+  console.log(`[fetch] gpt-5 merged raw section counts (Sprint 12.1 sequential medium): ` +
     `major=${merged.major_events.length}, world=${merged.world.length}, india=${merged.india.length}, ` +
     `biz=${merged.business.length}, tech=${merged.technology.length}, climate=${merged.climate_health.length}, ` +
     `sport=${merged.sport.length}, culture=${merged.culture.length}, indices=${merged.markets?.indices?.length || 0}`);
@@ -2719,80 +2689,88 @@ async function modeTailFetch() {
     };
   }
 
-  // All fetches in parallel — each is independent.
-  const cityPromises = universe.cities.map(async (city): Promise<TailFetchResult> => {
-    try {
-      const { stories, usedRegional } = await fetchCityTail(city);
-      const tail_key = city.toLowerCase().trim();
-      return {
-        tail_type: 'city',
-        tail_key,
-        display_name: city,
-        stories,
-        status: stories.length > 0 ? 'ready' : 'empty',
-        usedRegional,
-      };
-    } catch (e: any) {
-      return {
-        tail_type: 'city',
-        tail_key: city.toLowerCase().trim(),
-        display_name: city,
-        stories: [],
-        status: 'failed',
-        reason: e?.message || String(e),
-      };
-    }
-  });
+  // Sprint 12.1: bounded concurrency for tail fetches. The original Sprint 12
+  // code ran all tail fetches in unbounded Promise.all, which would hit
+  // OpenAI's per-org concurrent-request cap once the universe grew past
+  // ~25-30 keys (the same failure mode that broke the base fetch). The fix:
+  // run at most TAIL_CONCURRENCY at a time. With ~20 cities + 15 interests +
+  // 10 industries = 45 keys, this is 8 batches of 6 ≈ 48-60s total instead
+  // of "all at once and hope".
+  //
+  // gpt-4o-mini-search-preview uses a different quota pool from gpt-5, so 6
+  // concurrent is safely below the rate limit even on Tier 2.
 
-  const interestPromises = universe.interests.map(async (interest): Promise<TailFetchResult> => {
-    try {
-      const stories = await fetchInterestTail(interest);
-      return {
-        tail_type: 'interest',
-        tail_key: interest.toLowerCase().trim(),
-        display_name: interest,
-        stories,
-        status: stories.length > 0 ? 'ready' : 'empty',
-      };
-    } catch (e: any) {
-      return {
-        tail_type: 'interest',
-        tail_key: interest.toLowerCase().trim(),
-        display_name: interest,
-        stories: [],
-        status: 'failed',
-        reason: e?.message || String(e),
-      };
-    }
-  });
+  const TAIL_CONCURRENCY = 6;
 
-  const industryPromises = universe.industries.map(async (industry): Promise<TailFetchResult> => {
+  type TailJob = {
+    type: 'city' | 'interest' | 'industry';
+    key: string;
+    display: string;
+  };
+
+  const jobs: TailJob[] = [
+    ...universe.cities.map((c)     => ({ type: 'city'     as const, key: c.toLowerCase().trim(), display: c })),
+    ...universe.interests.map((i)  => ({ type: 'interest' as const, key: i.toLowerCase().trim(), display: i })),
+    ...universe.industries.map((d) => ({ type: 'industry' as const, key: d.toLowerCase().trim(), display: d })),
+  ];
+
+  console.log(`[tail-fetch] Running ${jobs.length} tail jobs at concurrency=${TAIL_CONCURRENCY}...`);
+
+  async function runOne(job: TailJob): Promise<TailFetchResult> {
     try {
-      const stories = await fetchIndustryTail(industry);
+      if (job.type === 'city') {
+        const { stories, usedRegional } = await fetchCityTail(job.display);
+        return {
+          tail_type: 'city',
+          tail_key: job.key,
+          display_name: job.display,
+          stories,
+          status: stories.length > 0 ? 'ready' : 'empty',
+          usedRegional,
+        };
+      }
+      if (job.type === 'interest') {
+        const stories = await fetchInterestTail(job.display);
+        return {
+          tail_type: 'interest',
+          tail_key: job.key,
+          display_name: job.display,
+          stories,
+          status: stories.length > 0 ? 'ready' : 'empty',
+        };
+      }
+      const stories = await fetchIndustryTail(job.display);
       return {
         tail_type: 'industry',
-        tail_key: industry.toLowerCase().trim(),
-        display_name: industry,
+        tail_key: job.key,
+        display_name: job.display,
         stories,
         status: stories.length > 0 ? 'ready' : 'empty',
       };
     } catch (e: any) {
       return {
-        tail_type: 'industry',
-        tail_key: industry.toLowerCase().trim(),
-        display_name: industry,
+        tail_type: job.type,
+        tail_key: job.key,
+        display_name: job.display,
         stories: [],
         status: 'failed',
         reason: e?.message || String(e),
       };
     }
-  });
+  }
 
-  const allResults = await Promise.all([
-    ...cityPromises,
-    ...interestPromises,
-    ...industryPromises,
-  ]);
+  // Process jobs in fixed-size batches. Simple worker-pool pattern: pull from
+  // the shared index until empty.
+  const allResults: TailFetchResult[] = new Array(jobs.length);
+  let cursor = 0;
+  const workers = Array.from({ length: TAIL_CONCURRENCY }, async () => {
+    while (true) {
+      const i = cursor++;
+      if (i >= jobs.length) return;
+      allResults[i] = await runOne(jobs[i]);
+    }
+  });
+  await Promise.all(workers);
 
   // Write to tail_briefs (upsert per row).
   const upsertRows = allResults.map((r) => ({
