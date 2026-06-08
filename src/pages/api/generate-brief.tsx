@@ -674,24 +674,43 @@ async function callGpt5Reasoning(
   prompt: string,
   reasoningEffort: 'low' | 'medium' | 'high' = 'low',
   costPhase: 'fetch' | 'lens' = 'fetch',
+  timeoutMs: number = 180_000,
 ): Promise<string> {
   const t0 = Date.now();
-  console.log(`[gpt-5] Starting reasoning fetch (effort=${reasoningEffort}). This typically takes 60-180s.`);
+  console.log(`[gpt-5] Starting reasoning fetch (effort=${reasoningEffort}, timeout=${Math.round(timeoutMs/1000)}s).`);
 
-  const response = await fetch('https://api.openai.com/v1/responses', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: 'gpt-5',
-      input: [{ role: 'user', content: prompt }],
-      reasoning: { effort: reasoningEffort },
-      tools: [{ type: 'web_search' }],
-      max_output_tokens: 32000,
-    }),
-  });
+  // Sprint 12.2: AbortController prevents a single hung gpt-5 call from
+  // consuming Vercel's full 300s budget. If this call times out, the catch
+  // block in fetchNewsFromOpenAI converts it to empty text and the brief
+  // still saves with whatever the other phase returned.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  let response: Response;
+  try {
+    response = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'gpt-5',
+        input: [{ role: 'user', content: prompt }],
+        reasoning: { effort: reasoningEffort },
+        tools: [{ type: 'web_search' }],
+        max_output_tokens: 32000,
+      }),
+      signal: controller.signal,
+    });
+  } catch (err: any) {
+    clearTimeout(timer);
+    if (err.name === 'AbortError') {
+      throw new Error(`gpt-5 ${reasoningEffort} call aborted after ${Math.round(timeoutMs/1000)}s timeout`);
+    }
+    throw err;
+  }
+  clearTimeout(timer);
 
   const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
   const data = await response.json();
@@ -929,37 +948,39 @@ Begin now. Search aggressively. Return ONLY the JSON object.`;
 async function fetchNewsFromOpenAI(universe: Universe): Promise<RawStories> {
   const today = getISTDate();
 
-  // Sprint 12.1 (post-mortem fix):
-  //   - SEQUENTIAL execution (not parallel). Vercel logs showed 429 rate-
-  //     limiting when 3 parallel gpt-5 calls hit OpenAI's per-org concurrent
-  //     request cap. Sequential = zero contention with self.
-  //   - TWO phases (universal + topical), not three. Splitting topical into
-  //     A/B was unnecessary once the actual problem (concurrency) was found.
-  //   - reasoning_effort BUMPED from 'low' to 'medium'. Recurring Sprint 11
-  //     lesson: 'low' undershoots; 'medium' is the production floor. With
-  //     cost no longer a constraint per Sprint 12.1 decision, no reason to
-  //     stay at 'low'.
+  // Sprint 12.2 (post-mortem of 12.1):
+  //   - 12.1 ran both phases at 'medium' and hit Vercel 504 (>300s function
+  //     timeout). Even sequentially, two medium-effort gpt-5 calls together
+  //     can blow the budget.
+  //   - The actual quality lever is TOPICAL — that's where empty sections
+  //     have repeatedly appeared. Universal at 'low' was reliable in 11.5.
+  //   - So: universal at 'low' (fast, proven), topical at 'medium' (quality
+  //     lever, where we need the headroom).
+  //   - Per-call AbortController prevents a single hung call from eating the
+  //     full Vercel budget. Time-out budgets: universal 90s, topical 180s.
+  //     Worst-case sum 270s, inside Vercel's 300s.
   //
-  // Wall clock estimate: universal ~70-90s + topical ~80-100s = 150-190s.
-  // Comfortable inside Vercel's 300s function limit with margin.
+  // Wall-clock expectations:
+  //   - universal at 'low': 30-60s typical, 90s abort
+  //   - topical at 'medium': 100-150s typical, 180s abort
+  //   - Sequential total expected: 130-210s
   //
-  // Quality estimate: should produce 3-5 stories per topical section vs the
-  // 0-2 we saw at 'low'. Combined with the anti-empty + recency-softening
-  // prompt fixes, expect to clear the 60/70 rubric benchmark.
+  // If a phase aborts, its catch returns '' and that phase's sections come
+  // back empty. The brief still saves with the other phase's content.
 
-  console.log('[fetch] Starting SEQUENTIAL two-phase gpt-5 fetch (Sprint 12.1, medium effort)...');
+  console.log('[fetch] Starting SEQUENTIAL two-phase fetch (Sprint 12.2 — universal/low + topical/medium)...');
   const universalPrompt = buildGpt5FetchPrompt(today, universe, 'universal');
   const topicalPrompt   = buildGpt5FetchPrompt(today, universe, 'topical');
 
   const tUni = Date.now();
-  const universalText = await callGpt5Reasoning(universalPrompt, 'medium').catch((err) => {
+  const universalText = await callGpt5Reasoning(universalPrompt, 'low', 'fetch', 90_000).catch((err) => {
     console.error('[fetch:universal] gpt-5 failed:', err.message);
     return '';
   });
   console.log(`[fetch:universal] complete in ${Math.round((Date.now() - tUni) / 1000)}s, ${universalText.length} chars`);
 
   const tTop = Date.now();
-  const topicalText = await callGpt5Reasoning(topicalPrompt, 'medium').catch((err) => {
+  const topicalText = await callGpt5Reasoning(topicalPrompt, 'medium', 'fetch', 180_000).catch((err) => {
     console.error('[fetch:topical] gpt-5 failed:', err.message);
     return '';
   });
