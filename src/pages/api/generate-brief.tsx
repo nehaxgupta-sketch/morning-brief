@@ -866,17 +866,19 @@ You are responsible for SIX sections (business, technology, climate_health, spor
 
 OVER-FETCHING IS REQUIRED. Downstream filters will drop stories that fail the whitelist or recency check. Aim for the upper bound below.
 
+EMPTY ARRAYS ARE A LAST RESORT. Business, technology, climate/health, sport, and culture news happen every single day globally. Returning an empty array signals that your search did not find the right angle — not that nothing happened. Before returning empty for any section, run AT LEAST 2 distinct searches for that section with different keywords. Examples: for sport, try "cricket news today", "IPL today", "tennis today", "football news today" — not just one generic "sport news" query.
+
 - business: 4-5 stories. Corporate news, earnings, M&A, regulatory actions, major financial moves. Indian AND global. Skip pure markets summaries (markets is a separate section).
 
-- technology: 3-4 stories. Significant product launches, major AI developments, big-tech regulation, cybersecurity events. Skip rumour/speculation.
+- technology: 3-4 stories. Significant product launches, major AI developments, big-tech regulation, cybersecurity events. Skip rumour/speculation. RECENCY: 24h preferred, 48h acceptable if no fresh 24h development exists today.
 
 - climate_health: 3-4 stories. Climate disasters, environmental policy, major health stories (outbreaks, drug approvals, research with real implications). Concrete real-world impact.
 
-- sport: 3-4 stories ACROSS DIFFERENT SPORTS. Cricket, football, tennis, F1, badminton, hockey, kabaddi, Olympics, athletics, golf, esports — pick the day's biggest from as many different sports as the day's news supports. Do NOT submit 4 cricket stories; aim for breadth.
+- sport: 3-4 stories ACROSS DIFFERENT SPORTS. Cricket, football, tennis, F1, badminton, hockey, kabaddi, Olympics, athletics, golf, esports — pick the day's biggest from as many different sports as the day's news supports. Do NOT submit 4 cricket stories; aim for breadth. RECENCY: 24h preferred, 48h acceptable. Mid-week and off-season days often only have 24-48h-old developments — INCLUDE them rather than returning empty. Sport happens globally every single day; an empty sport array means the search failed, not that nothing happened.
 
-- culture: 3-4 stories ACROSS DIFFERENT CULTURE TYPES. Films, OTT, music, books, theatre, visual arts, awards. Don't submit 4 film stories; aim for breadth.
+- culture: 3-4 stories ACROSS DIFFERENT CULTURE TYPES. Films, OTT, music, books, theatre, visual arts, awards. Don't submit 4 film stories; aim for breadth. RECENCY: 24h preferred, 48h acceptable. Culture announcements aren't always daily — a 36h-old film release or award is fine if it's still the freshest available. Empty culture array signals search failure, not a quiet day.
 
-- markets: ONE object with summary + indices. Find today's closing values for Sensex, Nifty 50, Dow Jones, Nasdaq Composite. Write a 2-3 sentence India-anchored summary of today's market action.
+- markets: ONE object with summary + indices. Find the MOST RECENT closing values for Sensex, Nifty 50, Dow Jones, Nasdaq Composite. IMPORTANT: This brief runs at ~6:38 AM IST. At that hour, Indian markets have NOT opened yet (they open 9:15 AM IST and close 3:30 PM IST) — so use YESTERDAY's close for Sensex and Nifty. US markets close around 1:30 AM IST — use the most recent US session close (which is the night just past). NEVER return empty indices because "today's close doesn't exist yet"; use the most recent available session close in every case. Write a 2-3 sentence India-anchored summary covering yesterday's Indian session and the overnight US session.
 
 ${sharedFooterRules}
 
@@ -939,17 +941,42 @@ async function fetchNewsFromOpenAI(universe: Universe): Promise<RawStories> {
   ]);
 
   const safeParse = (text: string, label: string): any => {
-    if (!text) return {};
+    if (!text) {
+      console.error(`[fetch:${label}] EMPTY response text — call either errored (see prior log) or model returned no text. Returning {}.`);
+      return {};
+    }
+    // Diagnostic: log a preview of any suspiciously short response.
+    if (text.length < 600) {
+      console.warn(`[fetch:${label}] SHORT response (${text.length} chars). Preview: ${text.slice(0, 600)}`);
+    }
     try {
       return extractJsonObject(text);
     } catch (err: any) {
-      console.error(`[fetch:${label}] JSON parse failed. First 600 chars:`, text.slice(0, 600));
+      console.error(`[fetch:${label}] JSON parse failed. Length=${text.length}. First 800 chars:`, text.slice(0, 800));
+      console.error(`[fetch:${label}] JSON parse failed. Last 400 chars:`, text.slice(-400));
       return {};
     }
   };
 
   const universalParsed = safeParse(universalText, 'universal');
   const topicalParsed   = safeParse(topicalText,   'topical');
+
+  // Diagnostic: warn loudly if topical came back fully empty across all sections.
+  // This is the canary for "topical phase silently produced nothing" — the
+  // failure mode seen on 2026-06-08 production run. When this fires, look at
+  // the [fetch:topical] log above for the raw response preview.
+  const topicalStoryCount =
+    (topicalParsed.business?.length || 0) +
+    (topicalParsed.technology?.length || 0) +
+    (topicalParsed.climate_health?.length || 0) +
+    (topicalParsed.sport?.length || 0) +
+    (topicalParsed.culture?.length || 0);
+  const topicalIndicesCount = topicalParsed.markets?.indices?.length || 0;
+  if (topicalStoryCount === 0 && topicalIndicesCount === 0) {
+    console.error(`[fetch:topical] ALL TOPICAL SECTIONS EMPTY (0 stories, 0 indices). Topical phase produced nothing. Raw text length=${topicalText.length}. Investigate the response preview logged above.`);
+  } else if (topicalStoryCount === 0) {
+    console.warn(`[fetch:topical] All topical story sections empty (markets indices=${topicalIndicesCount}). Investigate.`);
+  }
 
   // Merge into single RawStories shape. Empty arrays for missing sections.
   const merged: any = {
