@@ -38,6 +38,16 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const EDITIONS = ['5min', '10min', 'deep'] as const;
 type Edition = (typeof EDITIONS)[number];
 
+// Sprint 12: feature flag. When true, this endpoint becomes a pure code-only
+// transform — no OpenAI calls. City/interest/industry stories are read from
+// the `tail_briefs` table (populated by generate-brief.tsx mode=tail-fetch).
+// When false, the legacy in-handler OpenAI fetch path runs (Sprint 11 behaviour).
+//
+// To enable: set USE_TAIL_BRIEFS=true in Vercel env vars. The cron sequence
+// must be updated to run tail-fetch BEFORE personalise-briefs so data is
+// available when this handler runs.
+const USE_TAIL_BRIEFS = (process.env.USE_TAIL_BRIEFS || '').toLowerCase() === 'true';
+
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL as string,
   process.env.SUPABASE_SERVICE_ROLE_KEY as string,
@@ -387,6 +397,141 @@ async function buildInterestCache(
   return cache;
 }
 
+// ─── Sprint 12: Read-path from tail_briefs table ────────────────────────────
+//
+// When USE_TAIL_BRIEFS=true, this replaces buildCityCache + buildInterestCache.
+// Reads rows previously written by generate-brief mode=tail-fetch and shapes
+// them into the same Map<key, stories> structures the legacy code uses.
+// Also reads industry rows (new in Sprint 12).
+//
+// Failures here mean missing data, not OpenAI errors. We treat a missing tail
+// row the same as an empty fetch — log it, mark tailStatus accordingly.
+
+interface TailBriefsCaches {
+  cityCache: Map<string, CityStory[]>;
+  interestCache: Map<string, InterestStory[]>;
+  industryCache: Map<string, InterestStory[]>;
+}
+
+async function loadFromTailBriefs(
+  uniqueCities: string[],
+  uniqueInterests: string[],
+  uniqueIndustries: string[],
+  failures: TailFailureSets,
+): Promise<TailBriefsCaches> {
+  const today = getISTDate();
+  const cityCache = new Map<string, CityStory[]>();
+  const interestCache = new Map<string, InterestStory[]>();
+  const industryCache = new Map<string, InterestStory[]>();
+
+  const { data, error } = await supabase
+    .from('tail_briefs')
+    .select('tail_type, tail_key, stories, status, reason')
+    .eq('date', today);
+
+  if (error) {
+    console.error(`[tail-read] tail_briefs read failed: ${error.message}. Falling back to empty caches.`);
+    // All cities + interests + industries marked as failed.
+    uniqueCities.forEach((c) => failures.cityErrors.add(cityKey(c)));
+    uniqueInterests.forEach((i) => { if (!STANDARD_INTEREST_MAP[i]) failures.interestErrors.add(i); });
+    return { cityCache, interestCache, industryCache };
+  }
+
+  const byKey = new Map<string, any>();
+  for (const row of data || []) {
+    byKey.set(`${row.tail_type}|${row.tail_key}`, row);
+  }
+
+  // Cities
+  for (const city of uniqueCities) {
+    const key = cityKey(city);
+    const row = byKey.get(`city|${key}`);
+    if (!row) {
+      console.warn(`[tail-read] city "${city}" missing from tail_briefs for ${today}.`);
+      failures.cityErrors.add(key);
+      cityCache.set(key, []);
+      continue;
+    }
+    if (row.status === 'failed') {
+      console.warn(`[tail-read] city "${city}" status=failed: ${row.reason}`);
+      failures.cityErrors.add(key);
+      cityCache.set(key, []);
+      continue;
+    }
+    const stories = Array.isArray(row.stories) ? row.stories : [];
+    // Defensive whitelist re-check.
+    const kept = stories.filter((s: any) => s?.source_url && isWhitelistedSource(s.source_url));
+    cityCache.set(key, kept as CityStory[]);
+  }
+
+  // Interests (non-standard only — standard ones map to brief sections)
+  for (const interest of uniqueInterests) {
+    if (STANDARD_INTEREST_MAP[interest]) continue;
+    const key = interest.toLowerCase().trim();
+    const row = byKey.get(`interest|${key}`);
+    if (!row) {
+      console.warn(`[tail-read] interest "${interest}" missing from tail_briefs for ${today}.`);
+      failures.interestErrors.add(interest);
+      interestCache.set(interest, []);
+      continue;
+    }
+    if (row.status === 'failed') {
+      console.warn(`[tail-read] interest "${interest}" status=failed: ${row.reason}`);
+      failures.interestErrors.add(interest);
+      interestCache.set(interest, []);
+      continue;
+    }
+    const stories = Array.isArray(row.stories) ? row.stories : [];
+    const kept = stories.filter((s: any) => s?.source_url && isWhitelistedSource(s.source_url));
+    interestCache.set(interest, kept as InterestStory[]);
+  }
+
+  // Industries (Sprint 12 — new)
+  for (const industry of uniqueIndustries) {
+    const key = industry.toLowerCase().trim();
+    const row = byKey.get(`industry|${key}`);
+    if (!row) {
+      console.warn(`[tail-read] industry "${industry}" missing from tail_briefs for ${today}.`);
+      industryCache.set(industry, []);
+      continue;
+    }
+    if (row.status === 'failed') {
+      console.warn(`[tail-read] industry "${industry}" status=failed: ${row.reason}`);
+      industryCache.set(industry, []);
+      continue;
+    }
+    const stories = Array.isArray(row.stories) ? row.stories : [];
+    const kept = stories.filter((s: any) => s?.source_url && isWhitelistedSource(s.source_url));
+    industryCache.set(industry, kept as InterestStory[]);
+  }
+
+  console.log(`[tail-read] loaded — cities: ${cityCache.size}, interests: ${interestCache.size}, industries: ${industryCache.size}`);
+  return { cityCache, interestCache, industryCache };
+}
+
+// Splice industry section into a personal_sections array (used by both 5min
+// and 10min builders). Sprint 12: industry sections work like interest
+// sections — single industry per user, 1-2 stories.
+function makeIndustrySection(
+  industry: string,
+  industryCache: Map<string, InterestStory[]>,
+  shape: 'micro' | 'full',
+  storiesPerSection: number,
+): PersonalSection | null {
+  if (!industry) return null;
+  const stories = industryCache.get(industry) || [];
+  if (stories.length === 0) return null;
+  const sliced = stories.slice(0, storiesPerSection);
+  const shaped: any[] = shape === 'micro' ? sliced.map(cityToMicro) : sliced.map(cityToFull);
+  return {
+    id: `industry_${industry.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '')}`,
+    label: `${industry} sector`,
+    icon: '🏢',
+    kind: 'list',
+    stories: shaped,
+  };
+}
+
 // ─── Story → MicroStory / FullStory adapters ────────────────────────────────
 //
 // City and interest fetches return body-style stories. The Brief / The Daily
@@ -535,12 +680,14 @@ function buildQuickPersonalised(
   cityStories: CityStory[],
   homeCityStories: CityStory[],
   interestCache: Map<string, InterestStory[]>,
+  industryCache: Map<string, InterestStory[]> = new Map(),
 ): BuildResult {
   // The Brief (5min) personalised shape — per Sprint 9 spec:
   //  - major_events (universal, reordered) — KEEP ALL
   //  - world (universal, reordered) — KEEP ALL
   //  - india (universal, reordered) — KEEP ALL
   //  - your_city (1 micro story)
+  //  - your_industry (Sprint 12 — 1 micro story if industry tail has content)
   //  - your_interests (interest sections, 1 story per section)
   //  - NO `topics` section (replaced by personal sections)
   // Total story cap: 20. If universal + personal exceeds 20, trim from the
@@ -568,6 +715,16 @@ function buildQuickPersonalised(
       stories: [cityToMicro(cityStories[0])],
     });
     personalBudget -= 1;
+  }
+
+  // Your industry (Sprint 12) — 1 story slot in 5min.
+  const usersIndustry = normaliseStr(profile?.industry);
+  if (usersIndustry && personalBudget > 0) {
+    const indSec = makeIndustrySection(usersIndustry, industryCache, 'micro', 1);
+    if (indSec) {
+      personal.push(indSec);
+      personalBudget -= indSec.stories.length;
+    }
   }
 
   // Your interests — fill remaining personal budget. 1 story per section.
@@ -618,6 +775,7 @@ function buildDailyPersonalised(
   cityStories: CityStory[],
   homeCityStories: CityStory[],
   interestCache: Map<string, InterestStory[]>,
+  industryCache: Map<string, InterestStory[]> = new Map(),
 ): BuildResult {
   // The Daily (10min) personalised shape — per Sprint 9 spec:
   //  - major_events (universal, reordered) — KEEP ALL
@@ -666,6 +824,17 @@ function buildDailyPersonalised(
       stories: homeCityStories.slice(0, 1).map(cityToFull),
     });
     personalBudget -= 1;
+  }
+
+  // Your industry (Sprint 12) — up to 2 full stories in 10min.
+  const usersIndustry = normaliseStr(profile?.industry);
+  if (usersIndustry && personalBudget > 0) {
+    const slots = Math.min(2, personalBudget);
+    const indSec = makeIndustrySection(usersIndustry, industryCache, 'full', slots);
+    if (indSec) {
+      personal.push(indSec);
+      personalBudget -= indSec.stories.length;
+    }
   }
 
   // Interest sections — fill remaining budget. Up to 2 stories per section.
@@ -1050,37 +1219,56 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     users = users.filter((p: any) => (p.user_id || p.id) === onlyUserId);
   }
 
-  // 3) Collect unique cities + interests across all users
+  // 3) Collect unique cities + interests + industries across all users
   const allCities = new Set<string>();
   const allInterests = new Set<string>();
+  const allIndustries = new Set<string>();
   for (const u of users) {
     if (normaliseStr(u.city_current)) allCities.add(normaliseStr(u.city_current));
     if (normaliseStr(u.city_home)) allCities.add(normaliseStr(u.city_home));
     if (Array.isArray(u.interests)) {
       for (const i of u.interests) if (typeof i === 'string' && i.trim()) allInterests.add(i.trim());
     }
+    if (normaliseStr(u.industry)) allIndustries.add(normaliseStr(u.industry));
   }
   const uniqueCities = Array.from(allCities);
   const uniqueInterests = Array.from(allInterests);
-  console.log(`Unique cities to fetch: ${uniqueCities.length} — ${uniqueCities.join(', ')}`);
+  const uniqueIndustries = Array.from(allIndustries);
+  console.log(`Unique cities: ${uniqueCities.length} — ${uniqueCities.join(', ')}`);
   console.log(`Unique interests: ${uniqueInterests.length} (${uniqueInterests.filter((i) => !STANDARD_INTEREST_MAP[i]).length} non-standard need fetch)`);
+  console.log(`Unique industries (Sprint 12): ${uniqueIndustries.length} — ${uniqueIndustries.join(', ')}`);
+  console.log(`USE_TAIL_BRIEFS flag: ${USE_TAIL_BRIEFS ? 'true (read from tail_briefs)' : 'false (legacy in-handler fetch)'}`);
 
-  // 4) Build caches in parallel — cities and non-standard interests.
-  // Sprint 11: track which fetches threw (vs returned empty). Errored fetches
-  // affect that user's tail_status; empty-but-not-errored is normal.
+  // 4) Build caches.
+  // Sprint 12: when USE_TAIL_BRIEFS=true, read from tail_briefs table — no OpenAI calls.
+  // When false, fall back to legacy in-handler fetches (Sprint 11 behaviour).
   const failures: TailFailureSets = {
     cityErrors: new Set<string>(),
     interestErrors: new Set<string>(),
   };
-  const [cityCache, interestCache] = await Promise.all([
-    buildCityCache(uniqueCities, failures),
-    buildInterestCache(uniqueInterests, failures),
-  ]);
+
+  let cityCache: Map<string, CityStory[]>;
+  let interestCache: Map<string, InterestStory[]>;
+  let industryCache: Map<string, InterestStory[]> = new Map();
+
+  if (USE_TAIL_BRIEFS) {
+    const caches = await loadFromTailBriefs(uniqueCities, uniqueInterests, uniqueIndustries, failures);
+    cityCache = caches.cityCache;
+    interestCache = caches.interestCache;
+    industryCache = caches.industryCache;
+  } else {
+    // Legacy path — Sprint 11 behaviour preserved verbatim.
+    [cityCache, interestCache] = await Promise.all([
+      buildCityCache(uniqueCities, failures),
+      buildInterestCache(uniqueInterests, failures),
+    ]);
+  }
+
   if (failures.cityErrors.size > 0) {
-    console.warn(`[tail] city fetch errors: ${Array.from(failures.cityErrors).join(', ')}`);
+    console.warn(`[tail] city errors: ${Array.from(failures.cityErrors).join(', ')}`);
   }
   if (failures.interestErrors.size > 0) {
-    console.warn(`[tail] interest fetch errors: ${Array.from(failures.interestErrors).join(', ')}`);
+    console.warn(`[tail] interest errors: ${Array.from(failures.interestErrors).join(', ')}`);
   }
 
   const results: any[] = [];
@@ -1136,9 +1324,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           const shared = asObject(source.content);
           let built: BuildResult;
           if (edition === '5min') {
-            built = buildQuickPersonalised(shared, profile, cityStories, homeStories, interestCache);
+            built = buildQuickPersonalised(shared, profile, cityStories, homeStories, interestCache, industryCache);
           } else if (edition === '10min') {
-            built = buildDailyPersonalised(shared, profile, cityStories, homeStories, interestCache);
+            built = buildDailyPersonalised(shared, profile, cityStories, homeStories, interestCache, industryCache);
           } else {
             built = buildEditorialPersonalised(shared, profile);
           }
@@ -1183,10 +1371,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     success: true,
     date,
     dryRun,
+    useTailBriefs: USE_TAIL_BRIEFS,
     uniqueCities,
     uniqueInterests,
+    uniqueIndustries,
     cityHits: Object.fromEntries(Array.from(cityCache.entries()).map(([c, s]) => [c, s.length])),
     interestHits: Object.fromEntries(Array.from(interestCache.entries()).map(([i, s]) => [i, s.length])),
+    industryHits: Object.fromEntries(Array.from(industryCache.entries()).map(([i, s]) => [i, s.length])),
     tailFailures: {
       cityErrors: Array.from(failures.cityErrors),
       interestErrors: Array.from(failures.interestErrors),

@@ -753,7 +753,7 @@ async function callGpt5Reasoning(
 // Each phase enforces ≤3 stories per publisher within its scope. Across the
 // full brief that theoretically allows up to 6 per publisher, but per-section
 // caps keep it well under that in practice.
-function buildGpt5FetchPrompt(today: string, universe: Universe, phase: 'universal' | 'topical' = 'universal'): string {
+function buildGpt5FetchPrompt(today: string, universe: Universe, phase: 'universal' | 'topical-a' | 'topical-b' = 'universal'): string {
   const sharedHeader = `You are the fetcher for Morning Brief, India's daily news digest for thoughtful urban professionals (25-45, urban, English-reading). Today is ${today} (IST).
 
 Your job: search the web aggressively for today's most consequential news and return ONE JSON object. Use the web_search tool. Perform AT LEAST 10-12 distinct searches across the sections you've been assigned.
@@ -855,30 +855,31 @@ OUTPUT SHAPE
 Begin now. Search aggressively. Return ONLY the JSON object.`;
   }
 
-  // phase === 'topical'
-  return `${sharedHeader}
+  // Sprint 12: TWO topical phases run in parallel, splitting the work to
+  // give gpt-5 a smaller search budget per call. Sprint 11 with a single
+  // topical phase across 6 sections produced under-fetched output (typical
+  // 7 stories vs target 16). Splitting business+tech+climate (A) from
+  // sport+culture+markets (B) lets each phase iterate searches more
+  // aggressively for fewer sections.
+
+  if (phase === 'topical-a') {
+    return `${sharedHeader}
 
 ═══════════════════════════════════════════════
-SECTIONS — TOPICAL PHASE
+SECTIONS — TOPICAL PHASE A (business + technology + climate_health)
 ═══════════════════════════════════════════════
 
-You are responsible for SIX sections (business, technology, climate_health, sport, culture, markets). Another fetcher handles major_events, world, india and the lens in parallel — do NOT include those.
+You are responsible for THREE sections: business, technology, climate_health. Other fetchers handle universal (major/world/india/lens) AND topical-B (sport, culture, markets) in parallel — do NOT include those.
 
 OVER-FETCHING IS REQUIRED. Downstream filters will drop stories that fail the whitelist or recency check. Aim for the upper bound below.
 
-EMPTY ARRAYS ARE A LAST RESORT. Business, technology, climate/health, sport, and culture news happen every single day globally. Returning an empty array signals that your search did not find the right angle — not that nothing happened. Before returning empty for any section, run AT LEAST 2 distinct searches for that section with different keywords. Examples: for sport, try "cricket news today", "IPL today", "tennis today", "football news today" — not just one generic "sport news" query.
+EMPTY ARRAYS ARE A LAST RESORT. Business, technology, and climate/health news happen every single day globally. Returning an empty array signals that your search did not find the right angle — not that nothing happened. Before returning empty for any section, run AT LEAST 2 distinct searches for that section with different keywords.
 
-- business: 4-5 stories. Corporate news, earnings, M&A, regulatory actions, major financial moves. Indian AND global. Skip pure markets summaries (markets is a separate section).
+- business: 5-6 stories. Corporate news, earnings, M&A, regulatory actions, major financial moves. Indian AND global. Skip pure markets summaries (markets is owned by phase B).
 
-- technology: 3-4 stories. Significant product launches, major AI developments, big-tech regulation, cybersecurity events. Skip rumour/speculation. RECENCY: 24h preferred, 48h acceptable if no fresh 24h development exists today.
+- technology: 4-5 stories. Significant product launches, major AI developments, big-tech regulation, cybersecurity events. Skip rumour/speculation. RECENCY: 24h preferred, 48h acceptable if no fresh 24h development exists today.
 
-- climate_health: 3-4 stories. Climate disasters, environmental policy, major health stories (outbreaks, drug approvals, research with real implications). Concrete real-world impact.
-
-- sport: 3-4 stories ACROSS DIFFERENT SPORTS. Cricket, football, tennis, F1, badminton, hockey, kabaddi, Olympics, athletics, golf, esports — pick the day's biggest from as many different sports as the day's news supports. Do NOT submit 4 cricket stories; aim for breadth. RECENCY: 24h preferred, 48h acceptable. Mid-week and off-season days often only have 24-48h-old developments — INCLUDE them rather than returning empty. Sport happens globally every single day; an empty sport array means the search failed, not that nothing happened.
-
-- culture: 3-4 stories ACROSS DIFFERENT CULTURE TYPES. Films, OTT, music, books, theatre, visual arts, awards. Don't submit 4 film stories; aim for breadth. RECENCY: 24h preferred, 48h acceptable. Culture announcements aren't always daily — a 36h-old film release or award is fine if it's still the freshest available. Empty culture array signals search failure, not a quiet day.
-
-- markets: ONE object with summary + indices. Find the MOST RECENT closing values for Sensex, Nifty 50, Dow Jones, Nasdaq Composite. IMPORTANT: This brief runs at ~6:38 AM IST. At that hour, Indian markets have NOT opened yet (they open 9:15 AM IST and close 3:30 PM IST) — so use YESTERDAY's close for Sensex and Nifty. US markets close around 1:30 AM IST — use the most recent US session close (which is the night just past). NEVER return empty indices because "today's close doesn't exist yet"; use the most recent available session close in every case. Write a 2-3 sentence India-anchored summary covering yesterday's Indian session and the overnight US session.
+- climate_health: 4-5 stories. Climate disasters, environmental policy, major health stories (outbreaks, drug approvals, research with real implications). Concrete real-world impact.
 
 ${sharedFooterRules}
 
@@ -886,14 +887,12 @@ ${sharedFooterRules}
 HARD RULES
 ═══════════════════════════════════════════════
 
-1. WHITELIST: every source_url MUST be from a whitelisted publisher. OMIT stories you can't source.
-2. NO FABRICATION: never invent. If a section quota can't be filled from whitelisted sources, return fewer.
-3. SEARCH DEPTH: at least 10 distinct searches across the six sections.
-4. PUBLISHER DIVERSITY within this fetch: NO publisher may contribute more than 3 stories.
-5. DEDUP within your sections: each story belongs to ONE section. If a story could fit two, pick the higher-priority one (business > technology > climate_health > sport > culture).
-6. SPORT AND CULTURE ARE ARRAYS of 2-4 story objects. Empty arrays are acceptable when no fresh stories exist; never fabricate to pad.
-7. MARKETS INDICES: ARRAY of objects shaped [{"name":"Sensex","value":"74243","change":"-0.16%"}, ...]. Never a single object or string. Use today's actual closing values.
-8. JSON ONLY: output ONE JSON object. No markdown, no preamble. Start with { and end with }.
+1. WHITELIST: every source_url MUST be from a whitelisted publisher.
+2. NO FABRICATION: never invent. If a section quota can't be filled, return fewer.
+3. SEARCH DEPTH: at least 8 distinct searches across the three sections.
+4. PUBLISHER DIVERSITY: NO publisher may contribute more than 3 stories within this fetch.
+5. DEDUP: each story in ONE section only (business > technology > climate_health).
+6. JSON ONLY: output ONE JSON object. No markdown, no preamble.
 
 ═══════════════════════════════════════════════
 OUTPUT SHAPE
@@ -902,11 +901,54 @@ OUTPUT SHAPE
 {
   "business":       [ ${storyShape(today)}, ... ],
   "technology":     [ ${storyShape(today)}, ... ],
-  "climate_health": [ ${storyShape(today)}, ... ],
-  "sport":          [ ${storyShape(today)}, ... ],
-  "culture":        [ ${storyShape(today)}, ... ],
+  "climate_health": [ ${storyShape(today)}, ... ]
+}
+
+Begin now. Search aggressively. Return ONLY the JSON object.`;
+  }
+
+  // phase === 'topical-b'
+  return `${sharedHeader}
+
+═══════════════════════════════════════════════
+SECTIONS — TOPICAL PHASE B (sport + culture + markets)
+═══════════════════════════════════════════════
+
+You are responsible for THREE sections: sport, culture, markets. Other fetchers handle universal (major/world/india/lens) AND topical-A (business, technology, climate_health) in parallel — do NOT include those.
+
+OVER-FETCHING IS REQUIRED. Downstream filters will drop stories that fail the whitelist or recency check.
+
+EMPTY ARRAYS ARE A LAST RESORT for sport and culture. These categories produce news every single day globally. Returning an empty array signals that your search did not find the right angle — not that nothing happened. Before returning empty, run AT LEAST 2 distinct searches with different keywords. Examples: for sport, try "cricket news today", "IPL today", "tennis today", "football news today" — not just one generic "sport news" query.
+
+- sport: 4-5 stories ACROSS DIFFERENT SPORTS. Cricket, football, tennis, F1, badminton, hockey, kabaddi, Olympics, athletics, golf, esports — pick the day's biggest from as many different sports as the day's news supports. Do NOT submit 4 cricket stories; aim for breadth. RECENCY: 24h preferred, 48h acceptable. Mid-week and off-season days often only have 24-48h-old developments — INCLUDE them rather than returning empty.
+
+- culture: 4-5 stories ACROSS DIFFERENT CULTURE TYPES. Films, OTT, music, books, theatre, visual arts, awards. Don't submit 4 film stories; aim for breadth. RECENCY: 24h preferred, 48h acceptable. A 36h-old film release or award is fine if it's still the freshest available.
+
+- markets: ONE object with summary + indices. Find the MOST RECENT closing values for Sensex, Nifty 50, Dow Jones, Nasdaq Composite. IMPORTANT: This brief runs at ~6:38 AM IST. At that hour, Indian markets have NOT opened yet (they open 9:15 AM IST and close 3:30 PM IST) — so use YESTERDAY's close for Sensex and Nifty. US markets close around 1:30 AM IST — use the most recent US session close. NEVER return empty indices because "today's close doesn't exist yet"; use the most recent available session close in every case. Write a 2-3 sentence India-anchored summary covering yesterday's Indian session and the overnight US session.
+
+${sharedFooterRules}
+
+═══════════════════════════════════════════════
+HARD RULES
+═══════════════════════════════════════════════
+
+1. WHITELIST: every source_url MUST be from a whitelisted publisher.
+2. NO FABRICATION: never invent.
+3. SEARCH DEPTH: at least 6 distinct searches across the three sections.
+4. PUBLISHER DIVERSITY: NO publisher may contribute more than 3 stories within this fetch.
+5. SPORT AND CULTURE ARE ARRAYS of 3-5 story objects. Never fabricate to pad.
+6. MARKETS INDICES: ARRAY of objects shaped [{"name":"Sensex","value":"74243","change":"-0.16%"}, ...]. Never a single object or string.
+7. JSON ONLY: output ONE JSON object. No markdown, no preamble.
+
+═══════════════════════════════════════════════
+OUTPUT SHAPE
+═══════════════════════════════════════════════
+
+{
+  "sport":   [ ${storyShape(today)}, ... ],
+  "culture": [ ${storyShape(today)}, ... ],
   "markets": {
-    "summary": "2-3 sentence India-anchored summary of today's market action",
+    "summary": "2-3 sentence India-anchored summary of yesterday's session + overnight US",
     "indices": [
       { "name": "Sensex",   "value": "...", "change": "+0.5%" },
       { "name": "Nifty 50", "value": "...", "change": "+0.4%" },
@@ -922,20 +964,26 @@ Begin now. Search aggressively. Return ONLY the JSON object.`;
 async function fetchNewsFromOpenAI(universe: Universe): Promise<RawStories> {
   const today = getISTDate();
 
-  // Two parallel gpt-5 calls — split into universal + topical phases. Wall-
-  // clock = max(phase1, phase2) ≈ 120-150s on 'low' effort. The single-call
-  // monolith was bumping into Vercel's 300s function limit.
-  console.log('[fetch] Starting two-phase parallel gpt-5 fetch...');
-  const universalPrompt = buildGpt5FetchPrompt(today, universe, 'universal');
-  const topicalPrompt   = buildGpt5FetchPrompt(today, universe, 'topical');
+  // Sprint 12: THREE parallel gpt-5 calls. Wall-clock = max(phase1, phase2,
+  // phase3) ≈ 100-130s on 'low' effort. Splitting topical into A/B halved
+  // each call's search budget but increased total stories fetched from ~13
+  // to ~25-30 in early testing.
+  console.log('[fetch] Starting three-phase parallel gpt-5 fetch (Sprint 12)...');
+  const universalPrompt  = buildGpt5FetchPrompt(today, universe, 'universal');
+  const topicalAPrompt   = buildGpt5FetchPrompt(today, universe, 'topical-a');
+  const topicalBPrompt   = buildGpt5FetchPrompt(today, universe, 'topical-b');
 
-  const [universalText, topicalText] = await Promise.all([
+  const [universalText, topicalAText, topicalBText] = await Promise.all([
     callGpt5Reasoning(universalPrompt, 'low').catch((err) => {
       console.error('[fetch:universal] gpt-5 failed:', err.message);
       return '';
     }),
-    callGpt5Reasoning(topicalPrompt, 'low').catch((err) => {
-      console.error('[fetch:topical] gpt-5 failed:', err.message);
+    callGpt5Reasoning(topicalAPrompt, 'low').catch((err) => {
+      console.error('[fetch:topical-a] gpt-5 failed:', err.message);
+      return '';
+    }),
+    callGpt5Reasoning(topicalBPrompt, 'low').catch((err) => {
+      console.error('[fetch:topical-b] gpt-5 failed:', err.message);
       return '';
     }),
   ]);
@@ -959,23 +1007,26 @@ async function fetchNewsFromOpenAI(universe: Universe): Promise<RawStories> {
   };
 
   const universalParsed = safeParse(universalText, 'universal');
-  const topicalParsed   = safeParse(topicalText,   'topical');
+  const topicalAParsed  = safeParse(topicalAText,  'topical-a');
+  const topicalBParsed  = safeParse(topicalBText,  'topical-b');
 
-  // Diagnostic: warn loudly if topical came back fully empty across all sections.
-  // This is the canary for "topical phase silently produced nothing" — the
-  // failure mode seen on 2026-06-08 production run. When this fires, look at
-  // the [fetch:topical] log above for the raw response preview.
-  const topicalStoryCount =
-    (topicalParsed.business?.length || 0) +
-    (topicalParsed.technology?.length || 0) +
-    (topicalParsed.climate_health?.length || 0) +
-    (topicalParsed.sport?.length || 0) +
-    (topicalParsed.culture?.length || 0);
-  const topicalIndicesCount = topicalParsed.markets?.indices?.length || 0;
-  if (topicalStoryCount === 0 && topicalIndicesCount === 0) {
-    console.error(`[fetch:topical] ALL TOPICAL SECTIONS EMPTY (0 stories, 0 indices). Topical phase produced nothing. Raw text length=${topicalText.length}. Investigate the response preview logged above.`);
-  } else if (topicalStoryCount === 0) {
-    console.warn(`[fetch:topical] All topical story sections empty (markets indices=${topicalIndicesCount}). Investigate.`);
+  // Diagnostic: warn loudly if either topical phase came back empty.
+  const topicalAStoryCount =
+    (topicalAParsed.business?.length || 0) +
+    (topicalAParsed.technology?.length || 0) +
+    (topicalAParsed.climate_health?.length || 0);
+  const topicalBStoryCount =
+    (topicalBParsed.sport?.length || 0) +
+    (topicalBParsed.culture?.length || 0);
+  const topicalBIndicesCount = topicalBParsed.markets?.indices?.length || 0;
+
+  if (topicalAStoryCount === 0) {
+    console.error(`[fetch:topical-a] ALL SECTIONS EMPTY (0 stories). Topical A produced nothing. Raw text length=${topicalAText.length}. Investigate the response preview logged above.`);
+  }
+  if (topicalBStoryCount === 0 && topicalBIndicesCount === 0) {
+    console.error(`[fetch:topical-b] ALL SECTIONS EMPTY (0 stories, 0 indices). Topical B produced nothing. Raw text length=${topicalBText.length}. Investigate the response preview logged above.`);
+  } else if (topicalBStoryCount === 0) {
+    console.warn(`[fetch:topical-b] sport+culture empty (markets indices=${topicalBIndicesCount}). Investigate.`);
   }
 
   // Merge into single RawStories shape. Empty arrays for missing sections.
@@ -983,16 +1034,16 @@ async function fetchNewsFromOpenAI(universe: Universe): Promise<RawStories> {
     major_events:   universalParsed.major_events || [],
     world:          universalParsed.world        || [],
     india:          universalParsed.india        || [],
-    business:       topicalParsed.business       || [],
-    technology:     topicalParsed.technology     || [],
-    climate_health: topicalParsed.climate_health || [],
-    sport:          topicalParsed.sport          || [],
-    culture:        topicalParsed.culture        || [],
-    markets:        topicalParsed.markets        || { summary: '', indices: [] },
+    business:       topicalAParsed.business      || [],
+    technology:     topicalAParsed.technology    || [],
+    climate_health: topicalAParsed.climate_health|| [],
+    sport:          topicalBParsed.sport         || [],
+    culture:        topicalBParsed.culture       || [],
+    markets:        topicalBParsed.markets       || { summary: '', indices: [] },
     lens:           universalParsed.lens         || null,
   };
 
-  console.log(`[fetch] gpt-5 merged raw section counts: ` +
+  console.log(`[fetch] gpt-5 merged raw section counts (Sprint 12 three-phase): ` +
     `major=${merged.major_events.length}, world=${merged.world.length}, india=${merged.india.length}, ` +
     `biz=${merged.business.length}, tech=${merged.technology.length}, climate=${merged.climate_health.length}, ` +
     `sport=${merged.sport.length}, culture=${merged.culture.length}, indices=${merged.markets?.indices?.length || 0}`);
@@ -2360,6 +2411,469 @@ async function modeFull(skipPush: boolean | undefined) {
   return { ok: true as const, results, lens };
 }
 
+// ─── Sprint 12: Tail fetch (city / interest / industry) ─────────────────────
+//
+// New mode=tail-fetch. Fetches per-city, per-interest, per-industry stories
+// using gpt-4o-mini-search-preview (cheap web-search-enabled model) and
+// writes one row per (date, tail_type, tail_key) to the `tail_briefs` table.
+// personalise-briefs.tsx reads from there instead of doing its own fetches.
+//
+// Key features:
+//   - 7-day dedup: tail_used_urls tracks every URL surfaced; future fetches
+//     receive the recent URLs as an exclude list (sent to the model in the
+//     prompt). Prevents repeating the same thought piece within a week.
+//   - City regional priority: REGIONAL_BY_CITY (in lib/whitelist) maps each
+//     city to its preferred regional outlets; the prompt names them.
+//   - Interest 7-day window: interest tail allows pieces up to 7 days old
+//     when no fresh 24h development exists (per Q4-C decision).
+//   - All tail fetches happen in parallel; cap per type is 3 stories.
+
+import {
+  isRegionalSource,
+  REGIONAL_BY_CITY,
+  publisherLabel as wlPublisherLabel,
+} from '@/lib/whitelist';
+
+interface TailStory {
+  headline: string;
+  body: string;
+  source: string;
+  source_url: string;
+  published_at?: string;
+}
+
+const TAIL_MODEL = 'gpt-4o-mini-search-preview';
+
+// Sprint 12 — exposed for admin override. Defaults to the cheap mini model;
+// flip via env var TAIL_FETCH_MODEL='gpt-4o' to test the quality/cost trade-off.
+function getTailModel(): string {
+  const envModel = process.env.TAIL_FETCH_MODEL;
+  return envModel && envModel.trim() ? envModel.trim() : TAIL_MODEL;
+}
+
+async function callTailFetch(
+  prompt: string,
+  label: string,
+  costPhase: 'city' | 'interest' | 'industry',
+  costDetail: string,
+): Promise<TailStory[]> {
+  const model = getTailModel();
+
+  // gpt-4o-mini-search-preview uses /v1/chat/completions with web_search_options.
+  // gpt-4o (fallback / override) uses /v1/responses with tools: [{type: 'web_search_preview'}].
+  // We support both paths so TAIL_FETCH_MODEL can switch between them.
+
+  let text = '';
+  try {
+    if (model === 'gpt-4o-mini-search-preview') {
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model,
+          web_search_options: {},
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: 2500,
+        }),
+      });
+      const data = await response.json();
+      if (response.status !== 200) {
+        console.warn(`[tail:${label}] ${model} returned ${response.status}: ${JSON.stringify(data).slice(0, 400)}`);
+        return [];
+      }
+      const usage = extractUsageFromChatCompletion(data);
+      void logOpenAICost({
+        phase: costPhase,
+        model,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        reasoningTokens: usage.reasoningTokens,
+        detail: costDetail,
+      });
+      text = data?.choices?.[0]?.message?.content || '';
+    } else {
+      // gpt-4o via /v1/responses path (existing pattern from personalise-briefs).
+      const response = await fetch('https://api.openai.com/v1/responses', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model,
+          tools: [{ type: 'web_search_preview' }],
+          tool_choice: { type: 'web_search_preview' },
+          input: prompt,
+          max_output_tokens: 2500,
+        }),
+      });
+      const data = await response.json();
+      if (response.status !== 200) {
+        console.warn(`[tail:${label}] ${model} returned ${response.status}: ${JSON.stringify(data).slice(0, 400)}`);
+        return [];
+      }
+      const usage = extractUsageFromResponses(data);
+      void logOpenAICost({
+        phase: costPhase,
+        model,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        reasoningTokens: usage.reasoningTokens,
+        detail: costDetail,
+      });
+      text = data.output?.find((o: any) => o.type === 'message')?.content?.[0]?.text || '';
+    }
+  } catch (err: any) {
+    console.warn(`[tail:${label}] network/api error: ${err?.message || err}`);
+    return [];
+  }
+
+  if (!text) {
+    console.warn(`[tail:${label}] empty text in response`);
+    return [];
+  }
+
+  let parsed: any;
+  try {
+    parsed = extractJsonObject(text);
+  } catch (err: any) {
+    console.warn(`[tail:${label}] JSON parse failed: ${err.message}. Preview: ${text.slice(0, 300)}`);
+    return [];
+  }
+
+  const raw = Array.isArray(parsed?.stories) ? parsed.stories : [];
+  const kept: TailStory[] = [];
+  for (const s of raw) {
+    if (!s || typeof s.headline !== 'string' || typeof s.body !== 'string' || typeof s.source !== 'string') continue;
+    if (!isWhitelistedSource(s.source_url)) {
+      console.warn(`[tail:${label}] dropping non-whitelisted source: ${s.source_url}`);
+      continue;
+    }
+    kept.push(s as TailStory);
+    if (kept.length >= 3) break;
+  }
+  return kept;
+}
+
+// 7-day used-URL lookup for cross-day dedup.
+async function loadRecentUsedUrls(tailType: string, tailKey: string): Promise<string[]> {
+  const today = getISTDate();
+  const sevenDaysAgo = getISTDate(-7);
+  const { data, error } = await supabase
+    .from('tail_used_urls')
+    .select('source_url')
+    .eq('tail_type', tailType)
+    .eq('tail_key', tailKey)
+    .gte('date', sevenDaysAgo)
+    .lte('date', today);
+  if (error) {
+    console.warn(`[tail:dedup] used-url lookup failed for ${tailType}/${tailKey}: ${error.message}`);
+    return [];
+  }
+  return (data || []).map((r: any) => r.source_url).filter(Boolean);
+}
+
+function formatExcludeBlock(urls: string[]): string {
+  if (urls.length === 0) return '';
+  const trimmed = urls.slice(0, 30); // cap prompt size
+  return `\nEXCLUDE — these URLs were already surfaced in the last 7 days; do NOT include them again:\n${trimmed.map((u) => `- ${u}`).join('\n')}\n`;
+}
+
+async function fetchCityTail(city: string): Promise<{ stories: TailStory[]; usedRegional: boolean }> {
+  const today = getISTDate();
+  const cityNormalised = city.toLowerCase().trim();
+  const regional = REGIONAL_BY_CITY[cityNormalised] || [];
+  const regionalLabels = regional
+    .map((d) => wlPublisherLabel(`https://${d}/`) || d)
+    .join(', ');
+
+  const excludeUrls = await loadRecentUsedUrls('city', cityNormalised);
+
+  const regionalBlock = regional.length > 0
+    ? `\nPREFERRED REGIONAL SOURCES for ${city} — search these FIRST: ${regionalLabels}. These local outlets typically have stories that national papers' city editions miss.\n`
+    : '';
+
+  const prompt = `You are sourcing local news for ${city}, India. Today is ${today}.
+
+Search the web for the 1-3 most consequential stories from ${city} in the last 24-36 hours. Civic and municipal news, major events in the city, notable incidents, local policy changes, transport, business openings/closures, urban issues, weather.
+
+If nothing genuinely newsworthy happened, return an empty array. Do not pad with national stories.
+${regionalBlock}${formatExcludeBlock(excludeUrls)}
+
+SOURCE WHITELIST — direct article URLs only from these publishers:
+National: The Hindu, Indian Express, Hindustan Times, Mint, Business Standard, The Print, Scroll, Times of India, Deccan Herald, The Wire, NDTV, Moneycontrol, India Today, The Quint, Outlook India.
+Regional: Telegraph India (East), Tribune India (North), The News Minute (South), New Indian Express, Mid-Day (Mumbai/Pune), Free Press Journal (Mumbai/MP), Bangalore Mirror, DT Next (Chennai), Telangana Today, Ahmedabad Mirror, Onmanorama (Kerala).
+Wires: PTI, ANI.
+No aggregators, no social media, no Google News redirects.
+
+Return ONLY a JSON object — no markdown, no commentary:
+{
+  "stories": [
+    {
+      "headline": "clear factual headline (max 120 chars)",
+      "body": "2-3 sentence factual summary — paraphrase, do not quote at length",
+      "source": "publication name",
+      "source_url": "https://... direct article link",
+      "published_at": "${today}"
+    }
+  ]
+}`;
+
+  const stories = await callTailFetch(prompt, `city:${city}`, 'city', city);
+  const usedRegional = stories.some((s) => isRegionalSource(s.source_url));
+  return { stories, usedRegional };
+}
+
+async function fetchInterestTail(interest: string): Promise<TailStory[]> {
+  const today = getISTDate();
+  const interestKey = interest.toLowerCase().trim();
+  const excludeUrls = await loadRecentUsedUrls('interest', interestKey);
+
+  // Q4-C: 7-day window for interest tails. Allow features, analyses, and
+  // trend pieces from the last week when no fresh 24h news exists.
+  const prompt = `You are sourcing content about "${interest}" for an India-focused daily brief. Today is ${today}.
+
+Two-pass strategy:
+1. FIRST PASS — search for 24-48h news developments on ${interest}. Major announcements, policy moves, milestones, events. India focus preferred but global if globally significant.
+2. SECOND PASS (only if first pass yields fewer than 3 stories) — search for recent feature articles, analyses, trend pieces, or thoughtful explainers published in the LAST 7 DAYS on ${interest}. Recent developments, current trends, important shifts. Still from whitelisted publishers only.
+
+Return 1-3 total stories combining both passes. Paraphrase content into 2-3 factual sentences — do NOT quote at length. Headlines should be your own factual summary, not the original article's title verbatim.
+${formatExcludeBlock(excludeUrls)}
+
+SOURCE WHITELIST — direct article URLs only from these publishers:
+Global: Reuters, AP, Bloomberg, FT, WSJ, NYT, WaPo, BBC, The Guardian, The Economist, Al Jazeera, ABC News Australia.
+India national: The Hindu, Indian Express, Hindustan Times, Mint, Business Standard, The Print, Scroll, Deccan Herald, The Wire, NDTV, India Today, The Quint, Outlook India, Caravan, Moneycontrol, Financial Express, Business Today, Economic Times, New Indian Express, Telegraph India, Tribune India, The News Minute.
+India wires: PTI, ANI.
+India specialist: Live Law, Bar & Bench (law), Down To Earth (environment/health).
+Government primary: PIB, RBI, SEBI, MoSPI.
+Specialist (where general sources don't cover): Nature, Science, STAT, TechCrunch, The Verge, Wired, Variety, Hollywood Reporter, ESPNCricinfo, ESPN.
+
+Return ONLY a JSON object — no markdown:
+{
+  "stories": [
+    { "headline": "your factual summary headline", "body": "2-3 sentence paraphrased summary", "source": "Publisher Name", "source_url": "https://...", "published_at": "${today}" }
+  ]
+}`;
+
+  return callTailFetch(prompt, `interest:${interest}`, 'interest', interest);
+}
+
+async function fetchIndustryTail(industry: string): Promise<TailStory[]> {
+  const today = getISTDate();
+  const industryKey = industry.toLowerCase().trim();
+  const excludeUrls = await loadRecentUsedUrls('industry', industryKey);
+
+  const prompt = `You are sourcing industry news about "${industry}" for an India-focused daily brief targeting working professionals. Today is ${today}.
+
+Two-pass strategy:
+1. FIRST PASS — search for 24-48h developments specifically affecting the ${industry} sector. Earnings, deals, regulations, hires, major company moves, sector-wide trends. India focus preferred; include major global moves that affect Indian operators.
+2. SECOND PASS (only if first pass yields fewer than 3 stories) — search for feature articles, analyses, or trend pieces published in the LAST 7 DAYS on ${industry}. Industry shifts, regulatory trajectories, market shifts.
+
+Return 1-3 total stories. Paraphrase into 2-3 factual sentences — do NOT quote at length.
+${formatExcludeBlock(excludeUrls)}
+
+SOURCE WHITELIST — direct article URLs only from:
+Global wires/papers: Reuters, AP, Bloomberg, FT, WSJ, NYT, WaPo, BBC, The Guardian, The Economist.
+India national & business: The Hindu, Indian Express, Hindustan Times, Mint, Business Standard, Economic Times, Financial Express, Moneycontrol, Business Today, The Hindu BusinessLine, NDTV, India Today.
+India digital: The Print, Scroll, The Wire, Caravan.
+India wires: PTI, ANI.
+Government primary: RBI, SEBI, MoSPI, PIB.
+Specialist: TechCrunch, The Verge, Wired (tech), Nature/Science/STAT (health/pharma), Variety/Hollywood Reporter (media), ESPN/ESPNCricinfo (sport).
+
+Return ONLY a JSON object — no markdown:
+{
+  "stories": [
+    { "headline": "your factual summary headline", "body": "2-3 sentence paraphrased summary", "source": "Publisher Name", "source_url": "https://...", "published_at": "${today}" }
+  ]
+}`;
+
+  return callTailFetch(prompt, `industry:${industry}`, 'industry', industry);
+}
+
+interface TailFetchResult {
+  tail_type: 'city' | 'interest' | 'industry';
+  tail_key: string;
+  display_name: string;
+  stories: TailStory[];
+  status: 'ready' | 'empty' | 'failed';
+  reason?: string;
+  usedRegional?: boolean;
+}
+
+async function modeTailFetch() {
+  const today = getISTDate();
+  const universe = await loadPersonalisationUniverse();
+
+  console.log(`[tail-fetch] Universe — cities: ${universe.cities.length}, interests: ${universe.interests.length}, industries: ${universe.industries.length}`);
+
+  if (universe.cities.length + universe.interests.length + universe.industries.length === 0) {
+    return {
+      ok: true as const,
+      date: today,
+      summary: { cities: 0, interests: 0, industries: 0 },
+      results: [],
+      note: 'No personalised users; nothing to fetch.',
+    };
+  }
+
+  // All fetches in parallel — each is independent.
+  const cityPromises = universe.cities.map(async (city): Promise<TailFetchResult> => {
+    try {
+      const { stories, usedRegional } = await fetchCityTail(city);
+      const tail_key = city.toLowerCase().trim();
+      return {
+        tail_type: 'city',
+        tail_key,
+        display_name: city,
+        stories,
+        status: stories.length > 0 ? 'ready' : 'empty',
+        usedRegional,
+      };
+    } catch (e: any) {
+      return {
+        tail_type: 'city',
+        tail_key: city.toLowerCase().trim(),
+        display_name: city,
+        stories: [],
+        status: 'failed',
+        reason: e?.message || String(e),
+      };
+    }
+  });
+
+  const interestPromises = universe.interests.map(async (interest): Promise<TailFetchResult> => {
+    try {
+      const stories = await fetchInterestTail(interest);
+      return {
+        tail_type: 'interest',
+        tail_key: interest.toLowerCase().trim(),
+        display_name: interest,
+        stories,
+        status: stories.length > 0 ? 'ready' : 'empty',
+      };
+    } catch (e: any) {
+      return {
+        tail_type: 'interest',
+        tail_key: interest.toLowerCase().trim(),
+        display_name: interest,
+        stories: [],
+        status: 'failed',
+        reason: e?.message || String(e),
+      };
+    }
+  });
+
+  const industryPromises = universe.industries.map(async (industry): Promise<TailFetchResult> => {
+    try {
+      const stories = await fetchIndustryTail(industry);
+      return {
+        tail_type: 'industry',
+        tail_key: industry.toLowerCase().trim(),
+        display_name: industry,
+        stories,
+        status: stories.length > 0 ? 'ready' : 'empty',
+      };
+    } catch (e: any) {
+      return {
+        tail_type: 'industry',
+        tail_key: industry.toLowerCase().trim(),
+        display_name: industry,
+        stories: [],
+        status: 'failed',
+        reason: e?.message || String(e),
+      };
+    }
+  });
+
+  const allResults = await Promise.all([
+    ...cityPromises,
+    ...interestPromises,
+    ...industryPromises,
+  ]);
+
+  // Write to tail_briefs (upsert per row).
+  const upsertRows = allResults.map((r) => ({
+    date: today,
+    tail_type: r.tail_type,
+    tail_key: r.tail_key,
+    display_name: r.display_name,
+    stories: r.stories,
+    status: r.status,
+    reason: r.reason || null,
+    story_count: r.stories.length,
+    used_regional: !!r.usedRegional,
+  }));
+
+  if (upsertRows.length > 0) {
+    const { error } = await supabase
+      .from('tail_briefs')
+      .upsert(upsertRows, { onConflict: 'date,tail_type,tail_key' });
+    if (error) {
+      console.error(`[tail-fetch] tail_briefs upsert failed: ${error.message}`);
+      return { ok: false as const, error: `tail_briefs upsert failed: ${error.message}` };
+    }
+  }
+
+  // Append to tail_used_urls for dedup tracking on future runs.
+  const usedUrlRows: any[] = [];
+  for (const r of allResults) {
+    for (const s of r.stories) {
+      if (s.source_url) {
+        usedUrlRows.push({
+          date: today,
+          tail_type: r.tail_type,
+          tail_key: r.tail_key,
+          source_url: s.source_url,
+          headline: s.headline?.slice(0, 300) || null,
+        });
+      }
+    }
+  }
+
+  if (usedUrlRows.length > 0) {
+    const { error } = await supabase.from('tail_used_urls').insert(usedUrlRows);
+    if (error) {
+      console.warn(`[tail-fetch] tail_used_urls insert failed (non-fatal): ${error.message}`);
+    } else {
+      console.log(`[tail-fetch] Logged ${usedUrlRows.length} URLs to tail_used_urls.`);
+    }
+  }
+
+  // Summary
+  const summary = {
+    cities: { total: universe.cities.length, ready: 0, empty: 0, failed: 0 },
+    interests: { total: universe.interests.length, ready: 0, empty: 0, failed: 0 },
+    industries: { total: universe.industries.length, ready: 0, empty: 0, failed: 0 },
+  };
+  for (const r of allResults) {
+    const bucket =
+      r.tail_type === 'city' ? summary.cities :
+      r.tail_type === 'interest' ? summary.interests : summary.industries;
+    (bucket as any)[r.status] = ((bucket as any)[r.status] || 0) + 1;
+  }
+
+  console.log(`[tail-fetch] Done. Cities: ${summary.cities.ready}/${summary.cities.total} ready. Interests: ${summary.interests.ready}/${summary.interests.total}. Industries: ${summary.industries.ready}/${summary.industries.total}.`);
+
+  return {
+    ok: true as const,
+    date: today,
+    model: getTailModel(),
+    summary,
+    results: allResults.map((r) => ({
+      tail_type: r.tail_type,
+      tail_key: r.tail_key,
+      display_name: r.display_name,
+      story_count: r.stories.length,
+      status: r.status,
+      used_regional: !!r.usedRegional,
+      reason: r.reason,
+    })),
+  };
+}
+
 // ─── Handler ─────────────────────────────────────────────────────────────────
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -2373,6 +2887,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     if (mode === 'fetch') {
       const result = await modeFetch();
+      return res.status(result.ok ? 200 : 500).json(result);
+    }
+
+    if (mode === 'tail-fetch') {
+      const result = await modeTailFetch();
       return res.status(result.ok ? 200 : 500).json(result);
     }
 
@@ -2401,7 +2920,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     return res.status(400).json({
       ok: false,
-      error: `Unknown mode: ${mode}. Use 'fetch', 'write', 'push', 'score', or 'full'.`,
+      error: `Unknown mode: ${mode}. Use 'fetch', 'tail-fetch', 'write', 'push', 'score', or 'full'.`,
     });
   } catch (error: any) {
     console.error('Top-level error:', error.message);

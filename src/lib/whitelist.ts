@@ -1,6 +1,7 @@
 // src/lib/whitelist.ts
 //
 // Sprint 11 — single source of truth for the Tier-1 source whitelist.
+// Sprint 12 — added regional sources for city-tail fetches.
 //
 // Previously this list was duplicated inline in both generate-brief.tsx and
 // personalise-briefs.tsx. The two copies drifted: the personalise-briefs copy
@@ -11,7 +12,13 @@
 //
 // Both files now import from here. Do NOT inline-copy these domains anywhere
 // else — drift is what created the original bug.
+//
+// Sprint 12: added regional sources for city tail coverage. These pass the
+// whitelist check the same way as national sources. They are tracked
+// separately so the city-tail fetcher can prompt the model to PRIORITISE
+// regional outlets for city-specific stories.
 
+// ─── National / global Tier-1 ───────────────────────────────────────────────
 export const TIER_1_DOMAINS = new Set<string>([
   // ─── Global wires + papers of record ──────────────────────────────────────
   'reuters.com',
@@ -29,8 +36,8 @@ export const TIER_1_DOMAINS = new Set<string>([
   'abc.net.au',
 
   // ─── India — wires + papers of record ─────────────────────────────────────
-  'ptinews.com',                       // Press Trust of India (wire)
-  'aninews.in',                        // Asian News International
+  'ptinews.com',
+  'aninews.in',
   'thehindu.com',
   'thehindubusinessline.com',
   'indianexpress.com',
@@ -61,16 +68,16 @@ export const TIER_1_DOMAINS = new Set<string>([
   'thenewsminute.com',                 // South India regional
 
   // ─── India — specialist (legal, environment) ──────────────────────────────
-  'livelaw.in',                        // Court / legal news — Law & Policy
-  'barandbench.com',                   // Court / legal news — Law & Policy
-  'downtoearth.org.in',                // Environment / public health
+  'livelaw.in',
+  'barandbench.com',
+  'downtoearth.org.in',
 
   // ─── Government / institutional primary sources ───────────────────────────
   'rbi.org.in',
   'sebi.gov.in',
-  'mospi.gov.in',                      // Ministry of Statistics
-  'pib.gov.in',                        // Press Information Bureau
-  'bls.gov',                           // US Bureau of Labor Statistics
+  'mospi.gov.in',
+  'pib.gov.in',
+  'bls.gov',
   'treasury.gov',
   'federalreserve.gov',
   'imf.org',
@@ -91,6 +98,67 @@ export const TIER_1_DOMAINS = new Set<string>([
   'wired.com',
 ]);
 
+// ─── Regional sources (Sprint 12) ───────────────────────────────────────────
+// These pass the whitelist check (added to TIER_1_DOMAINS below) AND are
+// tracked here separately so the city-tail prompt can name them explicitly.
+// City → preferred regional sources mapping lives in REGIONAL_BY_CITY.
+
+export const REGIONAL_DOMAINS = new Set<string>([
+  // Mumbai / Pune / Western Maharashtra
+  'mid-day.com',
+  'freepressjournal.in',
+  // Bengaluru / Karnataka
+  'bangaloremirror.indiatimes.com',
+  // Chennai / Tamil Nadu
+  'dtnext.in',
+  // Hyderabad / Telangana
+  'telanganatoday.com',
+  // Ahmedabad / Gujarat
+  'ahmedabadmirror.com',
+  // Kerala
+  'onmanorama.com',
+  // Note: Telegraph India (East), Tribune India (North), News Minute (South),
+  // Deccan Herald (Bengaluru) are already in TIER_1_DOMAINS above. They will
+  // ALSO appear in REGIONAL_BY_CITY mappings.
+]);
+
+// Merge regional domains into TIER_1_DOMAINS so existing whitelist checks
+// accept them without changes. The Set's add() is idempotent.
+for (const d of Array.from(REGIONAL_DOMAINS)) {
+  TIER_1_DOMAINS.add(d);
+}
+
+// ─── City → preferred regional sources mapping ──────────────────────────────
+// Used by the city-tail prompt to direct gpt-4o-mini-search-preview to the
+// right local outlets. Values reference both TIER_1 and REGIONAL_DOMAINS keys.
+//
+// Keys are lowercased. The matcher in generate-brief uses .toLowerCase().trim()
+// — "Delhi / NCR" → "delhi / ncr".
+
+export const REGIONAL_BY_CITY: Record<string, string[]> = {
+  'mumbai':         ['mid-day.com', 'freepressjournal.in', 'hindustantimes.com', 'indianexpress.com'],
+  'pune':           ['mid-day.com', 'freepressjournal.in', 'hindustantimes.com', 'indianexpress.com'],
+  'bengaluru':      ['deccanherald.com', 'bangaloremirror.indiatimes.com', 'thenewsminute.com', 'thehindu.com'],
+  'bangalore':      ['deccanherald.com', 'bangaloremirror.indiatimes.com', 'thenewsminute.com', 'thehindu.com'],
+  'chennai':        ['thehindu.com', 'dtnext.in', 'newindianexpress.com', 'thenewsminute.com'],
+  'hyderabad':      ['telanganatoday.com', 'thehindu.com', 'newindianexpress.com', 'deccanherald.com'],
+  'delhi / ncr':    ['hindustantimes.com', 'indianexpress.com', 'thehindu.com', 'theprint.in'],
+  'delhi':          ['hindustantimes.com', 'indianexpress.com', 'thehindu.com', 'theprint.in'],
+  'kolkata':        ['telegraphindia.com', 'hindustantimes.com', 'indianexpress.com', 'thehindu.com'],
+  'ahmedabad':      ['ahmedabadmirror.com', 'indianexpress.com', 'timesofindia.indiatimes.com'],
+  'jaipur':         ['hindustantimes.com', 'indianexpress.com', 'tribuneindia.com'],
+  'lucknow':        ['hindustantimes.com', 'indianexpress.com', 'thehindu.com'],
+  'chandigarh':     ['tribuneindia.com', 'hindustantimes.com', 'indianexpress.com'],
+  'kochi':          ['onmanorama.com', 'thehindu.com', 'newindianexpress.com', 'thenewsminute.com'],
+  'indore':         ['freepressjournal.in', 'hindustantimes.com', 'indianexpress.com'],
+  'bhopal':         ['freepressjournal.in', 'hindustantimes.com', 'indianexpress.com'],
+  'nagpur':         ['hindustantimes.com', 'indianexpress.com', 'freepressjournal.in'],
+  'surat':          ['ahmedabadmirror.com', 'indianexpress.com', 'timesofindia.indiatimes.com'],
+  'visakhapatnam':  ['thehindu.com', 'newindianexpress.com', 'deccanherald.com'],
+  'coimbatore':     ['thehindu.com', 'dtnext.in', 'newindianexpress.com'],
+  'vadodara':       ['ahmedabadmirror.com', 'indianexpress.com', 'timesofindia.indiatimes.com'],
+};
+
 // Extract a normalised hostname from a URL. Strips www./m./amp. prefixes so
 // mobile and AMP subdomains of whitelisted publishers pass the check.
 export function extractHostname(url: string | undefined | null): string | null {
@@ -107,7 +175,6 @@ export function extractHostname(url: string | undefined | null): string | null {
 }
 
 // Accept exact match or any subdomain of a whitelisted domain.
-// Array.from() avoids the downlevel-iteration TS error on Set<string>.
 export function isWhitelistedSource(url: string | undefined | null): boolean {
   const host = extractHostname(url);
   if (!host) return false;
@@ -117,10 +184,20 @@ export function isWhitelistedSource(url: string | undefined | null): boolean {
   return false;
 }
 
+// Sprint 12: detect whether a URL is from a regional source. Used by the
+// city-tail fetcher to log used_regional=true so admin can see whether
+// city stories are coming from regional vs national outlets.
+export function isRegionalSource(url: string | undefined | null): boolean {
+  const host = extractHostname(url);
+  if (!host) return false;
+  for (const allowed of Array.from(REGIONAL_DOMAINS)) {
+    if (host === allowed || host.endsWith('.' + allowed)) return true;
+  }
+  return false;
+}
+
 // Resolve a URL to its normalised publisher domain (for diversity caps).
 // Returns the matched whitelisted root domain when applicable.
-// e.g. 'https://m.indianexpress.com/article/...' → 'indianexpress.com'.
-// Returns null for non-whitelisted URLs.
 export function publisherKey(url: string | undefined | null): string | null {
   const host = extractHostname(url);
   if (!host) return null;
@@ -174,6 +251,14 @@ const PUBLISHER_LABELS: Record<string, string> = {
   'livelaw.in': 'Live Law',
   'barandbench.com': 'Bar and Bench',
   'downtoearth.org.in': 'Down To Earth',
+  // Sprint 12 regional additions:
+  'mid-day.com': 'Mid-Day',
+  'freepressjournal.in': 'Free Press Journal',
+  'bangaloremirror.indiatimes.com': 'Bangalore Mirror',
+  'dtnext.in': 'DT Next',
+  'telanganatoday.com': 'Telangana Today',
+  'ahmedabadmirror.com': 'Ahmedabad Mirror',
+  'onmanorama.com': 'Onmanorama',
 };
 
 export function publisherLabel(url: string | undefined | null): string | null {

@@ -170,6 +170,17 @@ type ScoreRow = {
   notes: string | null
 }
 
+// Sprint 12 — one row per (date, tail_type, tail_key) from tail_briefs table.
+type TailBriefRow = {
+  tail_type: 'city' | 'interest' | 'industry'
+  tail_key: string
+  display_name: string
+  status: 'ready' | 'empty' | 'failed'
+  story_count: number
+  used_regional: boolean
+  reason: string | null
+}
+
 function formatUSD(n: number): string {
   if (n < 0.01) return `$${n.toFixed(4)}`
   if (n < 1) return `$${n.toFixed(3)}`
@@ -222,6 +233,11 @@ export default function AdminPage() {
   const [scoring, setScoring] = useState(false)
   const [scoreResult, setScoreResult] = useState<string>('')
 
+  // Sprint 12 — tail-fetch state
+  const [runningTailFetch, setRunningTailFetch] = useState(false)
+  const [tailFetchResult, setTailFetchResult] = useState<string>('')
+  const [tailBriefRows, setTailBriefRows] = useState<TailBriefRow[]>([])
+
   useEffect(() => {
     const checkAuth = async () => {
       const { data: { user } } = await supabase.auth.getUser()
@@ -242,6 +258,7 @@ export default function AdminPage() {
       loadHistory()
       loadPersonalisedStats()
       loadCostAndScoreData()
+      loadTailBriefsStatus()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authorized, selectedDate])
@@ -387,10 +404,45 @@ export default function AdminPage() {
       setPersonaliseResult(JSON.stringify(data, null, 2))
       await loadPersonalisedStats()
       await loadCostAndScoreData()
+      await loadTailBriefsStatus()
     } catch (e: any) {
       setPersonaliseResult('Error: ' + e.message)
     }
     setRunningPersonalisation(false)
+  }
+
+  // Sprint 12: trigger the tail-fetch phase manually.
+  async function runTailFetch() {
+    setRunningTailFetch(true)
+    setTailFetchResult('Running tail-fetch (cities + interests + industries via gpt-4o-mini-search-preview)…')
+    try {
+      const data = await safeJsonFetch('/api/generate-brief', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'tail-fetch' }),
+      })
+      setTailFetchResult(JSON.stringify(data, null, 2))
+      await loadTailBriefsStatus()
+      await loadCostAndScoreData()
+    } catch (e: any) {
+      setTailFetchResult('Error: ' + e.message)
+    }
+    setRunningTailFetch(false)
+  }
+
+  // Sprint 12: load tail_briefs status rows for the selected date.
+  async function loadTailBriefsStatus() {
+    const { data, error } = await supabase
+      .from('tail_briefs')
+      .select('tail_type, tail_key, display_name, status, story_count, used_regional, reason')
+      .eq('date', selectedDate)
+      .order('tail_type')
+      .order('tail_key')
+    if (error) {
+      setTailBriefRows([])
+      return
+    }
+    setTailBriefRows((data || []) as TailBriefRow[])
   }
 
   // ─── Sprint 11 loaders ─────────────────────────────────────────────────
@@ -1006,6 +1058,108 @@ export default function AdminPage() {
                 )
               })}
             </div>
+          )}
+        </div>
+
+        {/* ─── Sprint 12: Tail-fetch panel ─────────────────────────────── */}
+        <div style={{ marginTop: '36px', paddingTop: '28px', borderTop: `1px solid ${C.border}` }}>
+          <div style={{
+            display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+            marginBottom: '16px', flexWrap: 'wrap', gap: '12px',
+          }}>
+            <div style={{
+              fontFamily: "'DM Mono', monospace", fontSize: '11px',
+              letterSpacing: '2.5px', color: C.gold,
+            }}>TAIL-FETCH · CITY · INTEREST · INDUSTRY</div>
+            <button onClick={runTailFetch} disabled={runningTailFetch} style={{
+              padding: '8px 14px', background: 'transparent',
+              color: runningTailFetch ? C.textDim : C.gold,
+              border: `1px solid ${runningTailFetch ? C.border : C.goldBorder}`,
+              fontFamily: "'DM Mono', monospace", fontSize: '10px',
+              letterSpacing: '1.5px', cursor: runningTailFetch ? 'not-allowed' : 'pointer',
+              textTransform: 'uppercase',
+            }}>
+              {runningTailFetch ? 'Running…' : 'Run tail-fetch now'}
+            </button>
+          </div>
+
+          {tailBriefRows.length === 0 ? (
+            <div style={{
+              border: `1px solid ${C.border}`, padding: '20px', color: C.textMute,
+              fontFamily: "'DM Sans', sans-serif", fontSize: '14px',
+              background: C.surface2, fontStyle: 'italic',
+            }}>
+              No tail_briefs rows for {selectedDate} yet. Run tail-fetch (or wait for the cron).
+            </div>
+          ) : (
+            <>
+              {/* Summary cards by type */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px', marginBottom: '18px' }}>
+                {(['city', 'interest', 'industry'] as const).map(type => {
+                  const rows = tailBriefRows.filter(r => r.tail_type === type)
+                  const ready = rows.filter(r => r.status === 'ready').length
+                  const empty = rows.filter(r => r.status === 'empty').length
+                  const failed = rows.filter(r => r.status === 'failed').length
+                  return (
+                    <div key={type} style={{
+                      border: `1px solid ${C.border}`, padding: '12px 14px',
+                      background: C.surface2,
+                      borderLeft: `3px solid ${failed > 0 ? C.err : empty > 0 ? C.warn : C.ok}`,
+                    }}>
+                      <div style={{
+                        fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                        letterSpacing: '1.5px', color: C.textMute, marginBottom: '6px',
+                      }}>{type.toUpperCase()}</div>
+                      <div style={{
+                        fontFamily: "'Playfair Display', serif", fontSize: '20px',
+                        fontWeight: 700, color: C.text, marginBottom: '4px',
+                      }}>{ready}/{rows.length}</div>
+                      <div style={{
+                        fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                        color: C.textMute, letterSpacing: '0.5px',
+                      }}>
+                        {ready} ready · {empty} empty · {failed} failed
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+
+              {/* Per-row breakdown */}
+              <div style={{ border: `1px solid ${C.border}`, background: C.surface2, maxHeight: '320px', overflowY: 'auto' }}>
+                {tailBriefRows.map((r, i) => {
+                  const c =
+                    r.status === 'ready' ? C.ok :
+                    r.status === 'failed' ? C.err : C.warn
+                  return (
+                    <div key={i} style={{
+                      display: 'grid', gridTemplateColumns: '0.7fr 1.2fr 0.6fr 0.5fr 0.5fr',
+                      gap: '10px', padding: '8px 14px',
+                      borderBottom: i < tailBriefRows.length - 1 ? `1px solid ${C.border}` : 'none',
+                      fontFamily: "'DM Mono', monospace", fontSize: '11px',
+                      alignItems: 'center',
+                    }}>
+                      <div style={{ color: C.textMute, letterSpacing: '1px' }}>{r.tail_type}</div>
+                      <div style={{ color: C.textSoft }}>{r.display_name}</div>
+                      <div style={{ color: c, letterSpacing: '1px' }}>{r.status}</div>
+                      <div style={{ color: C.text, textAlign: 'right' }}>{r.story_count} stories</div>
+                      <div style={{ color: r.used_regional ? C.gold : C.textDim, textAlign: 'right' }}>
+                        {r.tail_type === 'city' ? (r.used_regional ? 'regional' : 'national') : ''}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </>
+          )}
+
+          {tailFetchResult && (
+            <pre style={{
+              marginTop: '16px', padding: '14px',
+              background: C.surface2, border: `1px solid ${C.border}`,
+              color: C.textSoft, fontFamily: "'DM Mono', monospace", fontSize: '11px',
+              maxHeight: '220px', overflowY: 'auto', whiteSpace: 'pre-wrap',
+            }}>{tailFetchResult}</pre>
           )}
         </div>
 

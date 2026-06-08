@@ -2,7 +2,9 @@
 //
 // Sprint 11 — per-OpenAI-call cost capture. One row per API call goes to
 // brief_costs in Supabase. Daily totals are computed at read time on the
-// /admin/ops dashboard.
+// /admin dashboard.
+//
+// Sprint 12 — added 'industry' tail phase + gpt-4o-mini-search-preview model.
 //
 // Fire-and-forget: writes are awaited but failure is logged-only, never
 // thrown. We don't want telemetry failures to take down the brief pipeline.
@@ -18,10 +20,19 @@ const supabase = createClient(
 );
 
 // USD per 1M tokens. Reasoning tokens are billed at the output rate.
+//
+// Sprint 12 note: gpt-4o-mini-search-preview has the same token rates as
+// gpt-4o-mini ($0.15 in / $0.60 out per 1M). It also charges a per-search
+// fee (~$25 per 1K searches per OpenAI's pricing page). The per-search fee
+// is NOT captured here — it would require OpenAI usage API integration. For
+// our volume (~20 tail fetches × 2-3 searches each = 40-60 searches/day) the
+// per-search fee is ≈ $0.0015/day, well within rounding error. Revisit if
+// tail fetch volume grows past a few hundred per day.
 const PRICING: Record<string, { input: number; output: number }> = {
-  'gpt-5':       { input: 1.25,  output: 10.00 },   // reasoning model
-  'gpt-4o':      { input: 2.50,  output: 10.00 },
-  'gpt-4o-mini': { input: 0.15,  output: 0.60 },
+  'gpt-5':                        { input: 1.25,  output: 10.00 },
+  'gpt-4o':                       { input: 2.50,  output: 10.00 },
+  'gpt-4o-mini':                  { input: 0.15,  output: 0.60 },
+  'gpt-4o-mini-search-preview':   { input: 0.15,  output: 0.60 },
 };
 
 function getISTDate(): string {
@@ -35,8 +46,9 @@ export type CostPhase =
   | '5min'       // The Brief writer
   | '10min'      // The Daily writer
   | 'deep'       // The Editorial writer
-  | 'city'       // per-city tail fetch
-  | 'interest'   // per-interest tail fetch
+  | 'city'       // per-city tail fetch (Sprint 12: now via gpt-4o-mini-search-preview)
+  | 'interest'   // per-interest tail fetch (Sprint 12)
+  | 'industry'   // per-industry tail fetch (Sprint 12 — NEW)
   | 'score';     // auto-scorer (rubric)
 
 export function calculateCostUSD(
@@ -47,7 +59,6 @@ export function calculateCostUSD(
 ): number {
   const p = PRICING[model];
   if (!p) {
-    // Unknown model — log it, but don't throw. Pricing table needs updating.
     console.warn(`[cost] Unknown model "${model}" — using gpt-4o-mini rate as fallback.`);
     const f = PRICING['gpt-4o-mini'];
     const inputCost = (inputTokens / 1_000_000) * f.input;
@@ -113,7 +124,6 @@ export function extractUsageFromResponses(data: any): {
   outputTokens: number;
   reasoningTokens: number;
 } {
-  // /v1/responses endpoint — used for gpt-5 reasoning + web_search.
   const u = data?.usage || {};
   return {
     inputTokens: u.input_tokens || u.prompt_tokens || 0,
