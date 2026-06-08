@@ -2188,7 +2188,10 @@ async function modePush() {
 //
 // LLM-based 7-dimension quality scoring against the Sprint 10 rubric.
 // Reads all three ready briefs for today and writes one row per edition to
-// brief_scores. Costs ~$0.005 per run with gpt-4o-mini.
+// brief_scores. Sprint 12.2: scorer model is gpt-4o (~$0.02/edition,
+// ~$0.06/run for 3 editions). Was gpt-4o-mini at ~$0.005/run — bumped for
+// stricter scoring after the gpt-4o-mini scorer gave 59/70 to a brief with
+// 5 empty sections.
 //
 // Trigger: cron #7 at 6:50 IST (after writes finish ~6:41) OR manual button
 // from /admin/ops. Re-running on the same day overwrites previous score
@@ -2250,8 +2253,14 @@ OUTPUT — return ONLY this JSON, no preamble, no markdown:
   "notes": "<2-3 sentence overall assessment naming the brief's strongest dimension and its weakest>"
 }`;
 
+  // Sprint 12.2: scorer model upgraded from gpt-4o-mini to gpt-4o.
+  // gpt-4o-mini was too lenient — it scored a brief with 5 empty sections at
+  // 59/70 (Sprint 12 run on 2026-06-08). gpt-4o is more discerning on
+  // section absence and editorial nuance. Per-call cost rises from ~$0.001
+  // to ~$0.02; daily total stays under $0.10 for 3 editions. Worth it for
+  // honest signal on whether the brief actually cleared the 60+ bar.
   const parsed = await callOpenAIChat(
-    'gpt-4o-mini',
+    'gpt-4o',
     prompt,
     1500,
     `score-${edition}`,
