@@ -672,7 +672,7 @@ Return ONLY this JSON, no markdown:
 
 async function callGpt5Reasoning(
   prompt: string,
-  reasoningEffort: 'low' | 'medium' | 'high' = 'medium',
+  reasoningEffort: 'low' | 'medium' | 'high' = 'low',
   costPhase: 'fetch' | 'lens' = 'fetch',
 ): Promise<string> {
   const t0 = Date.now();
@@ -740,96 +740,43 @@ async function callGpt5Reasoning(
   return text;
 }
 
-function buildGpt5FetchPrompt(today: string, universe: Universe): string {
-  return `You are the fetcher for Morning Brief, India's daily news digest for thoughtful urban professionals (25-45, urban, English-reading). Today is ${today} (IST).
+// ─── Two-phase parallel fetch prompt ─────────────────────────────────────────
+//
+// Single gpt-5 call was bumping into Vercel's 300s function limit, especially
+// after over-fetching counts went up in Sprint 9. We split into two parallel
+// gpt-5 calls; wall-clock = max(phase1, phase2) ≈ 120-150s. Total cost is
+// roughly 2x prompt token cost (prompt sent twice) for similar output tokens.
+//
+// Phase 'universal': major_events + world + india + lens
+// Phase 'topical':   business + technology + climate_health + sport + culture + markets
+//
+// Each phase enforces ≤3 stories per publisher within its scope. Across the
+// full brief that theoretically allows up to 6 per publisher, but per-section
+// caps keep it well under that in practice.
+function buildGpt5FetchPrompt(today: string, universe: Universe, phase: 'universal' | 'topical' = 'universal'): string {
+  const sharedHeader = `You are the fetcher for Morning Brief, India's daily news digest for thoughtful urban professionals (25-45, urban, English-reading). Today is ${today} (IST).
 
-Your job: search the web aggressively for today's most consequential news and return ONE JSON object with all sections filled. Use the web_search tool. Perform AT LEAST 15-20 distinct searches across topics — depth matters; do not stop early.
+Your job: search the web aggressively for today's most consequential news and return ONE JSON object. Use the web_search tool. Perform AT LEAST 10-12 distinct searches across the sections you've been assigned.
 
 ═══════════════════════════════════════════════
 RECENCY — STRICT 24-HOUR RULE
 ═══════════════════════════════════════════════
 
-Every story must represent a development WITHIN THE LAST 24 HOURS. This applies to EVERY section including major_events.
+Every story must represent a development WITHIN THE LAST 24 HOURS. This applies to EVERY section.
 
-This is about NARRATIVE freshness, not just publish date. Specifically:
-
+This is about NARRATIVE freshness, not just publish date.
 - For a one-off event (election result, court ruling, earnings report): the event itself must have happened in the last 24 hours, AND the article must be published in the last 24 hours.
+- For a sustained narrative (war, IPL season, RBI policy cycle): there MUST be a FRESH development today (new strike, today's match, follow-up policy move, retirement, welcome ceremony, controversy, post-match analysis published today). If only the underlying event from days ago exists with no fresh angle in the last 24h, OMIT the story.
 
-- For a sustained narrative (war, IPL season, RBI policy cycle): there MUST be a FRESH development today (new strike, today's match, follow-up policy move, retirement, welcome ceremony, controversy, post-match analysis published today). If only the underlying event from days ago exists with no fresh angle in the last 24h, OMIT the story — do NOT report stale news.
+Concrete examples:
+- IPL final 2 days ago, no follow-up today → OMIT.
+- IPL final 2 days ago, today's news has the team's welcome ceremony → INCLUDE the follow-up.
+- War story from 3 days ago with no new development today → OMIT.
+- Same war story with a new strike, casualty figure, or diplomatic move today → INCLUDE the today's development.
 
-═══════════════════════════════════════════════
-HEADLINE SHAPE — DESCRIBE TODAY'S DEVELOPMENT
-═══════════════════════════════════════════════
+If you cannot find a story with a 24-hour development for a section, return fewer or leave it empty. Reasoning: if a story is big enough to matter, there is always a 24-hour development.`;
 
-When a sustained narrative does have a fresh 24h development, the HEADLINE must describe today's development — NOT the underlying narrative.
-
-The underlying narrative is context. The development is the news. Get this wrong and the brief reads like yesterday's paper.
-
-GOOD vs BAD examples:
-- ✅ "RCB victory parade draws lakhs to Bengaluru streets" (Day +2: parade is the fresh development)
-- ❌ "RCB wins maiden IPL title" (Day +2: this is old news pretending to be today's)
-- ✅ "US strikes Iranian drone facility in Bandar Abbas overnight" (fresh military action)
-- ✅ "Tehran signals openness to back-channel talks via Oman" (fresh diplomatic move)
-- ❌ "Iran-US tensions continue" (no actual development — status, not news)
-- ❌ "Russia-Ukraine war enters fourth year" (no fresh development — anniversary framing)
-- ✅ "Ukraine signs new $50bn EU defence pact" (fresh policy move in ongoing war)
-- ✅ "RBI holds repo rate at 6.5%, signals neutral stance" (fresh policy decision)
-- ❌ "RBI continues to fight inflation" (no event today)
-
-═══════════════════════════════════════════════
-ONE-SHOT EVENTS — NATURAL DECAY
-═══════════════════════════════════════════════
-
-Events that climax and end (finals, summits, launches, weddings, funerals, product unveilings) get major_events real estate ONLY while they're producing genuinely new developments.
-
-- Day of event → include (the event itself is the development).
-- Day +1 → include only if there's real follow-on news (a parade, a controversy, a policy consequence, an analytical reframing by a credible outlet). Not "people are still talking about it."
-- Day +2 onwards → drop, unless a substantial new chapter has opened (e.g. a player's retirement announcement triggered by the win, a summit-driven sanctions package signed, a launch revealing a fatal flaw).
-
-A story that was huge yesterday but generated no real follow-on today does NOT belong in today's brief. Empty section beats stale story.
-
-═══════════════════════════════════════════════
-DEAD-NEWS TEST (apply to every story before including it)
-═══════════════════════════════════════════════
-
-Ask: "If a reader saw this brief but already read yesterday's news, would the headline tell them something new?"
-
-If yes → include.
-If no → omit, even if the underlying story is important. Importance ≠ recency.
-
-If you cannot find a section's quota of stories that pass this test, return fewer stories. Better to under-fill a section than pad with stale narrative.
-
-═══════════════════════════════════════════════
-SECTIONS TO COLLECT — OVER-FETCH
-═══════════════════════════════════════════════
-
-OVER-FETCHING IS REQUIRED. After your output, downstream filters drop stories that fail the source whitelist, recency check, or semantic-dedup against major_events. The final brief targets 20 surviving stories. Aim for the upper bound of every range below.
-
-- major_events: 4-5 stories. SUSTAINED, multi-day themes shaping the week — ongoing wars, IPL playoffs/finals (only while still producing genuine follow-on news), election cycles, major policy rollouts (RBI policy, budget, big regulatory moves), multi-day disasters. Each entry MUST have a fresh 24-hour development AND the headline must describe that development (e.g. "Tehran signals openness to back-channel talks" — NOT "Iran-US tensions continue"). Apply the dead-news test. A theme without a today-development does NOT belong here. Empty beats stale.
-
-- world: 7-8 stories. 24-hour global news from OUTSIDE India. Spread across regions — avoid all 7 from one country unless it's a genuinely dominant news day there. Cover: US politics, major elections abroad, big government decisions, international relations, cross-border business moves, climate/disaster events, major court rulings, big tech moves abroad.
-
-- india: 7-8 stories. 24-hour national news. Government actions, court rulings, state-level developments of national significance (Bengaluru, Mumbai, Delhi, Chennai, Hyderabad, Pune, Kolkata, Ahmedabad all qualify), business deals, accidents/disasters, social/political events. Include RBI rate decisions, monsoon updates, major Indian corporate news.
-
-- business: 4-5 stories. Corporate news, earnings, M&A, regulatory actions, major financial moves. Indian AND global. Skip pure markets summaries (handled separately).
-
-- technology: 3-4 stories. Significant product launches, major AI developments, big-tech regulation, cybersecurity events. Skip rumour/speculation.
-
-- climate_health: 3-4 stories. Climate disasters, environmental policy, major health stories (outbreaks, drug approvals, research with real implications). Stories with concrete real-world impact.
-
-- sport: 3-4 stories ACROSS DIFFERENT SPORTS. Cricket, football, tennis, F1, badminton, hockey, kabaddi, Olympics, athletics, golf, esports — pick the day's biggest from as many different sports as the day's news supports. Do NOT submit 4 cricket stories; if cricket has the biggest story, include ONE cricket story and fill the rest from other sports.
-
-- culture: 3-4 stories ACROSS DIFFERENT CULTURE TYPES. Films, OTT, music, books, theatre, visual arts, awards — AND viral trends or internet phenomena WHEN they've crossed into mainstream coverage (covered by The Hindu, Mint, India Today, Indian Express, The Print, Reuters, BBC etc., not just social media) and have a fresh 24h development. The headline must describe today's development (a deal, a controversy, a milestone, a brand collaboration), not the underlying trend's existence — e.g. "Vada Pav Girl signs Netflix reality TV deal" NOT "Vada Pav Girl is famous." Like sport, aim for breadth across culture types where the day's news supports it. Most days the slot will be film/OTT/music/books; viral moments qualify only when genuinely dominant.
-
-- markets: ONE object with summary + indices. Find today's closing values for Sensex, Nifty 50, Dow Jones, Nasdaq Composite. Write a 2-3 sentence India-anchored summary of today's market action.
-
-- lens: ONE object with 4 short sentences (≤14 words each), each summarising the day's most important development:
-  • world: the most important world development today
-  • india: the most important India development today
-  • markets: the headline market move today
-  • watch: what to track in the coming days
-
-═══════════════════════════════════════════════
+  const sharedFooterRules = `═══════════════════════════════════════════════
 SOURCING — STRICT WHITELIST
 ═══════════════════════════════════════════════
 
@@ -841,30 +788,53 @@ STORY FIELDS (per story object)
 
 - headline: ≤16 words, factual, lead with the subject (country, company, person, number) — not the verb.
 - body: 2-3 factual sentences. Specific numbers, names, dates, locations. NO opinion or framing — just facts.
-- source: publisher name (e.g. "Reuters", "The Hindu")
+- source: publisher name (e.g. "Reuters", "The Hindu").
 - source_url: DIRECT article URL on the publisher's domain. NEVER a homepage, never an aggregator wrapper, never a redirect. Must include the article slug/ID.
 - published_at: ISO date (today's date is acceptable if you can't find the exact published_at).
 - industries, interests, city_tags, topic_tags: see TAGGING block below.
-- must_include: boolean. Set true ONLY for stories that are absolutely critical today (1-3 across the whole fetch — RBI rate decisions, major war escalations, big India policy announcements, IPL final, major disasters). Default false.
+- must_include: boolean. Set true ONLY for stories that are absolutely critical today (1-3 across the fetch — RBI rate decisions, major war escalations, big India policy announcements, IPL final, major disasters). Default false.
 
-${tagsBlockFor(universe)}
+${tagsBlockFor(universe)}`;
+
+  if (phase === 'universal') {
+    return `${sharedHeader}
+
+═══════════════════════════════════════════════
+SECTIONS — UNIVERSAL PHASE
+═══════════════════════════════════════════════
+
+You are responsible for THREE sections (major_events, world, india) plus the lens. Another fetcher handles business, technology, climate_health, sport, culture and markets in parallel — do NOT include those.
+
+OVER-FETCHING IS REQUIRED. Downstream filters will drop stories that fail the whitelist, recency check, or semantic-dedup. Aim for the upper bound below.
+
+- major_events: 4-5 stories. SUSTAINED, multi-day themes (ongoing wars, IPL playoffs/finals, election cycles, major policy rollouts, multi-day disasters). Each MUST have a fresh 24-hour development.
+
+- world: 7-8 stories. 24-hour global news from OUTSIDE India. Spread across regions. Cover US politics, major elections abroad, big government decisions, international relations, cross-border business, climate/disaster events, major court rulings, big tech moves abroad.
+
+- india: 7-8 stories. 24-hour national news. Government actions, court rulings, state developments of national significance (Bengaluru, Mumbai, Delhi, Chennai, Hyderabad, Pune, Kolkata, Ahmedabad qualify), business deals, accidents/disasters, social/political events. Include RBI rate decisions, monsoon updates, major Indian corporate news.
+
+- lens: ONE object with 4 short sentences (≤14 words each):
+  • world: most important world development today
+  • india: most important India development today
+  • markets: best-effort one-line summary (the topical fetcher has full markets details; your line is fine as a rough indicator)
+  • watch: what to track in the coming days
+
+${sharedFooterRules}
 
 ═══════════════════════════════════════════════
 HARD RULES
 ═══════════════════════════════════════════════
 
-1. WHITELIST: every source_url MUST be from a whitelisted publisher domain. Verify by checking the hostname. If you found a great story but can't find it on a whitelisted source, OMIT it — don't fabricate.
-2. NO FABRICATION: do not invent headlines, URLs, quotes, or facts. If you can't find a section's quota of stories from whitelisted sources, return fewer stories — never pad.
-3. SEARCH DEPTH: do at least 15 distinct searches across topics. The model that fails this task fails by stopping after 1-2 searches. Don't be that model.
-4. PUBLISHER DIVERSITY: across the entire fetch, NO publisher may contribute more than 3 stories. If you find Indian Express has 6 great India stories, pick the 3 strongest and find the rest from other whitelisted publishers (The Hindu, Hindustan Times, Mint, The Print, NDTV, Times of India, etc.). A brief dominated by one publisher fails the source-diversity dimension of our quality rubric.
-5. DEDUP — STRICT. No two stories may cover the same underlying event, even from different publishers. Specifically:
-   a) major_events owns ALL sustained narratives (wars, RBI policy cycles, ongoing elections, IPL playoffs, multi-day disasters). If a 24-hour news development belongs to one of these narratives, EMBED it into that major_events story's body — do NOT also list it as a world or india entry. world/india are reserved for stories OUTSIDE the major_events set.
-   b) An Indian business story belongs in india (not business) if it has national-policy or macro significance. Pure corporate news (earnings, M&A) belongs in business.
-   c) If a story could fit two sections, pick ONE — the higher-priority section by this order: major_events > india > world > business > technology > climate_health > sport > culture.
-   d) Run a self-check before returning: read every world and india headline, ask "is this an update on a story I already listed in major_events?" If yes, remove it from world/india and fold its key fact into the major_events story body.
-6. SPORT AND CULTURE: each is an ARRAY of 3-4 story objects with all fields populated (headline, body, source, source_url, published_at, must_include). NEVER undefined fields. If fewer real whitelisted stories are available, return a shorter array. If none are available, return an empty array — do NOT omit the key.
-7. MARKETS INDICES: must be an ARRAY of objects shaped like: [{"name":"Sensex","value":"74243","change":"-0.16%"}, {"name":"Nifty 50","value":"23366","change":"-0.21%"}, {"name":"Dow Jones","value":"...","change":"..."}, {"name":"Nasdaq","value":"...","change":"..."}]. Never a single object, never a string. Use today's actual closing values.
-8. JSON ONLY: output a single JSON object. No markdown, no preamble, no explanation. Start with { and end with }.
+1. WHITELIST: every source_url MUST be from a whitelisted publisher. OMIT stories you can't source.
+2. NO FABRICATION: never invent headlines, URLs, quotes, facts. If a section quota can't be filled from whitelisted sources, return fewer.
+3. SEARCH DEPTH: at least 10 distinct searches across the three sections.
+4. PUBLISHER DIVERSITY within this fetch: NO publisher may contribute more than 3 stories. A brief dominated by one publisher fails our quality rubric.
+5. DEDUP — STRICT.
+   a) major_events owns ALL sustained narratives. If a 24-hour development belongs to one of these, EMBED it into the major_events story body — do NOT also list it under world or india.
+   b) An Indian business/macro story belongs in india.
+   c) Story could fit two sections → pick ONE, order: major_events > india > world.
+   d) Self-check: read every world and india headline — "is this an update on a major_events story?" If yes, remove from world/india and fold the key fact into the major_events body.
+6. JSON ONLY: output ONE JSON object. No markdown, no preamble. Start with { and end with }.
 
 ═══════════════════════════════════════════════
 OUTPUT SHAPE
@@ -874,68 +844,142 @@ OUTPUT SHAPE
   "major_events": [ ${storyShape(today)}, ... ],
   "world":        [ ${storyShape(today)}, ... ],
   "india":        [ ${storyShape(today)}, ... ],
-  "business":     [ ${storyShape(today)}, ... ],
-  "technology":   [ ${storyShape(today)}, ... ],
-  "climate_health": [ ${storyShape(today)}, ... ],
-  "sport":   [ ${storyShape(today)}, ... ],
-  "culture": [ ${storyShape(today)}, ... ],
-  "markets": {
-    "summary": "2-3 sentence India-anchored summary of today's market action",
-    "indices": [
-      { "name": "Sensex", "change": "+0.5%" },
-      { "name": "Nifty 50", "change": "+0.4%" },
-      { "name": "Dow Jones", "change": "-0.2%" },
-      { "name": "Nasdaq", "change": "+0.1%" }
-    ]
-  },
   "lens": {
-    "world": "one short sentence ≤14 words",
-    "india": "one short sentence ≤14 words",
-    "markets": "one short sentence ≤14 words",
-    "watch": "one short sentence ≤14 words on what to watch next"
+    "world":   "≤14 words",
+    "india":   "≤14 words",
+    "markets": "≤14 words (best-effort)",
+    "watch":   "≤14 words"
   }
 }
 
-Begin now. Search the web aggressively. Return only the JSON object.`;
+Begin now. Search aggressively. Return ONLY the JSON object.`;
+  }
+
+  // phase === 'topical'
+  return `${sharedHeader}
+
+═══════════════════════════════════════════════
+SECTIONS — TOPICAL PHASE
+═══════════════════════════════════════════════
+
+You are responsible for SIX sections (business, technology, climate_health, sport, culture, markets). Another fetcher handles major_events, world, india and the lens in parallel — do NOT include those.
+
+OVER-FETCHING IS REQUIRED. Downstream filters will drop stories that fail the whitelist or recency check. Aim for the upper bound below.
+
+- business: 4-5 stories. Corporate news, earnings, M&A, regulatory actions, major financial moves. Indian AND global. Skip pure markets summaries (markets is a separate section).
+
+- technology: 3-4 stories. Significant product launches, major AI developments, big-tech regulation, cybersecurity events. Skip rumour/speculation.
+
+- climate_health: 3-4 stories. Climate disasters, environmental policy, major health stories (outbreaks, drug approvals, research with real implications). Concrete real-world impact.
+
+- sport: 3-4 stories ACROSS DIFFERENT SPORTS. Cricket, football, tennis, F1, badminton, hockey, kabaddi, Olympics, athletics, golf, esports — pick the day's biggest from as many different sports as the day's news supports. Do NOT submit 4 cricket stories; aim for breadth.
+
+- culture: 3-4 stories ACROSS DIFFERENT CULTURE TYPES. Films, OTT, music, books, theatre, visual arts, awards. Don't submit 4 film stories; aim for breadth.
+
+- markets: ONE object with summary + indices. Find today's closing values for Sensex, Nifty 50, Dow Jones, Nasdaq Composite. Write a 2-3 sentence India-anchored summary of today's market action.
+
+${sharedFooterRules}
+
+═══════════════════════════════════════════════
+HARD RULES
+═══════════════════════════════════════════════
+
+1. WHITELIST: every source_url MUST be from a whitelisted publisher. OMIT stories you can't source.
+2. NO FABRICATION: never invent. If a section quota can't be filled from whitelisted sources, return fewer.
+3. SEARCH DEPTH: at least 10 distinct searches across the six sections.
+4. PUBLISHER DIVERSITY within this fetch: NO publisher may contribute more than 3 stories.
+5. DEDUP within your sections: each story belongs to ONE section. If a story could fit two, pick the higher-priority one (business > technology > climate_health > sport > culture).
+6. SPORT AND CULTURE ARE ARRAYS of 2-4 story objects. Empty arrays are acceptable when no fresh stories exist; never fabricate to pad.
+7. MARKETS INDICES: ARRAY of objects shaped [{"name":"Sensex","value":"74243","change":"-0.16%"}, ...]. Never a single object or string. Use today's actual closing values.
+8. JSON ONLY: output ONE JSON object. No markdown, no preamble. Start with { and end with }.
+
+═══════════════════════════════════════════════
+OUTPUT SHAPE
+═══════════════════════════════════════════════
+
+{
+  "business":       [ ${storyShape(today)}, ... ],
+  "technology":     [ ${storyShape(today)}, ... ],
+  "climate_health": [ ${storyShape(today)}, ... ],
+  "sport":          [ ${storyShape(today)}, ... ],
+  "culture":        [ ${storyShape(today)}, ... ],
+  "markets": {
+    "summary": "2-3 sentence India-anchored summary of today's market action",
+    "indices": [
+      { "name": "Sensex",   "value": "...", "change": "+0.5%" },
+      { "name": "Nifty 50", "value": "...", "change": "+0.4%" },
+      { "name": "Dow Jones","value": "...", "change": "-0.2%" },
+      { "name": "Nasdaq",   "value": "...", "change": "+0.1%" }
+    ]
+  }
+}
+
+Begin now. Search aggressively. Return ONLY the JSON object.`;
 }
 
 async function fetchNewsFromOpenAI(universe: Universe): Promise<RawStories> {
   const today = getISTDate();
 
-  // Single big call to gpt-5 with reasoning + web_search.
-  // 'medium' effort: 'low' was returning only ~8 searches against a 15-20
-  // search instruction, producing near-empty section arrays. 'medium' pushes
-  // the model to actually do the over-fetch the prompt requires. Latency
-  // rises from ~65s to ~120-180s, still well under Vercel's 300s cap.
-  const prompt = buildGpt5FetchPrompt(today, universe);
-  const text = await callGpt5Reasoning(prompt, 'medium');
+  // Two parallel gpt-5 calls — split into universal + topical phases. Wall-
+  // clock = max(phase1, phase2) ≈ 120-150s on 'low' effort. The single-call
+  // monolith was bumping into Vercel's 300s function limit.
+  console.log('[fetch] Starting two-phase parallel gpt-5 fetch...');
+  const universalPrompt = buildGpt5FetchPrompt(today, universe, 'universal');
+  const topicalPrompt   = buildGpt5FetchPrompt(today, universe, 'topical');
 
-  // Parse the JSON. extractJsonObject handles markdown fences + extra prose
-  // around the JSON if the model misbehaves.
-  let parsed: any;
-  try {
-    parsed = extractJsonObject(text);
-  } catch (err: any) {
-    console.error('[gpt-5] JSON parse failed. First 600 chars of output:', text.slice(0, 600));
-    throw new Error(`gpt-5 output not parseable as JSON: ${err.message}`);
-  }
+  const [universalText, topicalText] = await Promise.all([
+    callGpt5Reasoning(universalPrompt, 'low').catch((err) => {
+      console.error('[fetch:universal] gpt-5 failed:', err.message);
+      return '';
+    }),
+    callGpt5Reasoning(topicalPrompt, 'low').catch((err) => {
+      console.error('[fetch:topical] gpt-5 failed:', err.message);
+      return '';
+    }),
+  ]);
 
-  console.log(`[fetch] gpt-5 raw section counts: ` +
-    `major=${parsed.major_events?.length || 0}, world=${parsed.world?.length || 0}, india=${parsed.india?.length || 0}, ` +
-    `biz=${parsed.business?.length || 0}, tech=${parsed.technology?.length || 0}, climate=${parsed.climate_health?.length || 0}, ` +
-    `sport=${parsed.sport?.length || 0}, culture=${parsed.culture?.length || 0}, indices=${parsed.markets?.indices?.length || 0}`);
+  const safeParse = (text: string, label: string): any => {
+    if (!text) return {};
+    try {
+      return extractJsonObject(text);
+    } catch (err: any) {
+      console.error(`[fetch:${label}] JSON parse failed. First 600 chars:`, text.slice(0, 600));
+      return {};
+    }
+  };
 
-  // Run through the existing dedup + whitelist enforcement pipeline.
-  // (This catches any non-whitelisted URLs gpt-5 may have slipped through.)
-  const cleaned = enforceQualityRules(parsed);
+  const universalParsed = safeParse(universalText, 'universal');
+  const topicalParsed   = safeParse(topicalText,   'topical');
 
-  // Lens: gpt-5 should have produced one in the same call. If it didn't, or
-  // if it's malformed, fall back to the standalone lens synthesiser.
-  const lensFromModel = parsed?.lens;
+  // Merge into single RawStories shape. Empty arrays for missing sections.
+  const merged: any = {
+    major_events:   universalParsed.major_events || [],
+    world:          universalParsed.world        || [],
+    india:          universalParsed.india        || [],
+    business:       topicalParsed.business       || [],
+    technology:     topicalParsed.technology     || [],
+    climate_health: topicalParsed.climate_health || [],
+    sport:          topicalParsed.sport          || [],
+    culture:        topicalParsed.culture        || [],
+    markets:        topicalParsed.markets        || { summary: '', indices: [] },
+    lens:           universalParsed.lens         || null,
+  };
+
+  console.log(`[fetch] gpt-5 merged raw section counts: ` +
+    `major=${merged.major_events.length}, world=${merged.world.length}, india=${merged.india.length}, ` +
+    `biz=${merged.business.length}, tech=${merged.technology.length}, climate=${merged.climate_health.length}, ` +
+    `sport=${merged.sport.length}, culture=${merged.culture.length}, indices=${merged.markets?.indices?.length || 0}`);
+
+  // Run through dedup + whitelist + recency enforcement pipeline.
+  const cleaned = enforceQualityRules(merged);
+
+  // Lens: universal phase should have produced one. If it didn't, or it's
+  // malformed, fall back to the standalone lens synthesiser.
+  const lensFromModel = merged.lens;
   if (lensFromModel && lensFromModel.world && lensFromModel.india && lensFromModel.markets && lensFromModel.watch) {
     cleaned.lens = lensFromModel;
   } else {
-    console.warn('[fetch] gpt-5 lens missing/invalid; falling back to fetchLens.');
+    console.warn('[fetch] universal lens missing/invalid; falling back to fetchLens.');
     cleaned.lens = await fetchLens(cleaned, today).catch((err) => {
       console.warn('[fetch:lens] fallback also failed:', err.message);
       return { world: '', india: '', markets: '', watch: '' };
@@ -944,6 +988,7 @@ async function fetchNewsFromOpenAI(universe: Universe): Promise<RawStories> {
 
   return cleaned;
 }
+
 
 // ─── LEGACY (Path A) per-section fetcher — kept for rollback ────────────────
 // To revert: rename this function to `fetchNewsFromOpenAI` (and rename the

@@ -56,6 +56,47 @@ function editionLabel(e: string): string {
   return e
 }
 
+// ─── Safe fetch+JSON helper ──────────────────────────────────────────────
+// On Vercel 300s timeouts the server returns an HTML error page, not JSON.
+// `await res.json()` then throws "JSON.parse: unexpected character at line 1"
+// with no useful info. This helper reads body as text first, checks status
+// and content-type, and either parses JSON or throws a meaningful error
+// that includes a snippet of the response so the operator can see what
+// actually came back.
+async function safeJsonFetch(url: string, init?: RequestInit): Promise<any> {
+  let res: Response
+  try {
+    res = await fetch(url, init)
+  } catch (e: any) {
+    throw new Error(`Network error reaching ${url}: ${e.message}`)
+  }
+  const text = await res.text()
+  const contentType = res.headers.get('content-type') || ''
+  if (!res.ok) {
+    const snippet = text.slice(0, 300).replace(/\s+/g, ' ').trim()
+    if (res.status === 504 || /timeout|gateway/i.test(text)) {
+      throw new Error(
+        `API timed out (HTTP ${res.status}). The function ran past Vercel's 300s limit. ` +
+        `Check Vercel logs. Snippet: ${snippet}`
+      )
+    }
+    throw new Error(`API HTTP ${res.status} from ${url}. Snippet: ${snippet}`)
+  }
+  if (!contentType.includes('application/json')) {
+    const snippet = text.slice(0, 300).replace(/\s+/g, ' ').trim()
+    throw new Error(
+      `API returned non-JSON (content-type: ${contentType || 'none'}). ` +
+      `Snippet: ${snippet}`
+    )
+  }
+  try {
+    return JSON.parse(text)
+  } catch (e: any) {
+    const snippet = text.slice(0, 300).replace(/\s+/g, ' ').trim()
+    throw new Error(`Failed to parse JSON response: ${e.message}. Snippet: ${snippet}`)
+  }
+}
+
 // Edition-aware story count.
 function countStoriesForEdition(content: any, edition: string): number {
   if (!content) return 0
@@ -225,12 +266,11 @@ export default function AdminPage() {
         // Assumes today's raw_stories were already fetched (by cron or by the
         // "Regenerate All" button). If not, the API will tell us.
         setRegenResult(`Writing ${edition}…`)
-        const res = await fetch('/api/generate-brief', {
+        const data = await safeJsonFetch('/api/generate-brief', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ mode: 'write', edition }),
         })
-        const data = await res.json()
         const reason = data.reason || data.error || ''
         if (reason && /no raw_stories/i.test(reason)) {
           setRegenResult(
@@ -250,12 +290,11 @@ export default function AdminPage() {
 
         // Stage 1 — fetch
         setRegenResult('Stage 1/2 — fetching today\'s news (~40s)…')
-        const fetchRes = await fetch('/api/generate-brief', {
+        const fetchData = await safeJsonFetch('/api/generate-brief', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ mode: 'fetch' }),
         })
-        const fetchData = await fetchRes.json()
         if (!fetchData.ok) {
           setRegenResult('FETCH FAILED:\n' + JSON.stringify(fetchData, null, 2))
           await loadBriefs()
@@ -273,12 +312,11 @@ export default function AdminPage() {
         const writeResults = await Promise.all(
           (['5min', '10min', 'deep'] as const).map(async (ed) => {
             try {
-              const r = await fetch('/api/generate-brief', {
+              return await safeJsonFetch('/api/generate-brief', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ mode: 'write', edition: ed }),
               })
-              return await r.json()
             } catch (err: any) {
               return { edition: ed, ok: false, error: err.message }
             }
@@ -341,12 +379,11 @@ export default function AdminPage() {
     setRunningPersonalisation(true)
     setPersonaliseResult('')
     try {
-      const res = await fetch('/api/personalise-briefs', {
+      const data = await safeJsonFetch('/api/personalise-briefs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
       })
-      const data = await res.json()
       setPersonaliseResult(JSON.stringify(data, null, 2))
       await loadPersonalisedStats()
       await loadCostAndScoreData()
@@ -385,12 +422,11 @@ export default function AdminPage() {
     setScoring(true)
     setScoreResult('Scoring…')
     try {
-      const res = await fetch('/api/generate-brief', {
+      const data = await safeJsonFetch('/api/generate-brief', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode: 'score' }),
       })
-      const data = await res.json()
       if (data.ok) {
         setScoreResult('Scoring complete.')
         await loadCostAndScoreData()
