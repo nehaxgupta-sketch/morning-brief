@@ -1074,7 +1074,7 @@ export default function AdminPage() {
             <button onClick={runTailFetch} disabled={runningTailFetch} style={{
               padding: '8px 14px', background: 'transparent',
               color: runningTailFetch ? C.textDim : C.gold,
-              border: `1px solid ${runningTailFetch ? C.border : C.goldBorder}`,
+              border: `1px solid ${runningTailFetch ? C.border : C.gold}`,
               fontFamily: "'DM Mono', monospace", fontSize: '10px',
               letterSpacing: '1.5px', cursor: runningTailFetch ? 'not-allowed' : 'pointer',
               textTransform: 'uppercase',
