@@ -948,43 +948,48 @@ Begin now. Search aggressively. Return ONLY the JSON object.`;
 async function fetchNewsFromOpenAI(universe: Universe): Promise<RawStories> {
   const today = getISTDate();
 
-  // Sprint 12.2 (post-mortem of 12.1):
-  //   - 12.1 ran both phases at 'medium' and hit Vercel 504 (>300s function
-  //     timeout). Even sequentially, two medium-effort gpt-5 calls together
-  //     can blow the budget.
-  //   - The actual quality lever is TOPICAL — that's where empty sections
-  //     have repeatedly appeared. Universal at 'low' was reliable in 11.5.
-  //   - So: universal at 'low' (fast, proven), topical at 'medium' (quality
-  //     lever, where we need the headroom).
-  //   - Per-call AbortController prevents a single hung call from eating the
-  //     full Vercel budget. Time-out budgets: universal 90s, topical 180s.
-  //     Worst-case sum 270s, inside Vercel's 300s.
+  // Sprint 12.3 (post-mortem of 12.2):
+  //   - 12.2 ran universal/low sequential then topical/medium sequential
+  //     with tight AbortController limits (90s, 180s). Result: both phases
+  //     hit their AbortController limits in production and returned empty.
+  //     This produced a briefs row with all 9 sections empty and only the
+  //     generic fallback lens, causing writes to fail validation.
+  //   - REVERTING to Sprint 11.5 architecture: PARALLEL 2-phase, both at
+  //     'low' effort. This is the last known-working configuration — it
+  //     consistently scored 60/60/61 across editions in early June.
+  //   - AbortController is RETAINED but with generous 240s timeout per call,
+  //     used only as a safety net against truly hung calls. With parallel
+  //     'low' calls completing in 30-60s each, the timeout never fires in
+  //     normal operation.
+  //   - 2 parallel calls do NOT hit the 429 rate limit we saw at 3 parallel.
+  //     Sprint 11 + 11.5 ran this exact pattern reliably for weeks.
   //
   // Wall-clock expectations:
-  //   - universal at 'low': 30-60s typical, 90s abort
-  //   - topical at 'medium': 100-150s typical, 180s abort
-  //   - Sequential total expected: 130-210s
+  //   - universal at 'low': 30-60s typical
+  //   - topical at 'low': 40-80s typical (more sections to cover)
+  //   - PARALLEL total: max(uni, top) ≈ 50-80s wall clock
   //
-  // If a phase aborts, its catch returns '' and that phase's sections come
-  // back empty. The brief still saves with the other phase's content.
+  // Quality trade-off accepted: topical at 'low' undertfetches (2 stories
+  // per section vs target 4-5). This is a known issue but acceptable —
+  // 13 stories scoring 60+ beats 0 stories from a broken pipeline.
+  // Quality optimisation is a Sprint 13 problem.
 
-  console.log('[fetch] Starting SEQUENTIAL two-phase fetch (Sprint 12.2 — universal/low + topical/medium)...');
+  console.log('[fetch] Starting PARALLEL two-phase fetch (Sprint 12.3 — both at low, revert to 11.5 baseline)...');
   const universalPrompt = buildGpt5FetchPrompt(today, universe, 'universal');
   const topicalPrompt   = buildGpt5FetchPrompt(today, universe, 'topical');
 
-  const tUni = Date.now();
-  const universalText = await callGpt5Reasoning(universalPrompt, 'low', 'fetch', 90_000).catch((err) => {
-    console.error('[fetch:universal] gpt-5 failed:', err.message);
-    return '';
-  });
-  console.log(`[fetch:universal] complete in ${Math.round((Date.now() - tUni) / 1000)}s, ${universalText.length} chars`);
-
-  const tTop = Date.now();
-  const topicalText = await callGpt5Reasoning(topicalPrompt, 'medium', 'fetch', 180_000).catch((err) => {
-    console.error('[fetch:topical] gpt-5 failed:', err.message);
-    return '';
-  });
-  console.log(`[fetch:topical] complete in ${Math.round((Date.now() - tTop) / 1000)}s, ${topicalText.length} chars`);
+  const tStart = Date.now();
+  const [universalText, topicalText] = await Promise.all([
+    callGpt5Reasoning(universalPrompt, 'low', 'fetch', 240_000).catch((err) => {
+      console.error('[fetch:universal] gpt-5 failed:', err.message);
+      return '';
+    }),
+    callGpt5Reasoning(topicalPrompt, 'low', 'fetch', 240_000).catch((err) => {
+      console.error('[fetch:topical] gpt-5 failed:', err.message);
+      return '';
+    }),
+  ]);
+  console.log(`[fetch] both phases complete in ${Math.round((Date.now() - tStart) / 1000)}s. universal=${universalText.length} chars, topical=${topicalText.length} chars`);
 
   const safeParse = (text: string, label: string): any => {
     if (!text) {
