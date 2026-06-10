@@ -4,8 +4,19 @@ import Link from 'next/link'
 import { supabase } from '@/lib/supabase'
 
 // ─── Admin page ──────────────────────────────────────────────────────────────
-// Sprint 8 — shows today's status across all 3 editions (The Brief / The Daily /
-// The Editorial), with story/section counts adapted to each edition's shape.
+// Sprint 8 — shows today's status across all 3 editions.
+// Sprint 12.5.1 — reorganised flow + master pipeline button.
+//
+// New panel order matches the production pipeline sequence:
+//   1. Briefs (fetch + write 3 editions)
+//   2. Personalisation
+//   3. Tail-fetch (city/interest/industry stories for personalised editions)
+//   4. Quality scoring
+//   5. Cost log
+//
+// A new "RUN FULL PIPELINE" button at the top runs all 5 stages sequentially
+// in a single click, with per-stage live status. The existing per-stage
+// buttons are preserved as manual escape hatches.
 
 const C = {
   bg: '#0E0E0E', surface: '#161616', surface2: '#1E1E1E',
@@ -139,6 +150,48 @@ function hasLens(lens: any): boolean {
   return !!(lens && (lens.world || lens.india || lens.markets || lens.watch))
 }
 
+// Sprint 12.5.1: extract hostname for publisher diversity check.
+// Mirrors the logic in src/lib/whitelist.ts but kept inline so admin.tsx
+// has no extra import surface. Stripped: www., m., amp. subdomain prefixes.
+function extractHost(url: string | undefined | null): string | null {
+  if (!url || typeof url !== 'string') return null
+  try {
+    const u = new URL(url)
+    return u.hostname.toLowerCase()
+      .replace(/^www\./, '')
+      .replace(/^m\./, '')
+      .replace(/^amp\./, '')
+  } catch {
+    return null
+  }
+}
+
+// Walk a brief's raw_stories or content sections and return every source_url
+// found. Used by the Top Publishers panel.
+function collectSourceUrls(content: any): string[] {
+  if (!content || typeof content !== 'object') return []
+  const urls: string[] = []
+  const SECTION_KEYS = [
+    'major_events', 'world', 'india', 'business', 'technology',
+    'climate_health', 'sport', 'culture', 'topics',
+    'bengaluru', 'delhi', 'three_patterns', 'watching_this_week',
+  ]
+  for (const k of SECTION_KEYS) {
+    const arr = content[k]
+    if (Array.isArray(arr)) {
+      for (const s of arr) {
+        if (s && typeof s === 'object' && s.source_url) urls.push(s.source_url)
+      }
+    } else if (arr && typeof arr === 'object' && arr.source_url) {
+      // sport/culture sometimes single object
+      urls.push(arr.source_url)
+    }
+  }
+  // long_read inside Editorial
+  if (content.long_read?.source_url) urls.push(content.long_read.source_url)
+  return urls
+}
+
 // ─── Sprint 11 types + helpers ──────────────────────────────────────────────
 
 type CostRow = {
@@ -181,6 +234,48 @@ type TailBriefRow = {
   reason: string | null
 }
 
+// Sprint 12.5.1: master pipeline stage tracking. Each stage in the full
+// pipeline reports its status independently so the operator can see exactly
+// where things stand and where they failed.
+type StageId = 'fetch' | 'write' | 'personalise' | 'tail' | 'score'
+type StageStatus = 'pending' | 'running' | 'ok' | 'failed' | 'skipped'
+type StageState = {
+  id: StageId
+  label: string
+  status: StageStatus
+  detail: string
+  startedAt?: number
+  endedAt?: number
+}
+
+const STAGE_DEFS: { id: StageId; label: string }[] = [
+  { id: 'fetch',       label: '1 · Fetch news' },
+  { id: 'write',       label: '2 · Write 3 editions' },
+  { id: 'personalise', label: '3 · Personalise per user' },
+  { id: 'tail',        label: '4 · Tail-fetch (city/interest/industry)' },
+  { id: 'score',       label: '5 · Quality scoring' },
+]
+
+function emptyStages(): StageState[] {
+  return STAGE_DEFS.map(s => ({ id: s.id, label: s.label, status: 'pending', detail: '' }))
+}
+
+function stageColor(s: StageStatus): string {
+  if (s === 'ok') return C.ok
+  if (s === 'failed') return C.err
+  if (s === 'running') return C.gold
+  if (s === 'skipped') return C.textDim
+  return C.textMute
+}
+
+function stageGlyph(s: StageStatus): string {
+  if (s === 'ok') return '✓'
+  if (s === 'failed') return '✗'
+  if (s === 'running') return '·'
+  if (s === 'skipped') return '–'
+  return '○'
+}
+
 function formatUSD(n: number): string {
   if (n < 0.01) return `$${n.toFixed(4)}`
   if (n < 1) return `$${n.toFixed(3)}`
@@ -207,6 +302,17 @@ function totalColor(total: number | null): string {
   if (total >= 50) return C.gold
   if (total >= 40) return C.warn
   return C.err
+}
+
+// Friendly label for fetch source (raw_stories._source).
+function fetchSourceLabel(s: string | null | undefined): { label: string; colour: string } {
+  if (!s) return { label: 'UNKNOWN', colour: C.textMute }
+  if (s === 'perplexity') return { label: 'PERPLEXITY · SINGLE', colour: C.ok }
+  if (s === 'perplexity-retry') return { label: 'PERPLEXITY · RETRY', colour: C.warn }
+  if (s === 'perplexity-2phase') return { label: 'PERPLEXITY · 2-PHASE (B)', colour: C.ok }
+  if (s === 'gpt-4o-fallback') return { label: 'GPT-4O FALLBACK ⚠', colour: C.warn }
+  if (s === 'gpt4o-2phase') return { label: 'GPT-4O · 2-PHASE (C)', colour: C.gold }
+  return { label: s.toUpperCase(), colour: C.textSoft }
 }
 
 export default function AdminPage() {
@@ -237,6 +343,11 @@ export default function AdminPage() {
   const [runningTailFetch, setRunningTailFetch] = useState(false)
   const [tailFetchResult, setTailFetchResult] = useState<string>('')
   const [tailBriefRows, setTailBriefRows] = useState<TailBriefRow[]>([])
+
+  // Sprint 12.5.1 — master pipeline state
+  const [masterRunning, setMasterRunning] = useState(false)
+  const [masterStages, setMasterStages] = useState<StageState[]>(emptyStages())
+  const [masterFinishedAt, setMasterFinishedAt] = useState<number | null>(null)
 
   useEffect(() => {
     const checkAuth = async () => {
@@ -300,10 +411,10 @@ export default function AdminPage() {
         await loadBriefs()
       } else {
         // Regenerate all 3 editions. The work is split across multiple Vercel
-        // invocations to stay under the 60s function timeout:
+        // invocations to stay under the 300s function timeout:
         //   1. mode=fetch  — fetch news + lens (~35-45s)
         //   2. mode=write  — three parallel writes (~15-30s each)
-        // Each call is its own function invocation with its own 60s budget.
+        // Each call is its own function invocation with its own 300s budget.
 
         // Stage 1 — fetch
         setRegenResult('Stage 1/2 — fetching today\'s news (~40s)…')
@@ -491,6 +602,178 @@ export default function AdminPage() {
     setScoring(false)
   }
 
+  // ─── Sprint 12.5.1: full pipeline orchestration ─────────────────────────
+  // Sequence (each is its own Vercel invocation with its own 300s budget):
+  //   1. fetch         POST /api/generate-brief {mode:'fetch'}
+  //   2. write x3      POST /api/generate-brief {mode:'write', edition: <e>}   (parallel)
+  //   3. personalise   POST /api/personalise-briefs
+  //   4. tail-fetch    POST /api/generate-brief {mode:'tail-fetch'}
+  //   5. score         POST /api/generate-brief {mode:'score'}
+  //
+  // Each stage updates masterStages so the operator can see progress live.
+  // On stage failure the pipeline stops and downstream stages are marked
+  // 'skipped' rather than 'pending' — so the partial state is unambiguous.
+  async function runFullPipeline() {
+    setMasterRunning(true)
+    setMasterFinishedAt(null)
+    let stages: StageState[] = emptyStages()
+    setMasterStages(stages)
+
+    const setStage = (id: StageId, patch: Partial<StageState>) => {
+      stages = stages.map(s => s.id === id ? { ...s, ...patch } : s)
+      setMasterStages(stages)
+    }
+
+    const skipRemaining = (afterId: StageId) => {
+      const order: StageId[] = ['fetch', 'write', 'personalise', 'tail', 'score']
+      const idx = order.indexOf(afterId)
+      for (let i = idx + 1; i < order.length; i++) {
+        setStage(order[i], { status: 'skipped', detail: 'skipped — upstream stage failed' })
+      }
+    }
+
+    const pipelineStart = Date.now()
+
+    try {
+      // ─── Stage 1: fetch ──────────────────────────────────────────────
+      setStage('fetch', { status: 'running', detail: 'fetching news (~40s)…', startedAt: Date.now() })
+      let fetchData: any
+      try {
+        fetchData = await safeJsonFetch('/api/generate-brief', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: 'fetch' }),
+        })
+      } catch (e: any) {
+        setStage('fetch', { status: 'failed', detail: e.message, endedAt: Date.now() })
+        skipRemaining('fetch')
+        return
+      }
+      if (!fetchData?.ok) {
+        setStage('fetch', { status: 'failed', detail: fetchData?.error || 'fetch returned ok=false', endedAt: Date.now() })
+        skipRemaining('fetch')
+        return
+      }
+      const sec = fetchData?.sections || {}
+      const sourceTag = fetchData?.source || fetchData?.fetch_source || ''
+      const sourceFragment = sourceTag ? ` · via ${sourceTag}` : ''
+      setStage('fetch', {
+        status: 'ok',
+        detail: `major=${sec.major_events ?? '?'}, world=${sec.world ?? '?'}, india=${sec.india ?? '?'}${sourceFragment}`,
+        endedAt: Date.now(),
+      })
+      await loadBriefs()
+
+      // ─── Stage 2: write 3 editions in parallel ───────────────────────
+      setStage('write', { status: 'running', detail: 'writing 5min, 10min, deep…', startedAt: Date.now() })
+      const writeResults = await Promise.all(
+        (['5min', '10min', 'deep'] as const).map(async (ed) => {
+          try {
+            return await safeJsonFetch('/api/generate-brief', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ mode: 'write', edition: ed }),
+            })
+          } catch (err: any) {
+            return { edition: ed, ok: false, error: err.message }
+          }
+        })
+      )
+      const writeOK = writeResults.filter((r: any) => r?.ok).length
+      const writeFailed = writeResults.length - writeOK
+      if (writeFailed === writeResults.length) {
+        setStage('write', { status: 'failed', detail: 'all 3 writers failed', endedAt: Date.now() })
+        skipRemaining('write')
+        return
+      }
+      setStage('write', {
+        status: writeFailed === 0 ? 'ok' : 'ok',
+        detail: writeFailed === 0
+          ? `${writeOK}/3 editions ready`
+          : `${writeOK}/3 editions ready · ${writeFailed} failed (continuing)`,
+        endedAt: Date.now(),
+      })
+      await loadBriefs()
+
+      // ─── Stage 3: personalise ────────────────────────────────────────
+      setStage('personalise', { status: 'running', detail: 'building personalised editions per user…', startedAt: Date.now() })
+      let personaliseData: any
+      try {
+        personaliseData = await safeJsonFetch('/api/personalise-briefs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        })
+      } catch (e: any) {
+        setStage('personalise', { status: 'failed', detail: e.message, endedAt: Date.now() })
+        // Personalisation failure does NOT skip downstream — tail-fetch and
+        // scoring still produce useful diagnostic output. Just continue.
+        personaliseData = null
+      }
+      if (personaliseData) {
+        const userCount = personaliseData?.users_processed ?? personaliseData?.users ?? '?'
+        const readyCount = personaliseData?.ready ?? personaliseData?.editions_ready ?? '?'
+        setStage('personalise', {
+          status: 'ok',
+          detail: `users=${userCount}, ready=${readyCount}`,
+          endedAt: Date.now(),
+        })
+      }
+      await loadPersonalisedStats()
+
+      // ─── Stage 4: tail-fetch ─────────────────────────────────────────
+      setStage('tail', { status: 'running', detail: 'fetching per-city / per-interest / per-industry stories…', startedAt: Date.now() })
+      let tailData: any
+      try {
+        tailData = await safeJsonFetch('/api/generate-brief', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: 'tail-fetch' }),
+        })
+      } catch (e: any) {
+        setStage('tail', { status: 'failed', detail: e.message, endedAt: Date.now() })
+        tailData = null
+      }
+      if (tailData) {
+        const s = tailData?.summary || {}
+        const c = s.cities      ? `${s.cities.ready ?? '?'}/${s.cities.total ?? '?'}` : '?'
+        const i = s.interests   ? `${s.interests.ready ?? '?'}/${s.interests.total ?? '?'}` : '?'
+        const d = s.industries  ? `${s.industries.ready ?? '?'}/${s.industries.total ?? '?'}` : '?'
+        setStage('tail', {
+          status: 'ok',
+          detail: `cities ${c} · interests ${i} · industries ${d}`,
+          endedAt: Date.now(),
+        })
+      }
+      await loadTailBriefsStatus()
+
+      // ─── Stage 5: score ──────────────────────────────────────────────
+      setStage('score', { status: 'running', detail: 'scoring all 3 editions on 7-dim rubric…', startedAt: Date.now() })
+      try {
+        const scoreData = await safeJsonFetch('/api/generate-brief', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: 'score' }),
+        })
+        if (scoreData?.ok) {
+          setStage('score', { status: 'ok', detail: 'rubric written to brief_scores', endedAt: Date.now() })
+        } else {
+          setStage('score', { status: 'failed', detail: scoreData?.error || 'score returned ok=false', endedAt: Date.now() })
+        }
+      } catch (e: any) {
+        setStage('score', { status: 'failed', detail: e.message, endedAt: Date.now() })
+      }
+      await loadCostAndScoreData()
+    } finally {
+      setMasterFinishedAt(Date.now())
+      setMasterRunning(false)
+    }
+
+    // Total elapsed log — useful when the operator screenshots the panel.
+    const elapsedSec = Math.round((Date.now() - pipelineStart) / 1000)
+    console.log(`[admin] Full pipeline finished in ${elapsedSec}s.`)
+  }
+
   if (authorized === null) return <CenteredMsg>Checking access…</CenteredMsg>
 
   if (authorized === false) {
@@ -506,6 +789,38 @@ export default function AdminPage() {
       </CenteredMsg>
     )
   }
+
+  // ─── Derived view data (computed each render — cheap) ────────────────────
+  // Fetch source: pulled from any of today's brief rows' raw_stories._source.
+  // All 3 editions share the same fetch result, so any row will do.
+  const fetchSource: string | null = (() => {
+    for (const r of rows) {
+      const s = r?.raw_stories?._source
+      if (s) return s
+    }
+    return null
+  })()
+
+  // Top publishers: counts per host across all today's brief content.
+  const topPublishers: { host: string; count: number }[] = (() => {
+    const counts = new Map<string, number>()
+    for (const r of rows) {
+      for (const u of collectSourceUrls(r.content)) {
+        const h = extractHost(u)
+        if (h) counts.set(h, (counts.get(h) || 0) + 1)
+      }
+    }
+    return Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([host, count]) => ({ host, count }))
+  })()
+  const totalStoryUrls = topPublishers.reduce((s, p) => s + p.count, 0)
+
+  // Cost-per-user economics
+  const todayTotalUSD = costsToday.reduce((s, r) => s + Number(r.usd_cost), 0)
+  const usersPersonalised = personalisedToday.users || 0
+  const costPerUserUSD = usersPersonalised > 0 ? todayTotalUSD / usersPersonalised : 0
 
   return (
     <>
@@ -602,111 +917,271 @@ export default function AdminPage() {
           }}>TODAY</button>
         </div>
 
-        {/* Editions grid */}
-        {loading ? (
+        {/* ─── Sprint 12.5.1: MASTER PIPELINE PANEL ─────────────────────── */}
+        {/* Sits between date picker and editions grid so it's the first
+            action the operator sees. One click runs the full sequence in
+            the order: brief → personalise → tail → score → cost log. */}
+        <div style={{
+          marginBottom: '36px', padding: '22px',
+          border: `1px solid ${C.gold}`, background: C.surface,
+        }}>
           <div style={{
-            color: C.textMute, fontFamily: "'DM Mono', monospace",
-            padding: '24px', fontSize: '13px',
-          }}>Loading…</div>
-        ) : rows.length === 0 ? (
-          <div style={{
-            border: `1px solid ${C.border}`, padding: '24px', color: C.textSoft,
-            fontFamily: "'DM Sans', sans-serif", fontSize: '15px',
-            marginBottom: '24px', background: C.surface, lineHeight: 1.6,
+            display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+            marginBottom: '14px', flexWrap: 'wrap', gap: '10px',
           }}>
-            No briefs found for {selectedDate}. The cron may not have run yet, or the date might be in the future.
-          </div>
-        ) : (
-          rows.map((row) => {
-            const majorCount = countMajorEvents(row.content)
-            const storyCount = countStoriesForEdition(row.content, row.edition)
-            return (
-              <div key={row.edition} style={{
-                border: `1px solid ${C.border}`,
-                borderLeft: `3px solid ${statusColor(row.status)}`,
-                padding: '22px', marginBottom: '16px', background: C.surface2,
+            <div style={{
+              fontFamily: "'DM Mono', monospace", fontSize: '11px',
+              letterSpacing: '2.5px', color: C.gold,
+            }}>FULL PIPELINE · ONE CLICK</div>
+            {masterFinishedAt && !masterRunning && (
+              <div style={{
+                fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                color: C.textMute, letterSpacing: '1px',
               }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
-                  <div style={{
-                    fontFamily: "'Playfair Display', serif", fontSize: '22px',
-                    fontWeight: 700, color: C.text,
-                  }}>{editionLabel(row.edition)}</div>
-                  <div style={{
-                    fontFamily: "'DM Mono', monospace", fontSize: '11px', letterSpacing: '2px',
-                    color: statusColor(row.status), textTransform: 'uppercase',
-                  }}>{row.status}</div>
-                </div>
-
-                <div style={{
-                  display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 18px',
-                  fontFamily: "'DM Mono', monospace", fontSize: '12px',
-                  color: C.textMute, marginBottom: '16px',
-                }}>
-                  <div>stories / blocks: <span style={{ color: C.text }}>{storyCount}</span></div>
-                  <div>major events: <span style={{ color: C.text }}>{majorCount}</span></div>
-                  <div>closer: <span style={{ color: C.text }}>{row.content?.closer ? 'yes' : 'no'}</span></div>
-                  <div>lens: <span style={{ color: hasLens(row.content?.lens) ? C.ok : C.warn }}>{hasLens(row.content?.lens) ? 'yes' : 'no'}</span></div>
-                  <div style={{ gridColumn: '1 / -1' }}>
-                    generated: <span style={{ color: C.text }}>{row.generated_at ? new Date(row.generated_at).toLocaleString('en-IN') : '—'}</span>
-                  </div>
-                </div>
-
-                <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-                  <button onClick={() => setExpanded(expanded === row.edition ? null : row.edition)} style={{
-                    background: 'none', border: `1px solid ${C.border}`, color: C.textSoft,
-                    padding: '8px 14px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
-                    letterSpacing: '1.5px', cursor: 'pointer', minHeight: '40px',
-                  }}>{expanded === row.edition ? 'HIDE JSON' : 'VIEW JSON'}</button>
-                  <button onClick={() => regenerate(row.edition)} disabled={regenerating} style={{
-                    background: 'none', border: `1px solid ${C.gold}`, color: C.gold,
-                    padding: '8px 14px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
-                    letterSpacing: '1.5px',
-                    cursor: regenerating ? 'not-allowed' : 'pointer',
-                    opacity: regenerating ? 0.5 : 1, minHeight: '40px',
-                  }}>REGENERATE</button>
-                </div>
-
-                {expanded === row.edition && (
-                  <pre style={{
-                    marginTop: '16px', padding: '16px', background: C.surfaceDeep,
-                    border: `1px solid ${C.border}`, color: C.textSoft,
-                    fontFamily: "'DM Mono', monospace", fontSize: '11px',
-                    maxHeight: '420px', overflow: 'auto', whiteSpace: 'pre-wrap',
-                    lineHeight: 1.5,
-                  }}>{JSON.stringify(row.content, null, 2)}</pre>
-                )}
+                LAST RUN ·&nbsp;
+                {new Date(masterFinishedAt).toLocaleTimeString('en-IN', { hour12: false })}
               </div>
-            )
-          })
-        )}
+            )}
+          </div>
 
-        {/* Regenerate all */}
-        <div style={{ marginTop: '36px', paddingTop: '28px', borderTop: `1px solid ${C.border}` }}>
-          <button onClick={() => regenerate(undefined)} disabled={regenerating} style={{
+          <div style={{
+            fontFamily: "'DM Sans', sans-serif", fontSize: '13px',
+            color: C.textSoft, lineHeight: 1.55, marginBottom: '18px',
+          }}>
+            Runs the full morning sequence in order: fetch news → write 3 editions →
+            personalise per user → tail-fetch (city/interest/industry) → score on rubric.
+            Each stage is a separate Vercel invocation, so the 300s timeout applies
+            per stage, not to the whole pipeline.
+          </div>
+
+          <button onClick={runFullPipeline} disabled={masterRunning} style={{
             background: C.gold, color: '#0E0E0E', border: 'none',
             padding: '16px 28px', fontFamily: "'DM Mono', monospace", fontSize: '12px',
             letterSpacing: '2px', fontWeight: 700,
-            cursor: regenerating ? 'not-allowed' : 'pointer',
-            opacity: regenerating ? 0.6 : 1, minHeight: '52px',
-          }}>{regenerating ? 'GENERATING… (~65s)' : 'REGENERATE ALL 3 EDITIONS'}</button>
+            cursor: masterRunning ? 'not-allowed' : 'pointer',
+            opacity: masterRunning ? 0.6 : 1, minHeight: '52px',
+            width: '100%',
+          }}>{masterRunning ? 'RUNNING PIPELINE…' : 'RUN FULL PIPELINE NOW'}</button>
 
-          {regenResult && (
-            <pre style={{
-              marginTop: '18px', padding: '16px', background: C.surfaceDeep,
-              border: `1px solid ${C.border}`, color: C.textSoft,
+          {/* Per-stage progress display */}
+          <div style={{ marginTop: '20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {masterStages.map((s) => {
+              const dur = (s.startedAt && s.endedAt)
+                ? `${Math.round((s.endedAt - s.startedAt) / 1000)}s`
+                : (s.startedAt && masterRunning)
+                  ? `${Math.round((Date.now() - s.startedAt) / 1000)}s…`
+                  : ''
+              return (
+                <div key={s.id} style={{
+                  display: 'grid',
+                  gridTemplateColumns: '28px 1.4fr 2fr 60px',
+                  gap: '10px', alignItems: 'center',
+                  padding: '10px 12px',
+                  border: `1px solid ${C.border}`,
+                  background: s.status === 'running' ? C.surface2 : C.surfaceDeep,
+                  borderLeft: `3px solid ${stageColor(s.status)}`,
+                }}>
+                  <div style={{
+                    fontFamily: "'DM Mono', monospace", fontSize: '14px',
+                    color: stageColor(s.status), textAlign: 'center', fontWeight: 700,
+                  }}>{stageGlyph(s.status)}</div>
+                  <div style={{
+                    fontFamily: "'DM Mono', monospace", fontSize: '11px',
+                    color: C.textSoft, letterSpacing: '1px',
+                  }}>{s.label}</div>
+                  <div style={{
+                    fontFamily: "'DM Sans', sans-serif", fontSize: '12px',
+                    color: s.status === 'failed' ? C.err : C.textMute,
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }} title={s.detail}>{s.detail || '—'}</div>
+                  <div style={{
+                    fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                    color: C.textDim, textAlign: 'right',
+                  }}>{dur}</div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+
+        {/* ─── PANEL 1: Briefs ─────────────────────────────────────────── */}
+        <div style={{ marginTop: '36px', paddingTop: '28px', borderTop: `1px solid ${C.border}` }}>
+          <div style={{
+            display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+            marginBottom: '16px', flexWrap: 'wrap', gap: '10px',
+          }}>
+            <div style={{
               fontFamily: "'DM Mono', monospace", fontSize: '11px',
-              maxHeight: '320px', overflow: 'auto', whiteSpace: 'pre-wrap',
-              lineHeight: 1.5,
-            }}>{regenResult}</pre>
+              letterSpacing: '2.5px', color: C.gold,
+            }}>BRIEFS · {selectedDate}</div>
+            {fetchSource && (() => {
+              const { label, colour } = fetchSourceLabel(fetchSource)
+              return (
+                <div style={{
+                  fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                  color: colour, letterSpacing: '1.5px',
+                  padding: '4px 10px', border: `1px solid ${colour}`,
+                }} title="The actual engine that produced today's fetch. PERPLEXITY = fast path. GPT-4O FALLBACK ⚠ = Perplexity 400'd or timed out and the safety net ran.">
+                  {label}
+                </div>
+              )
+            })()}
+          </div>
+
+          {loading ? (
+            <div style={{
+              color: C.textMute, fontFamily: "'DM Mono', monospace",
+              padding: '24px', fontSize: '13px',
+            }}>Loading…</div>
+          ) : rows.length === 0 ? (
+            <div style={{
+              border: `1px solid ${C.border}`, padding: '24px', color: C.textSoft,
+              fontFamily: "'DM Sans', sans-serif", fontSize: '15px',
+              marginBottom: '24px', background: C.surface, lineHeight: 1.6,
+            }}>
+              No briefs found for {selectedDate}. The cron may not have run yet, or the date might be in the future.
+            </div>
+          ) : (
+            rows.map((row) => {
+              const majorCount = countMajorEvents(row.content)
+              const storyCount = countStoriesForEdition(row.content, row.edition)
+              return (
+                <div key={row.edition} style={{
+                  border: `1px solid ${C.border}`,
+                  borderLeft: `3px solid ${statusColor(row.status)}`,
+                  padding: '22px', marginBottom: '16px', background: C.surface2,
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
+                    <div style={{
+                      fontFamily: "'Playfair Display', serif", fontSize: '22px',
+                      fontWeight: 700, color: C.text,
+                    }}>{editionLabel(row.edition)}</div>
+                    <div style={{
+                      fontFamily: "'DM Mono', monospace", fontSize: '11px', letterSpacing: '2px',
+                      color: statusColor(row.status), textTransform: 'uppercase',
+                    }}>{row.status}</div>
+                  </div>
+
+                  <div style={{
+                    display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 18px',
+                    fontFamily: "'DM Mono', monospace", fontSize: '12px',
+                    color: C.textMute, marginBottom: '16px',
+                  }}>
+                    <div>stories / blocks: <span style={{ color: C.text }}>{storyCount}</span></div>
+                    <div>major events: <span style={{ color: C.text }}>{majorCount}</span></div>
+                    <div>closer: <span style={{ color: C.text }}>{row.content?.closer ? 'yes' : 'no'}</span></div>
+                    <div>lens: <span style={{ color: hasLens(row.content?.lens) ? C.ok : C.warn }}>{hasLens(row.content?.lens) ? 'yes' : 'no'}</span></div>
+                    <div style={{ gridColumn: '1 / -1' }}>
+                      generated: <span style={{ color: C.text }}>{row.generated_at ? new Date(row.generated_at).toLocaleString('en-IN') : '—'}</span>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                    <button onClick={() => setExpanded(expanded === row.edition ? null : row.edition)} style={{
+                      background: 'none', border: `1px solid ${C.border}`, color: C.textSoft,
+                      padding: '8px 14px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
+                      letterSpacing: '1.5px', cursor: 'pointer', minHeight: '40px',
+                    }}>{expanded === row.edition ? 'HIDE JSON' : 'VIEW JSON'}</button>
+                    <button onClick={() => regenerate(row.edition)} disabled={regenerating} style={{
+                      background: 'none', border: `1px solid ${C.gold}`, color: C.gold,
+                      padding: '8px 14px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
+                      letterSpacing: '1.5px',
+                      cursor: regenerating ? 'not-allowed' : 'pointer',
+                      opacity: regenerating ? 0.5 : 1, minHeight: '40px',
+                    }}>REGENERATE</button>
+                  </div>
+
+                  {expanded === row.edition && (
+                    <pre style={{
+                      marginTop: '16px', padding: '16px', background: C.surfaceDeep,
+                      border: `1px solid ${C.border}`, color: C.textSoft,
+                      fontFamily: "'DM Mono', monospace", fontSize: '11px',
+                      maxHeight: '420px', overflow: 'auto', whiteSpace: 'pre-wrap',
+                      lineHeight: 1.5,
+                    }}>{JSON.stringify(row.content, null, 2)}</pre>
+                  )}
+                </div>
+              )
+            })
+          )}
+
+          {/* Regenerate all */}
+          <div style={{ marginTop: '20px' }}>
+            <button onClick={() => regenerate(undefined)} disabled={regenerating} style={{
+              background: 'none', border: `1px solid ${C.gold}`, color: C.gold,
+              padding: '14px 22px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
+              letterSpacing: '2px', fontWeight: 700,
+              cursor: regenerating ? 'not-allowed' : 'pointer',
+              opacity: regenerating ? 0.6 : 1, minHeight: '48px',
+            }}>{regenerating ? 'GENERATING…' : 'REGENERATE ALL 3 EDITIONS'}</button>
+
+            {regenResult && (
+              <pre style={{
+                marginTop: '18px', padding: '16px', background: C.surfaceDeep,
+                border: `1px solid ${C.border}`, color: C.textSoft,
+                fontFamily: "'DM Mono', monospace", fontSize: '11px',
+                maxHeight: '320px', overflow: 'auto', whiteSpace: 'pre-wrap',
+                lineHeight: 1.5,
+              }}>{regenResult}</pre>
+            )}
+          </div>
+
+          {/* Top publishers panel — diversity sanity check */}
+          {topPublishers.length > 0 && (
+            <div style={{ marginTop: '24px' }}>
+              <div style={{
+                fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                letterSpacing: '2px', color: C.textMute, marginBottom: '10px',
+              }}>TOP PUBLISHERS ACROSS TODAY&apos;S BRIEFS</div>
+              <div style={{
+                border: `1px solid ${C.border}`, background: C.surface2,
+              }}>
+                {topPublishers.map((p, i) => {
+                  const pct = totalStoryUrls > 0 ? (p.count / totalStoryUrls) * 100 : 0
+                  // Diversity guardrail: any single publisher >25% is a flag.
+                  const flag = pct > 25
+                  return (
+                    <div key={p.host} style={{
+                      display: 'grid',
+                      gridTemplateColumns: '1.6fr 0.6fr 1fr',
+                      gap: '10px', padding: '10px 14px',
+                      borderBottom: i < topPublishers.length - 1 ? `1px solid ${C.border}` : 'none',
+                      fontFamily: "'DM Mono', monospace", fontSize: '12px',
+                      alignItems: 'center',
+                    }}>
+                      <div style={{ color: flag ? C.warn : C.textSoft }}>{p.host}</div>
+                      <div style={{ color: C.text, textAlign: 'right' }}>{p.count}</div>
+                      <div style={{
+                        position: 'relative', height: '8px', background: C.surfaceDeep,
+                        border: `1px solid ${C.border}`,
+                      }}>
+                        <div style={{
+                          position: 'absolute', top: 0, left: 0, bottom: 0,
+                          width: `${Math.min(100, pct)}%`,
+                          background: flag ? C.warn : C.gold,
+                        }} />
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+              <div style={{
+                fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                color: C.textDim, marginTop: '8px', letterSpacing: '0.5px',
+              }}>
+                {totalStoryUrls} source URLs across {rows.length} editions ·
+                amber bar = single publisher &gt; 25% share
+              </div>
+            </div>
           )}
         </div>
 
-        {/* Personalisation panel */}
+        {/* ─── PANEL 2: Personalisation ─────────────────────────────────── */}
         <div style={{ marginTop: '36px', paddingTop: '28px', borderTop: `1px solid ${C.border}` }}>
           <div style={{
             fontFamily: "'DM Mono', monospace", fontSize: '11px',
             letterSpacing: '2.5px', color: C.gold, marginBottom: '16px',
-          }}>PERSONALISATION</div>
+          }}>PERSONALISATION · {selectedDate}</div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px', marginBottom: '20px' }}>
             <div style={{
               border: `1px solid ${C.border}`, padding: '16px', background: C.surface2,
@@ -747,133 +1222,150 @@ export default function AdminPage() {
               lineHeight: 1.5,
             }}>{personaliseResult}</pre>
           )}
+
+          {/* Personalisation health (was: "Tail status" panel — moved here because
+              it tracks personalised_briefs[].content.tail_status, which is a
+              personalisation concern, not a tail-fetch concern). */}
+          {Object.keys(tailCounts).length > 0 && (
+            <div style={{ marginTop: '24px' }}>
+              <div style={{
+                fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                letterSpacing: '2px', color: C.textMute, marginBottom: '10px',
+              }}>PERSONALISATION HEALTH · PER-USER TAIL STATUS</div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px' }}>
+                {(['ok', 'partial_city_failed', 'partial_interest_failed', 'partial_both'] as const).map(status => {
+                  const n = tailCounts[status] || 0
+                  const label =
+                    status === 'ok' ? 'HEALTHY' :
+                    status === 'partial_city_failed' ? 'CITY FAIL' :
+                    status === 'partial_interest_failed' ? 'INTEREST FAIL' : 'BOTH FAIL'
+                  const colour =
+                    status === 'ok' ? C.ok :
+                    status === 'partial_both' ? C.err : C.warn
+                  return (
+                    <div key={status} style={{
+                      border: `1px solid ${C.border}`, padding: '14px',
+                      background: C.surface2, borderLeft: `3px solid ${colour}`,
+                    }}>
+                      <div style={{
+                        fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                        letterSpacing: '1.5px', color: colour, marginBottom: '6px',
+                      }}>{label}</div>
+                      <div style={{
+                        fontFamily: "'Playfair Display', serif", fontSize: '22px',
+                        fontWeight: 700, color: colour,
+                      }}>{n}</div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
         </div>
 
-        {/* ─── Sprint 11: Cost panel ──────────────────────────────────── */}
+        {/* ─── PANEL 3: Tail-fetch ─────────────────────────────────────── */}
         <div style={{ marginTop: '36px', paddingTop: '28px', borderTop: `1px solid ${C.border}` }}>
           <div style={{
-            fontFamily: "'DM Mono', monospace", fontSize: '11px',
-            letterSpacing: '2.5px', color: C.gold, marginBottom: '16px',
-          }}>COST · {selectedDate}</div>
+            display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+            marginBottom: '16px', flexWrap: 'wrap', gap: '12px',
+          }}>
+            <div style={{
+              fontFamily: "'DM Mono', monospace", fontSize: '11px',
+              letterSpacing: '2.5px', color: C.gold,
+            }}>TAIL-FETCH · CITY · INTEREST · INDUSTRY</div>
+            <button onClick={runTailFetch} disabled={runningTailFetch} style={{
+              padding: '8px 14px', background: 'transparent',
+              color: runningTailFetch ? C.textDim : C.gold,
+              border: `1px solid ${runningTailFetch ? C.border : C.gold}`,
+              fontFamily: "'DM Mono', monospace", fontSize: '10px',
+              letterSpacing: '1.5px', cursor: runningTailFetch ? 'not-allowed' : 'pointer',
+              textTransform: 'uppercase',
+            }}>
+              {runningTailFetch ? 'Running…' : 'Run tail-fetch now'}
+            </button>
+          </div>
 
-          {(() => {
-            const total = costsToday.reduce((s, r) => s + Number(r.usd_cost), 0)
-            return (
-              <>
-                <div style={{
-                  fontFamily: "'Playfair Display', serif",
-                  fontSize: '34px', fontWeight: 700, color: C.gold,
-                  lineHeight: 1.1, marginBottom: '4px',
-                }}>{formatUSD(total)}</div>
-                <div style={{
-                  fontFamily: "'DM Mono', monospace", fontSize: '12px',
-                  color: C.textMute, marginBottom: '20px',
-                }}>
-                  ≈ {formatINR(total)} · {costsToday.length} API call{costsToday.length === 1 ? '' : 's'}
-                </div>
-              </>
-            )
-          })()}
-
-          {/* Per-phase breakdown */}
-          {costsToday.length > 0 && (() => {
-            const byPhase = new Map<string, { phase: string; calls: number; inputTokens: number; outputTokens: number; reasoningTokens: number; usd: number }>()
-            for (const r of costsToday) {
-              const cur = byPhase.get(r.phase) || { phase: r.phase, calls: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, usd: 0 }
-              cur.calls += 1
-              cur.inputTokens += r.input_tokens
-              cur.outputTokens += r.output_tokens
-              cur.reasoningTokens += r.reasoning_tokens || 0
-              cur.usd += Number(r.usd_cost)
-              byPhase.set(r.phase, cur)
-            }
-            const phases = Array.from(byPhase.values()).sort((a, b) => b.usd - a.usd)
-            return (
-              <div style={{ border: `1px solid ${C.border}`, background: C.surface2 }}>
-                <div style={{
-                  display: 'grid', gridTemplateColumns: '1.2fr 0.6fr 1fr 1fr 0.8fr',
-                  gap: '12px', padding: '12px 16px', borderBottom: `1px solid ${C.border}`,
-                  fontFamily: "'DM Mono', monospace", fontSize: '10px',
-                  letterSpacing: '1.5px', color: C.textMute,
-                }}>
-                  <div>PHASE</div>
-                  <div style={{ textAlign: 'right' }}>CALLS</div>
-                  <div style={{ textAlign: 'right' }}>IN TOKENS</div>
-                  <div style={{ textAlign: 'right' }}>OUT TOKENS</div>
-                  <div style={{ textAlign: 'right' }}>USD</div>
-                </div>
-                {phases.map(p => (
-                  <div key={p.phase} style={{
-                    display: 'grid', gridTemplateColumns: '1.2fr 0.6fr 1fr 1fr 0.8fr',
-                    gap: '12px', padding: '12px 16px',
-                    borderBottom: `1px solid ${C.border}`,
-                    fontFamily: "'DM Mono', monospace", fontSize: '12px',
-                    color: C.textSoft,
-                  }}>
-                    <div style={{ color: C.gold, letterSpacing: '1px' }}>{p.phase.toUpperCase()}</div>
-                    <div style={{ textAlign: 'right' }}>{p.calls}</div>
-                    <div style={{ textAlign: 'right' }}>{p.inputTokens.toLocaleString()}</div>
-                    <div style={{ textAlign: 'right' }}>{(p.outputTokens + p.reasoningTokens).toLocaleString()}</div>
-                    <div style={{ textAlign: 'right', color: C.text, fontWeight: 700 }}>{formatUSD(p.usd)}</div>
-                  </div>
-                ))}
-              </div>
-            )
-          })()}
-
-          {costsToday.length === 0 && (
+          {tailBriefRows.length === 0 ? (
             <div style={{
               border: `1px solid ${C.border}`, padding: '20px', color: C.textMute,
               fontFamily: "'DM Sans', sans-serif", fontSize: '14px',
               background: C.surface2, fontStyle: 'italic',
             }}>
-              No API calls logged for {selectedDate}. The fetch cron runs at 6:30 IST. Cost data tracked from Sprint 11 onwards.
+              No tail_briefs rows for {selectedDate} yet. Run tail-fetch (or wait for the cron).
             </div>
+          ) : (
+            <>
+              {/* Summary cards by type */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px', marginBottom: '18px' }}>
+                {(['city', 'interest', 'industry'] as const).map(type => {
+                  const rows = tailBriefRows.filter(r => r.tail_type === type)
+                  const ready = rows.filter(r => r.status === 'ready').length
+                  const empty = rows.filter(r => r.status === 'empty').length
+                  const failed = rows.filter(r => r.status === 'failed').length
+                  return (
+                    <div key={type} style={{
+                      border: `1px solid ${C.border}`, padding: '12px 14px',
+                      background: C.surface2,
+                      borderLeft: `3px solid ${failed > 0 ? C.err : empty > 0 ? C.warn : C.ok}`,
+                    }}>
+                      <div style={{
+                        fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                        letterSpacing: '1.5px', color: C.textMute, marginBottom: '6px',
+                      }}>{type.toUpperCase()}</div>
+                      <div style={{
+                        fontFamily: "'Playfair Display', serif", fontSize: '20px',
+                        fontWeight: 700, color: C.text, marginBottom: '4px',
+                      }}>{ready}/{rows.length}</div>
+                      <div style={{
+                        fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                        color: C.textMute, letterSpacing: '0.5px',
+                      }}>
+                        {ready} ready · {empty} empty · {failed} failed
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+
+              {/* Per-row breakdown */}
+              <div style={{ border: `1px solid ${C.border}`, background: C.surface2, maxHeight: '320px', overflowY: 'auto' }}>
+                {tailBriefRows.map((r, i) => {
+                  const c =
+                    r.status === 'ready' ? C.ok :
+                    r.status === 'failed' ? C.err : C.warn
+                  return (
+                    <div key={i} style={{
+                      display: 'grid', gridTemplateColumns: '0.7fr 1.2fr 0.6fr 0.5fr 0.5fr',
+                      gap: '10px', padding: '8px 14px',
+                      borderBottom: i < tailBriefRows.length - 1 ? `1px solid ${C.border}` : 'none',
+                      fontFamily: "'DM Mono', monospace", fontSize: '11px',
+                      alignItems: 'center',
+                    }}>
+                      <div style={{ color: C.textMute, letterSpacing: '1px' }}>{r.tail_type}</div>
+                      <div style={{ color: C.textSoft }}>{r.display_name}</div>
+                      <div style={{ color: c, letterSpacing: '1px' }}>{r.status}</div>
+                      <div style={{ color: C.text, textAlign: 'right' }}>{r.story_count} stories</div>
+                      <div style={{ color: r.used_regional ? C.gold : C.textDim, textAlign: 'right' }}>
+                        {r.tail_type === 'city' ? (r.used_regional ? 'regional' : 'national') : ''}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </>
           )}
 
-          {/* 7-day cost trend */}
-          {(() => {
-            const byDay = new Map<string, number>()
-            for (const r of costs7d) byDay.set(r.date, (byDay.get(r.date) || 0) + Number(r.usd_cost))
-            const days: { date: string; usd: number }[] = []
-            for (let i = -7; i <= 0; i++) {
-              const d = getISTDate(i)
-              days.push({ date: d, usd: byDay.get(d) || 0 })
-            }
-            const maxDay = Math.max(0.01, ...days.map(d => d.usd))
-            const weekTotal = days.reduce((s, d) => s + d.usd, 0)
-            return (
-              <div style={{ marginTop: '20px' }}>
-                <div style={{
-                  fontFamily: "'DM Mono', monospace", fontSize: '10px',
-                  letterSpacing: '2px', color: C.textMute, marginBottom: '12px',
-                }}>8-DAY TREND · TOTAL {formatUSD(weekTotal)}</div>
-                <div style={{ display: 'flex', alignItems: 'flex-end', gap: '6px', height: '70px' }}>
-                  {days.map(d => {
-                    const heightPct = (d.usd / maxDay) * 100
-                    const isSelected = d.date === selectedDate
-                    return (
-                      <div key={d.date} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
-                        <div style={{
-                          width: '100%',
-                          height: `${Math.max(2, heightPct)}%`,
-                          background: isSelected ? C.gold : C.borderHi,
-                          minHeight: '2px',
-                        }} title={`${d.date}: ${formatUSD(d.usd)}`} />
-                        <div style={{
-                          fontFamily: "'DM Mono', monospace", fontSize: '9px',
-                          color: isSelected ? C.gold : C.textDim,
-                        }}>{d.date.slice(8, 10)}</div>
-                      </div>
-                    )
-                  })}
-                </div>
-              </div>
-            )
-          })()}
+          {tailFetchResult && (
+            <pre style={{
+              marginTop: '16px', padding: '14px',
+              background: C.surface2, border: `1px solid ${C.border}`,
+              color: C.textSoft, fontFamily: "'DM Mono', monospace", fontSize: '11px',
+              maxHeight: '220px', overflowY: 'auto', whiteSpace: 'pre-wrap',
+            }}>{tailFetchResult}</pre>
+          )}
         </div>
 
-        {/* ─── Sprint 11: Quality scores panel ────────────────────────── */}
+        {/* ─── PANEL 4: Quality Scores ─────────────────────────────────── */}
         <div style={{ marginTop: '36px', paddingTop: '28px', borderTop: `1px solid ${C.border}` }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '12px', marginBottom: '16px' }}>
             <div style={{
@@ -905,7 +1397,7 @@ export default function AdminPage() {
               fontFamily: "'DM Sans', sans-serif", fontSize: '14px',
               background: C.surface2, fontStyle: 'italic',
             }}>
-              No scores yet for {selectedDate}. Click "Run Scoring Now" — uses gpt-4o-mini to score all 3 ready editions against the 7-dim rubric (~$0.005, 10-20s).
+              No scores yet for {selectedDate}. Click "Run Scoring Now" — uses gpt-4o to score all 3 ready editions against the 7-dim rubric (~$0.06, 10-20s).
             </div>
           )}
 
@@ -1015,188 +1507,199 @@ export default function AdminPage() {
           })()}
         </div>
 
-        {/* ─── Sprint 11: Tail status panel ───────────────────────────── */}
+        {/* ─── PANEL 5: Cost log ─────────────────────────────────────── */}
         <div style={{ marginTop: '36px', paddingTop: '28px', borderTop: `1px solid ${C.border}` }}>
           <div style={{
             fontFamily: "'DM Mono', monospace", fontSize: '11px',
             letterSpacing: '2.5px', color: C.gold, marginBottom: '16px',
-          }}>TAIL STATUS · PERSONALISATION HEALTH</div>
+          }}>COST · {selectedDate}</div>
 
-          {Object.keys(tailCounts).length === 0 ? (
-            <div style={{
-              border: `1px solid ${C.border}`, padding: '20px', color: C.textMute,
-              fontFamily: "'DM Sans', sans-serif", fontSize: '14px',
-              background: C.surface2, fontStyle: 'italic',
-            }}>
-              No personalised briefs produced for {selectedDate} yet. Tail status is logged from Sprint 11 onwards.
-            </div>
-          ) : (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px' }}>
-              {(['ok', 'partial_city_failed', 'partial_interest_failed', 'partial_both'] as const).map(status => {
-                const n = tailCounts[status] || 0
-                const label =
-                  status === 'ok' ? 'HEALTHY' :
-                  status === 'partial_city_failed' ? 'CITY FAIL' :
-                  status === 'partial_interest_failed' ? 'INTEREST FAIL' : 'BOTH FAIL'
-                const colour =
-                  status === 'ok' ? C.ok :
-                  status === 'partial_both' ? C.err : C.warn
-                return (
-                  <div key={status} style={{
-                    border: `1px solid ${C.border}`, padding: '14px',
-                    background: C.surface2, borderLeft: `3px solid ${colour}`,
-                  }}>
-                    <div style={{
-                      fontFamily: "'DM Mono', monospace", fontSize: '10px',
-                      letterSpacing: '1.5px', color: colour, marginBottom: '6px',
-                    }}>{label}</div>
-                    <div style={{
-                      fontFamily: "'Playfair Display', serif", fontSize: '22px',
-                      fontWeight: 700, color: colour,
-                    }}>{n}</div>
-                  </div>
-                )
-              })}
-            </div>
-          )}
-        </div>
-
-        {/* ─── Sprint 12: Tail-fetch panel ─────────────────────────────── */}
-        <div style={{ marginTop: '36px', paddingTop: '28px', borderTop: `1px solid ${C.border}` }}>
           <div style={{
-            display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
-            marginBottom: '16px', flexWrap: 'wrap', gap: '12px',
+            fontFamily: "'Playfair Display', serif",
+            fontSize: '34px', fontWeight: 700, color: C.gold,
+            lineHeight: 1.1, marginBottom: '4px',
+          }}>{formatUSD(todayTotalUSD)}</div>
+          <div style={{
+            fontFamily: "'DM Mono', monospace", fontSize: '12px',
+            color: C.textMute, marginBottom: '20px',
           }}>
-            <div style={{
-              fontFamily: "'DM Mono', monospace", fontSize: '11px',
-              letterSpacing: '2.5px', color: C.gold,
-            }}>TAIL-FETCH · CITY · INTEREST · INDUSTRY</div>
-            <button onClick={runTailFetch} disabled={runningTailFetch} style={{
-              padding: '8px 14px', background: 'transparent',
-              color: runningTailFetch ? C.textDim : C.gold,
-              border: `1px solid ${runningTailFetch ? C.border : C.gold}`,
-              fontFamily: "'DM Mono', monospace", fontSize: '10px',
-              letterSpacing: '1.5px', cursor: runningTailFetch ? 'not-allowed' : 'pointer',
-              textTransform: 'uppercase',
-            }}>
-              {runningTailFetch ? 'Running…' : 'Run tail-fetch now'}
-            </button>
+            ≈ {formatINR(todayTotalUSD)} · {costsToday.length} API call{costsToday.length === 1 ? '' : 's'}
           </div>
 
-          {tailBriefRows.length === 0 ? (
+          {/* Cost-per-user economics — the unit-economics number Neha
+              has been tracking. usd_today / personalised_users. Goes red when
+              we're spending more than $0.20/user (Sprint 12 cost model
+              committed to $0.02/user at scale). */}
+          {usersPersonalised > 0 && (
+            <div style={{
+              display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px',
+              marginBottom: '20px',
+            }}>
+              <div style={{
+                border: `1px solid ${C.border}`, padding: '14px', background: C.surface2,
+                fontFamily: "'DM Mono', monospace", fontSize: '11px', color: C.textMute,
+              }}>
+                <div style={{ marginBottom: '6px', letterSpacing: '1.5px' }}>$ PER USER</div>
+                <div style={{
+                  fontFamily: "'Playfair Display', serif", fontSize: '20px',
+                  fontWeight: 700,
+                  color: costPerUserUSD < 0.05 ? C.ok : costPerUserUSD < 0.20 ? C.gold : C.warn,
+                }}>
+                  {formatUSD(costPerUserUSD)}
+                </div>
+                <div style={{ marginTop: '4px', color: C.textDim, fontSize: '10px' }}>
+                  ≈ {formatINR(costPerUserUSD)} · target &lt; $0.02 at scale
+                </div>
+              </div>
+              <div style={{
+                border: `1px solid ${C.border}`, padding: '14px', background: C.surface2,
+                fontFamily: "'DM Mono', monospace", fontSize: '11px', color: C.textMute,
+              }}>
+                <div style={{ marginBottom: '6px', letterSpacing: '1.5px' }}>PERSONALISED USERS</div>
+                <div style={{
+                  fontFamily: "'Playfair Display', serif", fontSize: '20px',
+                  fontWeight: 700, color: C.text,
+                }}>{usersPersonalised}</div>
+                <div style={{ marginTop: '4px', color: C.textDim, fontSize: '10px' }}>
+                  divisor for cost-per-user
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Per-phase breakdown */}
+          {costsToday.length > 0 && (() => {
+            const byPhase = new Map<string, { phase: string; calls: number; inputTokens: number; outputTokens: number; reasoningTokens: number; usd: number }>()
+            for (const r of costsToday) {
+              const cur = byPhase.get(r.phase) || { phase: r.phase, calls: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, usd: 0 }
+              cur.calls += 1
+              cur.inputTokens += r.input_tokens
+              cur.outputTokens += r.output_tokens
+              cur.reasoningTokens += r.reasoning_tokens || 0
+              cur.usd += Number(r.usd_cost)
+              byPhase.set(r.phase, cur)
+            }
+            const phases = Array.from(byPhase.values()).sort((a, b) => b.usd - a.usd)
+            return (
+              <div style={{ border: `1px solid ${C.border}`, background: C.surface2 }}>
+                <div style={{
+                  display: 'grid', gridTemplateColumns: '1.2fr 0.6fr 1fr 1fr 0.8fr',
+                  gap: '12px', padding: '12px 16px', borderBottom: `1px solid ${C.border}`,
+                  fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                  letterSpacing: '1.5px', color: C.textMute,
+                }}>
+                  <div>PHASE</div>
+                  <div style={{ textAlign: 'right' }}>CALLS</div>
+                  <div style={{ textAlign: 'right' }}>IN TOKENS</div>
+                  <div style={{ textAlign: 'right' }}>OUT TOKENS</div>
+                  <div style={{ textAlign: 'right' }}>USD</div>
+                </div>
+                {phases.map(p => (
+                  <div key={p.phase} style={{
+                    display: 'grid', gridTemplateColumns: '1.2fr 0.6fr 1fr 1fr 0.8fr',
+                    gap: '12px', padding: '12px 16px',
+                    borderBottom: `1px solid ${C.border}`,
+                    fontFamily: "'DM Mono', monospace", fontSize: '12px',
+                    color: C.textSoft,
+                  }}>
+                    <div style={{ color: C.gold, letterSpacing: '1px' }}>{p.phase.toUpperCase()}</div>
+                    <div style={{ textAlign: 'right' }}>{p.calls}</div>
+                    <div style={{ textAlign: 'right' }}>{p.inputTokens.toLocaleString()}</div>
+                    <div style={{ textAlign: 'right' }}>{(p.outputTokens + p.reasoningTokens).toLocaleString()}</div>
+                    <div style={{ textAlign: 'right', color: C.text, fontWeight: 700 }}>{formatUSD(p.usd)}</div>
+                  </div>
+                ))}
+              </div>
+            )
+          })()}
+
+          {costsToday.length === 0 && (
             <div style={{
               border: `1px solid ${C.border}`, padding: '20px', color: C.textMute,
               fontFamily: "'DM Sans', sans-serif", fontSize: '14px',
               background: C.surface2, fontStyle: 'italic',
             }}>
-              No tail_briefs rows for {selectedDate} yet. Run tail-fetch (or wait for the cron).
+              No API calls logged for {selectedDate}. The fetch cron runs at 6:30 IST. Cost data tracked from Sprint 11 onwards.
             </div>
-          ) : (
-            <>
-              {/* Summary cards by type */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px', marginBottom: '18px' }}>
-                {(['city', 'interest', 'industry'] as const).map(type => {
-                  const rows = tailBriefRows.filter(r => r.tail_type === type)
-                  const ready = rows.filter(r => r.status === 'ready').length
-                  const empty = rows.filter(r => r.status === 'empty').length
-                  const failed = rows.filter(r => r.status === 'failed').length
-                  return (
-                    <div key={type} style={{
-                      border: `1px solid ${C.border}`, padding: '12px 14px',
-                      background: C.surface2,
-                      borderLeft: `3px solid ${failed > 0 ? C.err : empty > 0 ? C.warn : C.ok}`,
-                    }}>
-                      <div style={{
-                        fontFamily: "'DM Mono', monospace", fontSize: '10px',
-                        letterSpacing: '1.5px', color: C.textMute, marginBottom: '6px',
-                      }}>{type.toUpperCase()}</div>
-                      <div style={{
-                        fontFamily: "'Playfair Display', serif", fontSize: '20px',
-                        fontWeight: 700, color: C.text, marginBottom: '4px',
-                      }}>{ready}/{rows.length}</div>
-                      <div style={{
-                        fontFamily: "'DM Mono', monospace", fontSize: '10px',
-                        color: C.textMute, letterSpacing: '0.5px',
-                      }}>
-                        {ready} ready · {empty} empty · {failed} failed
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
+          )}
 
-              {/* Per-row breakdown */}
-              <div style={{ border: `1px solid ${C.border}`, background: C.surface2, maxHeight: '320px', overflowY: 'auto' }}>
-                {tailBriefRows.map((r, i) => {
-                  const c =
-                    r.status === 'ready' ? C.ok :
-                    r.status === 'failed' ? C.err : C.warn
+          {/* 8-day cost trend */}
+          {(() => {
+            const byDay = new Map<string, number>()
+            for (const r of costs7d) byDay.set(r.date, (byDay.get(r.date) || 0) + Number(r.usd_cost))
+            const days: { date: string; usd: number }[] = []
+            for (let i = -7; i <= 0; i++) {
+              const d = getISTDate(i)
+              days.push({ date: d, usd: byDay.get(d) || 0 })
+            }
+            const maxDay = Math.max(0.01, ...days.map(d => d.usd))
+            const weekTotal = days.reduce((s, d) => s + d.usd, 0)
+            return (
+              <div style={{ marginTop: '20px' }}>
+                <div style={{
+                  fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                  letterSpacing: '2px', color: C.textMute, marginBottom: '12px',
+                }}>8-DAY TREND · TOTAL {formatUSD(weekTotal)}</div>
+                <div style={{ display: 'flex', alignItems: 'flex-end', gap: '6px', height: '70px' }}>
+                  {days.map(d => {
+                    const heightPct = (d.usd / maxDay) * 100
+                    const isSelected = d.date === selectedDate
+                    return (
+                      <div key={d.date} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
+                        <div style={{
+                          width: '100%',
+                          height: `${Math.max(2, heightPct)}%`,
+                          background: isSelected ? C.gold : C.borderHi,
+                          minHeight: '2px',
+                        }} title={`${d.date}: ${formatUSD(d.usd)}`} />
+                        <div style={{
+                          fontFamily: "'DM Mono', monospace", fontSize: '9px',
+                          color: isSelected ? C.gold : C.textDim,
+                        }}>{d.date.slice(8, 10)}</div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })()}
+
+          {/* Today's call log — kept inside the cost panel since both are
+              the same logical block: today's $ + the underlying call ledger. */}
+          {costsToday.length > 0 && (
+            <div style={{ marginTop: '28px' }}>
+              <div style={{
+                fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                letterSpacing: '2px', color: C.textMute, marginBottom: '10px',
+              }}>CALL LOG</div>
+              <div style={{
+                border: `1px solid ${C.border}`, background: C.surface2,
+                maxHeight: '320px', overflowY: 'auto',
+              }}>
+                {costsToday.slice().reverse().map(r => {
+                  const t = new Date(r.created_at)
+                  const istT = new Date(t.getTime() + 5.5 * 60 * 60 * 1000)
+                  const hhmm = istT.toISOString().slice(11, 16)
                   return (
-                    <div key={i} style={{
-                      display: 'grid', gridTemplateColumns: '0.7fr 1.2fr 0.6fr 0.5fr 0.5fr',
-                      gap: '10px', padding: '8px 14px',
-                      borderBottom: i < tailBriefRows.length - 1 ? `1px solid ${C.border}` : 'none',
+                    <div key={r.id} style={{
+                      display: 'grid', gridTemplateColumns: '0.5fr 0.7fr 0.8fr 1fr 0.5fr',
+                      gap: '10px', padding: '10px 14px',
+                      borderBottom: `1px solid ${C.border}`,
                       fontFamily: "'DM Mono', monospace", fontSize: '11px',
                       alignItems: 'center',
                     }}>
-                      <div style={{ color: C.textMute, letterSpacing: '1px' }}>{r.tail_type}</div>
-                      <div style={{ color: C.textSoft }}>{r.display_name}</div>
-                      <div style={{ color: c, letterSpacing: '1px' }}>{r.status}</div>
-                      <div style={{ color: C.text, textAlign: 'right' }}>{r.story_count} stories</div>
-                      <div style={{ color: r.used_regional ? C.gold : C.textDim, textAlign: 'right' }}>
-                        {r.tail_type === 'city' ? (r.used_regional ? 'regional' : 'national') : ''}
-                      </div>
+                      <div style={{ color: C.textMute }}>{hhmm}</div>
+                      <div style={{ color: C.gold, letterSpacing: '1px' }}>{r.phase.toUpperCase()}</div>
+                      <div style={{ color: C.textSoft }}>{r.model}</div>
+                      <div style={{ color: C.textSoft, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.detail || '—'}</div>
+                      <div style={{ color: C.text, textAlign: 'right', fontWeight: 600 }}>{formatUSD(Number(r.usd_cost))}</div>
                     </div>
                   )
                 })}
               </div>
-            </>
-          )}
-
-          {tailFetchResult && (
-            <pre style={{
-              marginTop: '16px', padding: '14px',
-              background: C.surface2, border: `1px solid ${C.border}`,
-              color: C.textSoft, fontFamily: "'DM Mono', monospace", fontSize: '11px',
-              maxHeight: '220px', overflowY: 'auto', whiteSpace: 'pre-wrap',
-            }}>{tailFetchResult}</pre>
+            </div>
           )}
         </div>
-
-        {/* ─── Sprint 11: Today's call log ────────────────────────────── */}
-        {costsToday.length > 0 && (
-          <div style={{ marginTop: '36px', paddingTop: '28px', borderTop: `1px solid ${C.border}` }}>
-            <div style={{
-              fontFamily: "'DM Mono', monospace", fontSize: '11px',
-              letterSpacing: '2.5px', color: C.gold, marginBottom: '16px',
-            }}>CALL LOG · {selectedDate}</div>
-            <div style={{
-              border: `1px solid ${C.border}`, background: C.surface2,
-              maxHeight: '320px', overflowY: 'auto',
-            }}>
-              {costsToday.slice().reverse().map(r => {
-                const t = new Date(r.created_at)
-                const istT = new Date(t.getTime() + 5.5 * 60 * 60 * 1000)
-                const hhmm = istT.toISOString().slice(11, 16)
-                return (
-                  <div key={r.id} style={{
-                    display: 'grid', gridTemplateColumns: '0.5fr 0.7fr 0.8fr 1fr 0.5fr',
-                    gap: '10px', padding: '10px 14px',
-                    borderBottom: `1px solid ${C.border}`,
-                    fontFamily: "'DM Mono', monospace", fontSize: '11px',
-                    alignItems: 'center',
-                  }}>
-                    <div style={{ color: C.textMute }}>{hhmm}</div>
-                    <div style={{ color: C.gold, letterSpacing: '1px' }}>{r.phase.toUpperCase()}</div>
-                    <div style={{ color: C.textSoft }}>{r.model}</div>
-                    <div style={{ color: C.textSoft, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.detail || '—'}</div>
-                    <div style={{ color: C.text, textAlign: 'right', fontWeight: 600 }}>{formatUSD(Number(r.usd_cost))}</div>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        )}
 
       </div>
     </>

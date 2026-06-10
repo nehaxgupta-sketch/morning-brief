@@ -998,8 +998,12 @@ async function callPerplexity(prompt: string, timeoutMs: number = 120_000): Prom
         // Output controls
         temperature: 0.2,
         max_tokens: 12000,
-        // Structured output: ask for JSON. sonar-pro supports response_format.
-        response_format: { type: 'json_object' },
+        // Sprint 12.5.1: response_format dropped — Perplexity tightened their
+        // API and now rejects { type: 'json_object' } (only 'text', 'json_schema'
+        // with a required schema, or 'regex' are accepted). The system prompt
+        // above already enforces "Return ONLY valid JSON. No markdown, no
+        // preamble." which sonar-pro complies with reliably. If JSON discipline
+        // ever slips, revisit with a proper json_schema definition.
       }),
       signal: controller.signal,
     });
@@ -1327,6 +1331,10 @@ async function fetchStrategy_PerplexitySingle(universe: Universe): Promise<RawSt
     culture:        parsed.culture        || [],
     markets:        parsed.markets        || { summary: '', indices: [] },
     lens:           parsed.lens           || null,
+    // Sprint 12.5.1: surface which engine actually produced this fetch so the
+    // admin UI can flag silent fallbacks (e.g. Perplexity 400 → gpt-4o-fallback).
+    _source:        source,
+    _fetched_at:    new Date().toISOString(),
   };
 
   console.log(`[fetch] (Sprint 12.4 ${source}) merged section counts: ` +
@@ -1406,6 +1414,8 @@ async function fetchStrategy_Perplexity2Phase(universe: Universe): Promise<RawSt
     culture:        topicalParsed.culture          || [],
     markets:        topicalParsed.markets          || { summary: '', indices: [] },
     lens:           universalParsed.lens           || null,
+    _source:        'perplexity-2phase',
+    _fetched_at:    new Date().toISOString(),
   };
 
   console.log(`[fetch] (Strategy B Perplexity 2-phase) merged section counts: ` +
@@ -1466,6 +1476,8 @@ async function fetchStrategy_Gpt4o2Phase(universe: Universe): Promise<RawStories
     culture:        topicalParsed.culture          || [],
     markets:        topicalParsed.markets          || { summary: '', indices: [] },
     lens:           universalParsed.lens           || null,
+    _source:        'gpt4o-2phase',
+    _fetched_at:    new Date().toISOString(),
   };
 
   console.log(`[fetch] (Strategy C gpt-4o 2-phase) merged section counts: ` +
@@ -3402,14 +3414,18 @@ async function modeTailFetch() {
   // code ran all tail fetches in unbounded Promise.all, which would hit
   // OpenAI's per-org concurrent-request cap once the universe grew past
   // ~25-30 keys (the same failure mode that broke the base fetch). The fix:
-  // run at most TAIL_CONCURRENCY at a time. With ~20 cities + 15 interests +
-  // 10 industries = 45 keys, this is 8 batches of 6 ≈ 48-60s total instead
-  // of "all at once and hope".
+  // run at most TAIL_CONCURRENCY at a time.
   //
-  // gpt-4o-mini-search-preview uses a different quota pool from gpt-5, so 6
-  // concurrent is safely below the rate limit even on Tier 2.
+  // Sprint 12.5.1: dropped from 6 → 3. Today's run (2026-06-10) sustained
+  // 429s against gpt-4o-mini-search-preview's TPM=6000 cap at concurrency 6,
+  // with retries piling up and the whole tail-fetch invocation timing out
+  // at Vercel's 300s ceiling. At concurrency 3, peak TPM ~3000 stays safely
+  // below the cap. Total wall clock for 20 jobs ≈ 60-80s, still well under
+  // the 300s budget. If the universe grows past ~40 keys, revisit by either
+  // moving to tier 2 (which raises TPM cap) or batching into multiple cron
+  // invocations.
 
-  const TAIL_CONCURRENCY = 6;
+  const TAIL_CONCURRENCY = 3;
 
   type TailJob = {
     type: 'city' | 'interest' | 'industry';
