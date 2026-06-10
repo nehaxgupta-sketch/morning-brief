@@ -945,7 +945,628 @@ OUTPUT SHAPE
 Begin now. Search aggressively. Return ONLY the JSON object.`;
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// Sprint 12.4: PERPLEXITY SONAR PRO PRIMARY FETCH
+// ──────────────────────────────────────────────────────────────────────────
+//
+// Why Perplexity: gpt-5 has a 500K TPM cap on Tier 1 that we kept hitting on
+// every fetch (185s of reasoning → 429 → empty result). Perplexity Sonar Pro
+// is purpose-built for current-events news synthesis with native citations,
+// search-grounded by default, has its own quota pool (no contention with
+// OpenAI), and is comparable cost (~$0.16/fetch vs ~$0.40/fetch with gpt-4o
+// web_search_preview at $30/1K searches).
+//
+// Architecture: SINGLE call with all 10 sections in one prompt. Perplexity
+// has 200K context — no concurrency, no TPM cliffs. Wall-clock 30-90s
+// typical, 120s timeout safety net.
+//
+// Fallback chain: Perplexity → retry with simpler prompt → gpt-4o web_search
+// → empty (brief saves with what it has). Quality threshold detection is
+// not at fetch time (that's the scorer's job) — fallback fires only on
+// technical failure (empty/error response).
+
+const PERPLEXITY_API_KEY = process.env.PERPLEXITY_API_KEY;
+const PERPLEXITY_MODEL = process.env.PERPLEXITY_MODEL || 'sonar-pro';
+
+async function callPerplexity(prompt: string, timeoutMs: number = 120_000): Promise<string> {
+  if (!PERPLEXITY_API_KEY) {
+    throw new Error('PERPLEXITY_API_KEY env var not set');
+  }
+  const t0 = Date.now();
+  console.log(`[perplexity] Starting fetch (model=${PERPLEXITY_MODEL}, timeout=${Math.round(timeoutMs / 1000)}s).`);
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  let response: Response;
+  try {
+    response = await fetch('https://api.perplexity.ai/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${PERPLEXITY_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: PERPLEXITY_MODEL,
+        messages: [
+          { role: 'system', content: 'You are a news synthesis engine. Return ONLY valid JSON. No markdown, no preamble.' },
+          { role: 'user', content: prompt },
+        ],
+        // Search controls
+        search_recency_filter: 'day',
+        return_citations: true,
+        // Output controls
+        temperature: 0.2,
+        max_tokens: 8000,
+        // Structured output: ask for JSON. sonar-pro supports response_format.
+        response_format: { type: 'json_object' },
+      }),
+      signal: controller.signal,
+    });
+  } catch (err: any) {
+    clearTimeout(timer);
+    if (err.name === 'AbortError') {
+      throw new Error(`Perplexity call aborted after ${Math.round(timeoutMs / 1000)}s timeout`);
+    }
+    throw err;
+  }
+  clearTimeout(timer);
+
+  const dt = Math.round((Date.now() - t0) / 1000);
+  if (response.status !== 200) {
+    const body = await response.text().catch(() => '');
+    throw new Error(`Perplexity returned status ${response.status} after ${dt}s. Body: ${body.slice(0, 400)}`);
+  }
+
+  const data: any = await response.json();
+  console.log(`[perplexity] Response received in ${dt}s.`);
+
+  // Cost capture — Perplexity returns usage in the standard OpenAI shape.
+  const usage = data?.usage || {};
+  const inputTokens = usage.prompt_tokens || 0;
+  const outputTokens = usage.completion_tokens || 0;
+  void logOpenAICost({
+    phase: 'fetch',
+    model: PERPLEXITY_MODEL,
+    inputTokens,
+    outputTokens,
+    detail: `dt=${dt}s, citations=${(data?.citations || data?.choices?.[0]?.message?.citations || []).length}`,
+  });
+
+  const text = data?.choices?.[0]?.message?.content || '';
+  // Citations are returned at top-level on Perplexity responses, sometimes also
+  // on the message object. Both shapes are supported by this extractor.
+  const citations: string[] = data?.citations || data?.choices?.[0]?.message?.citations || [];
+  console.log(`[perplexity] content=${text.length} chars, citations=${citations.length}`);
+
+  // Inject citations into the JSON so downstream parsing can attach them to
+  // stories. Perplexity numbers citations [1], [2], etc inline in story text;
+  // the stories themselves should already have source_url populated from the
+  // prompt instructions. We append the citation list as a top-level field
+  // for safety in case the model didn't.
+  if (citations.length > 0 && text) {
+    try {
+      const parsed = JSON.parse(text);
+      parsed._citations = citations;
+      return JSON.stringify(parsed);
+    } catch {
+      // If parse fails here, return raw text — safeParse downstream will try again.
+      return text;
+    }
+  }
+  return text;
+}
+
+// gpt-4o web_search_preview fallback. Used only if Perplexity fails on both
+// the primary attempt and the retry. Same prompt, different vendor.
+async function callGpt4oWebSearchFallback(prompt: string, timeoutMs: number = 180_000): Promise<string> {
+  const t0 = Date.now();
+  console.log(`[fallback:gpt-4o] Starting web_search fallback (timeout=${Math.round(timeoutMs / 1000)}s).`);
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  let response: Response;
+  try {
+    response = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o',
+        tools: [{ type: 'web_search_preview' }],
+        input: prompt,
+        max_output_tokens: 8000,
+      }),
+      signal: controller.signal,
+    });
+  } catch (err: any) {
+    clearTimeout(timer);
+    if (err.name === 'AbortError') {
+      throw new Error(`gpt-4o fallback aborted after ${Math.round(timeoutMs / 1000)}s`);
+    }
+    throw err;
+  }
+  clearTimeout(timer);
+
+  const dt = Math.round((Date.now() - t0) / 1000);
+  if (response.status !== 200) {
+    const body = await response.text().catch(() => '');
+    throw new Error(`gpt-4o fallback status ${response.status} after ${dt}s. Body: ${body.slice(0, 400)}`);
+  }
+  const data: any = await response.json();
+  console.log(`[fallback:gpt-4o] Response in ${dt}s.`);
+
+  const usage = extractUsageFromResponses(data);
+  void logOpenAICost({
+    phase: 'fetch',
+    model: 'gpt-4o',
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    reasoningTokens: usage.reasoningTokens,
+    detail: 'fallback (Perplexity unavailable)',
+  });
+
+  return data.output?.find((o: any) => o.type === 'message')?.content?.[0]?.text || '';
+}
+
+// Unified single-call prompt for all 10 sections. Replaces the universal +
+// topical split because Perplexity has 200K context, no TPM contention, and
+// no parallel-call benefit (single call is fastest end-to-end).
+function buildPerplexityFetchPrompt(today: string, universe: Universe): string {
+  const personalisationContext = (universe.cities.length || universe.interests.length || universe.industries.length)
+    ? `\n\nPERSONALISATION CONTEXT (for industry/interest tagging only — do NOT add personal sections):\n- Cities our readers care about: ${universe.cities.join(', ')}\n- Interests: ${universe.interests.join(', ')}\n- Industries: ${universe.industries.join(', ')}\n`
+    : '';
+
+  return `You are the news fetcher for Morning Brief, India's daily news digest for thoughtful urban professionals (25-45, urban, English-reading). Today is ${today} (IST).
+
+Your job: search the web for today's most consequential news and return ONE JSON object covering 10 sections. Use last-24-hour news as the primary target; 24-48h is acceptable for sport, culture, and technology when no fresh 24h development exists.
+
+SECTIONS REQUIRED (10 total):
+
+1. major_events (3-5 stories) — the day's biggest global news. Both India and world. Must be genuinely consequential — not just news, but news that matters.
+
+2. world (5-7 stories) — significant global developments outside India. Geopolitics, major foreign policy, international institutions, major foreign elections, conflicts.
+
+3. india (5-7 stories) — domestic news: politics, policy, courts, major corporate moves with India angle, social/civic, infrastructure.
+
+4. business (4-5 stories) — corporate news, earnings, M&A, regulatory actions, financial moves. Indian AND global. Skip pure markets summaries (markets is section 9).
+
+5. technology (3-4 stories) — significant product launches, major AI developments, big-tech regulation, cybersecurity. Skip rumour/speculation.
+
+6. climate_health (3-4 stories) — climate disasters, environmental policy, major health stories (outbreaks, drug approvals, research with real-world impact).
+
+7. sport (3-4 stories) ACROSS DIFFERENT SPORTS — cricket, football, tennis, F1, badminton, hockey, kabaddi, Olympics, athletics, golf, esports. Aim for breadth; do NOT submit 4 cricket stories.
+
+8. culture (3-4 stories) ACROSS DIFFERENT TYPES — films, OTT, music, books, theatre, visual arts, awards.
+
+9. markets — ONE object with summary + indices. Find the MOST RECENT closing values for Sensex, Nifty 50, Dow Jones, Nasdaq. This brief runs at ~6:30 AM IST — Indian markets haven't opened (use yesterday's close); US markets closed overnight (use that close). NEVER return empty indices; always use the most recent session close.
+
+10. lens — ONE object with 4 short paragraphs (one per: india, world, markets, watch). Each 2-3 sentences. Analytical, not just descriptive — what does today's news mean?
+
+OUTPUT JSON SHAPE (return EXACTLY this — no markdown, no preamble):
+
+{
+  "major_events": [ { "headline": "...", "body": "2-3 sentence paraphrased summary", "source": "Publisher Name", "source_url": "https://...", "published_at": "${today}", "industries": [], "interests": [], "must_include": false }, ... ],
+  "world":          [ { ... same shape ... }, ... ],
+  "india":          [ { ... same shape ... }, ... ],
+  "business":       [ { ... same shape ... }, ... ],
+  "technology":     [ { ... same shape ... }, ... ],
+  "climate_health": [ { ... same shape ... }, ... ],
+  "sport":          [ { ... same shape ... }, ... ],
+  "culture":        [ { ... same shape ... }, ... ],
+  "markets": {
+    "summary": "2-3 sentence India-anchored summary of yesterday's Indian session + overnight US",
+    "indices": [
+      { "name": "Sensex",   "value": "...", "change": "+0.5%" },
+      { "name": "Nifty 50", "value": "...", "change": "+0.4%" },
+      { "name": "Dow Jones","value": "...", "change": "-0.2%" },
+      { "name": "Nasdaq",   "value": "...", "change": "+0.1%" }
+    ]
+  },
+  "lens": {
+    "india":   "2-3 analytical sentences on the India news landscape today.",
+    "world":   "2-3 analytical sentences on the world landscape.",
+    "markets": "2-3 analytical sentences on markets context.",
+    "watch":   "2-3 sentences on what to watch in the next 24-48h."
+  }
+}
+
+HARD RULES:
+
+1. PARAPHRASE — never quote at length. Each "body" is your own 2-3 sentence factual summary, not the original article's prose.
+
+2. SOURCE: use direct article URLs from reputable publishers (Reuters, AP, Bloomberg, FT, WSJ, NYT, BBC, Guardian, Economist, The Hindu, Indian Express, Hindustan Times, Mint, Business Standard, Economic Times, The Print, Scroll, NDTV, Times of India, Deccan Herald, Telegraph India, Tribune India, Live Law, Bar and Bench, Down to Earth, ESPNCricinfo, ESPN, Variety, Variety, TechCrunch, The Verge, Wired, etc.). NO aggregators, NO social media, NO Google News redirects. Downstream filtering will drop non-whitelisted sources, so OVER-FETCH (aim for the upper bound of each section's range) to survive filtering.
+
+3. NEVER FABRICATE. If a section quota can't be filled from real news, return fewer stories.
+
+4. PUBLISHER DIVERSITY: no publisher contributes more than 3 stories across the entire brief.
+
+5. DEDUPE: each story in ONE section only. If a story could fit two sections, pick by priority order (major_events > india > world > business > technology > climate_health > sport > culture).
+
+6. EMPTY ARRAYS ARE A LAST RESORT for sport/culture/business/technology — these have global news every day. Returning empty signals a search failure, not a quiet day.
+
+7. JSON ONLY: start with { and end with }. No markdown fences. No commentary.${personalisationContext}
+
+Begin now. Return ONLY the JSON object.`;
+}
+
+// Strategy A: Perplexity Sonar Pro single call, all 10 sections.
+// Fallback chain: Perplexity primary → Perplexity retry → gpt-4o web_search.
+// Wall clock: 30-90s typical. Cost: ~$0.15/fetch.
+async function fetchStrategy_PerplexitySingle(universe: Universe): Promise<RawStories> {
+  const today = getISTDate();
+
+  // Sprint 12.4: PERPLEXITY SONAR PRO primary, gpt-4o fallback.
+  // See callPerplexity header for full rationale. Single-call architecture.
+
+  console.log('[fetch] Starting Perplexity primary fetch (Sprint 12.4)...');
+  const prompt = buildPerplexityFetchPrompt(today, universe);
+
+  let text = '';
+  let source: 'perplexity' | 'perplexity-retry' | 'gpt-4o-fallback' | 'none' = 'none';
+
+  // Attempt 1: Perplexity Sonar Pro
+  try {
+    text = await callPerplexity(prompt, 120_000);
+    if (text && text.length >= 1000) {
+      source = 'perplexity';
+    } else {
+      console.warn(`[fetch] Perplexity returned suspiciously short response (${text.length} chars). Will retry.`);
+      text = '';
+    }
+  } catch (err: any) {
+    console.error(`[fetch] Perplexity primary failed: ${err.message}`);
+    text = '';
+  }
+
+  // Attempt 2: Perplexity with simpler reminder prompt
+  if (!text) {
+    console.log('[fetch] Attempting Perplexity retry with reminder...');
+    try {
+      const retryPrompt = prompt + '\n\nIMPORTANT: Return ONLY the JSON object described above. Do not include explanatory text. Begin with { and end with }.';
+      text = await callPerplexity(retryPrompt, 120_000);
+      if (text && text.length >= 1000) {
+        source = 'perplexity-retry';
+      } else {
+        text = '';
+      }
+    } catch (err: any) {
+      console.error(`[fetch] Perplexity retry failed: ${err.message}`);
+      text = '';
+    }
+  }
+
+  // Attempt 3: gpt-4o web_search fallback
+  if (!text) {
+    console.log('[fetch] Both Perplexity attempts failed. Falling back to gpt-4o + web_search.');
+    try {
+      text = await callGpt4oWebSearchFallback(prompt, 180_000);
+      if (text && text.length >= 1000) {
+        source = 'gpt-4o-fallback';
+      }
+    } catch (err: any) {
+      console.error(`[fetch] gpt-4o fallback failed: ${err.message}`);
+      text = '';
+    }
+  }
+
+  if (!text) {
+    console.error('[fetch] ALL FETCH ATTEMPTS FAILED. Returning empty brief.');
+  } else {
+    console.log(`[fetch] SUCCESS via ${source}. Text length: ${text.length} chars.`);
+  }
+
+  const safeParse = (raw: string, label: string): any => {
+    if (!raw) {
+      console.error(`[fetch:${label}] EMPTY response text.`);
+      return {};
+    }
+    if (raw.length < 600) {
+      console.warn(`[fetch:${label}] SHORT response (${raw.length} chars). Preview: ${raw.slice(0, 600)}`);
+    }
+    try {
+      return extractJsonObject(raw);
+    } catch (err: any) {
+      console.error(`[fetch:${label}] JSON parse failed. First 800 chars:`, raw.slice(0, 800));
+      console.error(`[fetch:${label}] JSON parse failed. Last 400 chars:`, raw.slice(-400));
+      return {};
+    }
+  };
+
+  const parsed = safeParse(text, source);
+
+  // If Perplexity provided top-level citations array, attach to stories that
+  // lack source_url. Most stories should have it from the prompt, but this
+  // is a safety net.
+  const citations: string[] = parsed?._citations || [];
+  if (citations.length > 0) {
+    const sectionKeys = ['major_events', 'world', 'india', 'business', 'technology', 'climate_health', 'sport', 'culture'];
+    for (const key of sectionKeys) {
+      const arr = parsed[key];
+      if (!Array.isArray(arr)) continue;
+      arr.forEach((s: any, i: number) => {
+        if (!s.source_url && citations[i]) {
+          s.source_url = citations[i];
+        }
+      });
+    }
+  }
+
+  const merged: any = {
+    major_events:   parsed.major_events   || [],
+    world:          parsed.world          || [],
+    india:          parsed.india          || [],
+    business:       parsed.business       || [],
+    technology:     parsed.technology     || [],
+    climate_health: parsed.climate_health || [],
+    sport:          parsed.sport          || [],
+    culture:        parsed.culture        || [],
+    markets:        parsed.markets        || { summary: '', indices: [] },
+    lens:           parsed.lens           || null,
+  };
+
+  console.log(`[fetch] (Sprint 12.4 ${source}) merged section counts: ` +
+    `major=${merged.major_events.length}, world=${merged.world.length}, india=${merged.india.length}, ` +
+    `biz=${merged.business.length}, tech=${merged.technology.length}, climate=${merged.climate_health.length}, ` +
+    `sport=${merged.sport.length}, culture=${merged.culture.length}, indices=${merged.markets?.indices?.length || 0}`);
+
+  return merged as RawStories;
+}
+
+// Strategy B (HYBRID): Perplexity Sonar Pro 2-phase parallel.
+// Universal phase (major_events + world + india + lens) and Topical phase
+// (business + technology + climate_health + sport + culture + markets) run
+// in parallel. Each call covers fewer sections, so quality-per-section is
+// higher. Perplexity has its own quota pool — 2 parallel calls do not hit
+// gpt-5-style TPM caps.
+//
+// Wall clock: max(uni, topical) ≈ 30-60s. Cost: ~$0.30/fetch (2 × $0.15).
+async function fetchStrategy_Perplexity2Phase(universe: Universe): Promise<RawStories> {
+  const today = getISTDate();
+  console.log('[fetch] STRATEGY: Perplexity 2-phase parallel (B/hybrid)');
+
+  const universalPrompt = buildPerplexityFetchPromptByPhase(today, universe, 'universal');
+  const topicalPrompt   = buildPerplexityFetchPromptByPhase(today, universe, 'topical');
+
+  const tStart = Date.now();
+  const [universalText, topicalText] = await Promise.all([
+    callPerplexity(universalPrompt, 120_000).catch((err) => {
+      console.error(`[fetch:perplexity-universal] failed: ${err.message}`);
+      return '';
+    }),
+    callPerplexity(topicalPrompt, 120_000).catch((err) => {
+      console.error(`[fetch:perplexity-topical] failed: ${err.message}`);
+      return '';
+    }),
+  ]);
+  console.log(`[fetch] both Perplexity phases complete in ${Math.round((Date.now() - tStart) / 1000)}s. uni=${universalText.length} chars, top=${topicalText.length} chars`);
+
+  const safeParse = (raw: string, label: string): any => {
+    if (!raw) {
+      console.error(`[fetch:${label}] EMPTY response.`);
+      return {};
+    }
+    try { return extractJsonObject(raw); }
+    catch (err: any) {
+      console.error(`[fetch:${label}] JSON parse failed: ${err.message}. First 400 chars: ${raw.slice(0, 400)}`);
+      return {};
+    }
+  };
+
+  const universalParsed = safeParse(universalText, 'perplexity-universal');
+  const topicalParsed   = safeParse(topicalText,   'perplexity-topical');
+
+  // Attach citations to stories that lack source_url (safety net).
+  const attachCitations = (parsed: any, sectionKeys: string[]) => {
+    const citations: string[] = parsed?._citations || [];
+    if (citations.length === 0) return;
+    for (const key of sectionKeys) {
+      const arr = parsed[key];
+      if (!Array.isArray(arr)) continue;
+      arr.forEach((s: any, i: number) => {
+        if (!s.source_url && citations[i]) s.source_url = citations[i];
+      });
+    }
+  };
+  attachCitations(universalParsed, ['major_events', 'world', 'india']);
+  attachCitations(topicalParsed,   ['business', 'technology', 'climate_health', 'sport', 'culture']);
+
+  const merged: any = {
+    major_events:   universalParsed.major_events   || [],
+    world:          universalParsed.world          || [],
+    india:          universalParsed.india          || [],
+    business:       topicalParsed.business         || [],
+    technology:     topicalParsed.technology       || [],
+    climate_health: topicalParsed.climate_health   || [],
+    sport:          topicalParsed.sport            || [],
+    culture:        topicalParsed.culture          || [],
+    markets:        topicalParsed.markets          || { summary: '', indices: [] },
+    lens:           universalParsed.lens           || null,
+  };
+
+  console.log(`[fetch] (Strategy B Perplexity 2-phase) merged section counts: ` +
+    `major=${merged.major_events.length}, world=${merged.world.length}, india=${merged.india.length}, ` +
+    `biz=${merged.business.length}, tech=${merged.technology.length}, climate=${merged.climate_health.length}, ` +
+    `sport=${merged.sport.length}, culture=${merged.culture.length}, indices=${merged.markets?.indices?.length || 0}`);
+
+  return merged as RawStories;
+}
+
+// Strategy C: gpt-4o + web_search_preview, 2-phase parallel.
+// This was the Sprint 11.5 architecture (parallel two-phase) but with gpt-4o
+// instead of gpt-5. gpt-4o has a 30M TPM cap vs gpt-5's 500K — no TPM cliffs.
+// Uses the existing buildGpt5FetchPrompt prompts (gpt-4o follows them fine).
+//
+// Wall clock: max(uni, topical) ≈ 30-60s. Cost: ~$0.40-0.50/fetch (token costs
+// + $30/1K search fees, ~8 searches per call).
+async function fetchStrategy_Gpt4o2Phase(universe: Universe): Promise<RawStories> {
+  const today = getISTDate();
+  console.log('[fetch] STRATEGY: gpt-4o web_search 2-phase parallel (C)');
+
+  const universalPrompt = buildGpt5FetchPrompt(today, universe, 'universal');
+  const topicalPrompt   = buildGpt5FetchPrompt(today, universe, 'topical');
+
+  const tStart = Date.now();
+  const [universalText, topicalText] = await Promise.all([
+    callGpt4oWebSearchFallback(universalPrompt, 180_000).catch((err) => {
+      console.error(`[fetch:gpt4o-universal] failed: ${err.message}`);
+      return '';
+    }),
+    callGpt4oWebSearchFallback(topicalPrompt, 180_000).catch((err) => {
+      console.error(`[fetch:gpt4o-topical] failed: ${err.message}`);
+      return '';
+    }),
+  ]);
+  console.log(`[fetch] both gpt-4o phases complete in ${Math.round((Date.now() - tStart) / 1000)}s. uni=${universalText.length} chars, top=${topicalText.length} chars`);
+
+  const safeParse = (raw: string, label: string): any => {
+    if (!raw) return {};
+    try { return extractJsonObject(raw); }
+    catch (err: any) {
+      console.error(`[fetch:${label}] JSON parse failed: ${err.message}. First 400 chars: ${raw.slice(0, 400)}`);
+      return {};
+    }
+  };
+
+  const universalParsed = safeParse(universalText, 'gpt4o-universal');
+  const topicalParsed   = safeParse(topicalText,   'gpt4o-topical');
+
+  const merged: any = {
+    major_events:   universalParsed.major_events   || [],
+    world:          universalParsed.world          || [],
+    india:          universalParsed.india          || [],
+    business:       topicalParsed.business         || [],
+    technology:     topicalParsed.technology       || [],
+    climate_health: topicalParsed.climate_health   || [],
+    sport:          topicalParsed.sport            || [],
+    culture:        topicalParsed.culture          || [],
+    markets:        topicalParsed.markets          || { summary: '', indices: [] },
+    lens:           universalParsed.lens           || null,
+  };
+
+  console.log(`[fetch] (Strategy C gpt-4o 2-phase) merged section counts: ` +
+    `major=${merged.major_events.length}, world=${merged.world.length}, india=${merged.india.length}, ` +
+    `biz=${merged.business.length}, tech=${merged.technology.length}, climate=${merged.climate_health.length}, ` +
+    `sport=${merged.sport.length}, culture=${merged.culture.length}, indices=${merged.markets?.indices?.length || 0}`);
+
+  return merged as RawStories;
+}
+
+// Per-phase Perplexity prompt builder for Strategy B (2-phase).
+function buildPerplexityFetchPromptByPhase(today: string, universe: Universe, phase: 'universal' | 'topical'): string {
+  const personalisation = (universe.cities.length || universe.interests.length || universe.industries.length)
+    ? `\n\nPERSONALISATION CONTEXT (for tagging only — do NOT add personal sections):\n- Cities: ${universe.cities.join(', ')}\n- Interests: ${universe.interests.join(', ')}\n- Industries: ${universe.industries.join(', ')}\n`
+    : '';
+
+  const sourceList = 'Reuters, AP, Bloomberg, FT, WSJ, NYT, BBC, Guardian, Economist, The Hindu, Indian Express, Hindustan Times, Mint, Business Standard, Economic Times, The Print, Scroll, NDTV, Times of India, Deccan Herald, Telegraph India, Tribune India, Live Law, Bar and Bench, Down to Earth, ESPNCricinfo, ESPN, Variety, TechCrunch, The Verge, Wired';
+
+  const sharedRules = `
+
+HARD RULES:
+1. PARAPHRASE — never quote at length. Each "body" is your own 2-3 sentence factual summary.
+2. SOURCE: direct article URLs from reputable publishers (${sourceList}, etc). NO aggregators, NO social, NO Google News redirects.
+3. NEVER FABRICATE. Return fewer stories if quota can't be filled honestly.
+4. PUBLISHER DIVERSITY: no publisher contributes more than 3 stories.
+5. EMPTY ARRAYS are a LAST RESORT — these topics have global news every day.
+6. JSON ONLY: start with { and end with }. No markdown.${personalisation}`;
+
+  if (phase === 'universal') {
+    return `You are the universal news fetcher for Morning Brief, India's daily news digest for thoughtful urban professionals. Today is ${today} (IST).
+
+Your job: search the web for today's most consequential UNIVERSAL news. Return ONE JSON object with these sections:
+
+1. major_events (4-5 stories) — the day's biggest news, India and world. Genuinely consequential, not just newsy.
+2. world (6-8 stories) — significant developments outside India. Geopolitics, conflicts, major foreign news.
+3. india (6-8 stories) — domestic: politics, policy, courts, major corporate India, social/civic, infrastructure.
+4. lens — ONE object with 4 short analytical paragraphs (india / world / markets / watch). 2-3 sentences each.
+
+Use last-24h news. Over-fetch within the ranges above (downstream filters will drop some).
+
+OUTPUT SHAPE (return EXACTLY this — no markdown):
+{
+  "major_events": [ { "headline":"...", "body":"2-3 sentences", "source":"Publisher", "source_url":"https://...", "published_at":"${today}", "industries":[], "interests":[], "must_include":false }, ... ],
+  "world":        [ { ... same ... }, ... ],
+  "india":        [ { ... same ... }, ... ],
+  "lens": {
+    "india":   "2-3 analytical sentences on India today.",
+    "world":   "2-3 analytical sentences on world today.",
+    "markets": "2-3 analytical sentences on markets context.",
+    "watch":   "2-3 sentences on the next 24-48h."
+  }
+}${sharedRules}
+
+Begin now. Return ONLY the JSON object.`;
+  }
+
+  // phase === 'topical'
+  return `You are the topical news fetcher for Morning Brief, India's daily news digest. Today is ${today} (IST).
+
+Your job: search the web for today's TOPICAL news. Return ONE JSON object with these sections:
+
+1. business (5-6 stories) — corporate news, earnings, M&A, regulatory, financial moves. Indian and global.
+2. technology (4-5 stories) — significant launches, AI developments, big-tech regulation, cybersecurity. Skip rumour.
+3. climate_health (4-5 stories) — climate, environmental policy, major health stories. Real-world impact.
+4. sport (4-5 stories ACROSS DIFFERENT SPORTS) — cricket, football, tennis, F1, hockey, kabaddi, Olympics, athletics, golf, esports.
+5. culture (4-5 stories ACROSS DIFFERENT TYPES) — films, OTT, music, books, theatre, visual arts, awards.
+6. markets — ONE object with summary + indices (Sensex, Nifty 50, Dow Jones, Nasdaq). At 6:30 AM IST, Indian markets haven't opened (use yesterday's close); US markets closed overnight. NEVER return empty indices.
+
+24h recency preferred; 48h acceptable for sport/culture/technology when no fresh 24h development exists.
+
+OUTPUT SHAPE (return EXACTLY this — no markdown):
+{
+  "business":       [ { "headline":"...", "body":"2-3 sentences", "source":"Publisher", "source_url":"https://...", "published_at":"${today}", "industries":[], "interests":[], "must_include":false }, ... ],
+  "technology":     [ { ... same ... }, ... ],
+  "climate_health": [ { ... same ... }, ... ],
+  "sport":          [ { ... same ... }, ... ],
+  "culture":        [ { ... same ... }, ... ],
+  "markets": {
+    "summary": "2-3 sentence India-anchored summary of yesterday's session + overnight US",
+    "indices": [
+      { "name": "Sensex",   "value":"...", "change":"+0.5%" },
+      { "name": "Nifty 50", "value":"...", "change":"+0.4%" },
+      { "name": "Dow Jones","value":"...", "change":"-0.2%" },
+      { "name": "Nasdaq",   "value":"...", "change":"+0.1%" }
+    ]
+  }
+}${sharedRules}
+
+Begin now. Return ONLY the JSON object.`;
+}
+
+// ─── Fetch strategy router ──────────────────────────────────────────────────
+// Switch strategies via FETCH_STRATEGY env var. Default: perplexity-single.
+//
+// Valid values:
+//   'perplexity-single'  — Strategy A (default). Single Perplexity call, all
+//                          10 sections. Cheapest, simplest, recommended.
+//   'perplexity-2phase'  — Strategy B (hybrid). Two parallel Perplexity calls.
+//                          Higher quality per section, 2x cost.
+//   'gpt4o-2phase'       — Strategy C. Two parallel gpt-4o + web_search calls.
+//                          Safety net if Perplexity has issues; ~3x cost.
+type FetchStrategy = 'perplexity-single' | 'perplexity-2phase' | 'gpt4o-2phase';
+
+function getFetchStrategy(): FetchStrategy {
+  const raw = (process.env.FETCH_STRATEGY || '').trim().toLowerCase();
+  if (raw === 'perplexity-2phase' || raw === 'gpt4o-2phase' || raw === 'perplexity-single') {
+    return raw as FetchStrategy;
+  }
+  return 'perplexity-single';
+}
+
 async function fetchNewsFromOpenAI(universe: Universe): Promise<RawStories> {
+  const strategy = getFetchStrategy();
+  console.log(`[fetch] FETCH_STRATEGY=${strategy}`);
+
+  if (strategy === 'perplexity-2phase') return fetchStrategy_Perplexity2Phase(universe);
+  if (strategy === 'gpt4o-2phase')      return fetchStrategy_Gpt4o2Phase(universe);
+  return fetchStrategy_PerplexitySingle(universe);
+}
+
+
+async function fetchNewsFromOpenAI_gpt5_legacy(universe: Universe): Promise<RawStories> {
   const today = getISTDate();
 
   // Sprint 12.3 (post-mortem of 12.2):
