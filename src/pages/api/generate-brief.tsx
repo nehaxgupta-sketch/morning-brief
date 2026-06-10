@@ -997,7 +997,7 @@ async function callPerplexity(prompt: string, timeoutMs: number = 120_000): Prom
         return_citations: true,
         // Output controls
         temperature: 0.2,
-        max_tokens: 8000,
+        max_tokens: 12000,
         // Structured output: ask for JSON. sonar-pro supports response_format.
         response_format: { type: 'json_object' },
       }),
@@ -1117,80 +1117,101 @@ async function callGpt4oWebSearchFallback(prompt: string, timeoutMs: number = 18
 // no parallel-call benefit (single call is fastest end-to-end).
 function buildPerplexityFetchPrompt(today: string, universe: Universe): string {
   const personalisationContext = (universe.cities.length || universe.interests.length || universe.industries.length)
-    ? `\n\nPERSONALISATION CONTEXT (for industry/interest tagging only — do NOT add personal sections):\n- Cities our readers care about: ${universe.cities.join(', ')}\n- Interests: ${universe.interests.join(', ')}\n- Industries: ${universe.industries.join(', ')}\n`
+    ? `\n\nPERSONALISATION CONTEXT (for industry/interest tagging on each story only — do NOT add personal sections):\n- Cities our readers care about: ${universe.cities.join(', ')}\n- Interests: ${universe.interests.join(', ')}\n- Industries: ${universe.industries.join(', ')}\n`
     : '';
 
-  return `You are the news fetcher for Morning Brief, India's daily news digest for thoughtful urban professionals (25-45, urban, English-reading). Today is ${today} (IST).
+  return `You are the news fetcher for Morning Brief, India's daily news digest for thoughtful urban professionals (25-45, English-reading). Today is ${today} (IST).
 
-Your job: search the web for today's most consequential news and return ONE JSON object covering 10 sections. Use last-24-hour news as the primary target; 24-48h is acceptable for sport, culture, and technology when no fresh 24h development exists.
+═══════════════════════════════════════════════
+PRIMARY DIRECTIVE: OVER-FETCH AGGRESSIVELY
+═══════════════════════════════════════════════
 
-SECTIONS REQUIRED (10 total):
+Downstream code filters stories by publisher whitelist, recency, and deduplication — TYPICALLY DROPPING 30-50% OF WHAT YOU RETURN. To deliver a useful brief, you MUST return the UPPER BOUND of every section quota. Hitting the lower bound is a failure mode, not a success.
 
-1. major_events (3-5 stories) — the day's biggest global news. Both India and world. Must be genuinely consequential — not just news, but news that matters.
+For EVERY section, run MULTIPLE distinct searches with DIFFERENT angles. A single search per section is not enough. Examples below.
 
-2. world (5-7 stories) — significant global developments outside India. Geopolitics, major foreign policy, international institutions, major foreign elections, conflicts.
+═══════════════════════════════════════════════
+SECTIONS — minimums are floors, not ceilings
+═══════════════════════════════════════════════
 
-3. india (5-7 stories) — domestic news: politics, policy, courts, major corporate moves with India angle, social/civic, infrastructure.
+1. major_events — MINIMUM 5, target 6-8 stories. The day's biggest news, India and world combined. Genuinely consequential — events with real second-order impact.
+   Search angles: "top news today India", "world news today", "breaking news ${today}", "biggest story today"
 
-4. business (4-5 stories) — corporate news, earnings, M&A, regulatory actions, financial moves. Indian AND global. Skip pure markets summaries (markets is section 9).
+2. world — MINIMUM 6, target 7-9 stories. Significant developments OUTSIDE India. Geopolitics, foreign policy, conflicts, foreign elections, major institutions (UN/IMF/WB), big foreign elections.
+   Search angles: "world news today", "geopolitics ${today}", "international news today", "US news today", "China news today", "Europe news today", "Middle East today"
 
-5. technology (3-4 stories) — significant product launches, major AI developments, big-tech regulation, cybersecurity. Skip rumour/speculation.
+3. india — MINIMUM 6, target 7-9 stories. Domestic India: politics, policy, Supreme Court, RBI, regulatory, major corporate India, civic, infrastructure, state-level major events.
+   Search angles: "India news today", "Modi government today", "Supreme Court India today", "RBI news ${today}", "India policy today", "Indian states news today"
 
-6. climate_health (3-4 stories) — climate disasters, environmental policy, major health stories (outbreaks, drug approvals, research with real-world impact).
+4. business — MINIMUM 5, target 6-8 stories. Corporate news, earnings, M&A, IPO, regulatory, hires, sector moves. Indian and global. Exclude pure markets summaries (markets is section 9).
+   Search angles: "business news today India", "corporate earnings today", "M&A deal today", "Indian company news today", "global business news today"
 
-7. sport (3-4 stories) ACROSS DIFFERENT SPORTS — cricket, football, tennis, F1, badminton, hockey, kabaddi, Olympics, athletics, golf, esports. Aim for breadth; do NOT submit 4 cricket stories.
+5. technology — MINIMUM 4, target 5-7 stories. Product launches, AI developments, big-tech regulation, cybersecurity, infrastructure (chips, data centres). Skip rumour and speculation.
+   Search angles: "tech news today", "AI news today", "OpenAI Google Meta today", "tech regulation today India", "cybersecurity news today"
 
-8. culture (3-4 stories) ACROSS DIFFERENT TYPES — films, OTT, music, books, theatre, visual arts, awards.
+6. climate_health — MINIMUM 4, target 5-7 stories. Climate events, environmental policy, health news with real-world impact (outbreaks, approvals, major research).
+   Search angles: "climate news today", "health news today India", "WHO news today", "disease outbreak today", "environment policy today"
 
-9. markets — ONE object with summary + indices. Find the MOST RECENT closing values for Sensex, Nifty 50, Dow Jones, Nasdaq. This brief runs at ~6:30 AM IST — Indian markets haven't opened (use yesterday's close); US markets closed overnight (use that close). NEVER return empty indices; always use the most recent session close.
+7. sport — MINIMUM 4 ACROSS DIFFERENT SPORTS, target 5-7. Cricket, football, tennis, F1, badminton, hockey, kabaddi, Olympics, athletics, golf, esports. NO more than 2 cricket stories — force breadth.
+   Search angles: "cricket news today", "tennis news today", "football news today India", "F1 news today", "badminton news today", "sports India today"
 
-10. lens — ONE object with 4 short paragraphs (one per: india, world, markets, watch). Each 2-3 sentences. Analytical, not just descriptive — what does today's news mean?
+8. culture — MINIMUM 4 ACROSS DIFFERENT TYPES, target 5-7. Films, OTT, music, books, theatre, visual arts, awards, viral cultural phenomena.
+   Search angles: "Bollywood news today", "OTT release today", "film news today", "music news India today", "book news today", "awards news today"
 
-OUTPUT JSON SHAPE (return EXACTLY this — no markdown, no preamble):
+9. markets — ONE object with summary (2-3 sentences) + indices array (4 items: Sensex, Nifty 50, Dow Jones, Nasdaq). At 6:30 AM IST, Indian markets haven't opened — use YESTERDAY'S close. US markets closed overnight — use that close. NEVER return empty indices. If you don't find a number, search again — the data exists.
+   Search angles: "Sensex Nifty close yesterday", "Dow Jones Nasdaq close ${today}", "India markets close yesterday"
+
+10. lens — ONE object with 4 short analytical paragraphs (india / world / markets / watch). Each 2-3 sentences. Analytical, not descriptive — what does today's news MEAN?
+
+═══════════════════════════════════════════════
+OUTPUT SHAPE — exactly this, no markdown
+═══════════════════════════════════════════════
 
 {
-  "major_events": [ { "headline": "...", "body": "2-3 sentence paraphrased summary", "source": "Publisher Name", "source_url": "https://...", "published_at": "${today}", "industries": [], "interests": [], "must_include": false }, ... ],
-  "world":          [ { ... same shape ... }, ... ],
-  "india":          [ { ... same shape ... }, ... ],
-  "business":       [ { ... same shape ... }, ... ],
-  "technology":     [ { ... same shape ... }, ... ],
-  "climate_health": [ { ... same shape ... }, ... ],
-  "sport":          [ { ... same shape ... }, ... ],
-  "culture":        [ { ... same shape ... }, ... ],
+  "major_events": [ { "headline":"...", "body":"2-3 sentence paraphrased summary", "source":"Publisher Name", "source_url":"https://direct-article-url", "published_at":"${today}", "industries":[], "interests":[], "must_include":false }, ... ],
+  "world":        [ { ... same shape ... }, ... ],
+  "india":        [ { ... same shape ... }, ... ],
+  "business":     [ { ... same shape ... }, ... ],
+  "technology":   [ { ... same shape ... }, ... ],
+  "climate_health":[ { ... same shape ... }, ... ],
+  "sport":        [ { ... same shape ... }, ... ],
+  "culture":      [ { ... same shape ... }, ... ],
   "markets": {
-    "summary": "2-3 sentence India-anchored summary of yesterday's Indian session + overnight US",
+    "summary": "2-3 sentences on yesterday's Indian session + overnight US",
     "indices": [
-      { "name": "Sensex",   "value": "...", "change": "+0.5%" },
-      { "name": "Nifty 50", "value": "...", "change": "+0.4%" },
-      { "name": "Dow Jones","value": "...", "change": "-0.2%" },
-      { "name": "Nasdaq",   "value": "...", "change": "+0.1%" }
+      { "name":"Sensex",   "value":"...", "change":"+0.5%" },
+      { "name":"Nifty 50", "value":"...", "change":"+0.4%" },
+      { "name":"Dow Jones","value":"...", "change":"-0.2%" },
+      { "name":"Nasdaq",   "value":"...", "change":"+0.1%" }
     ]
   },
   "lens": {
-    "india":   "2-3 analytical sentences on the India news landscape today.",
-    "world":   "2-3 analytical sentences on the world landscape.",
-    "markets": "2-3 analytical sentences on markets context.",
-    "watch":   "2-3 sentences on what to watch in the next 24-48h."
+    "india":   "2-3 analytical sentences on India today.",
+    "world":   "2-3 analytical sentences on world today.",
+    "markets": "2-3 analytical sentences on markets.",
+    "watch":   "2-3 sentences on the next 24-48h."
   }
 }
 
-HARD RULES:
+═══════════════════════════════════════════════
+HARD RULES
+═══════════════════════════════════════════════
 
-1. PARAPHRASE — never quote at length. Each "body" is your own 2-3 sentence factual summary, not the original article's prose.
+1. MINIMUMS ARE NON-NEGOTIABLE. If you return fewer than the minimum for any section, you have failed the task. Run more searches.
 
-2. SOURCE: use direct article URLs from reputable publishers (Reuters, AP, Bloomberg, FT, WSJ, NYT, BBC, Guardian, Economist, The Hindu, Indian Express, Hindustan Times, Mint, Business Standard, Economic Times, The Print, Scroll, NDTV, Times of India, Deccan Herald, Telegraph India, Tribune India, Live Law, Bar and Bench, Down to Earth, ESPNCricinfo, ESPN, Variety, Variety, TechCrunch, The Verge, Wired, etc.). NO aggregators, NO social media, NO Google News redirects. Downstream filtering will drop non-whitelisted sources, so OVER-FETCH (aim for the upper bound of each section's range) to survive filtering.
+2. PARAPHRASE — your "body" is your own 2-3 sentence factual summary, not the article's prose. Headlines should also be your own factual summary, not the original article's verbatim title.
 
-3. NEVER FABRICATE. If a section quota can't be filled from real news, return fewer stories.
+3. SOURCE: direct article URLs from reputable publishers (Reuters, AP, Bloomberg, FT, WSJ, NYT, BBC, Guardian, Economist, The Hindu, Indian Express, Hindustan Times, Mint, Business Standard, Economic Times, The Print, Scroll, NDTV, Times of India, Deccan Herald, Telegraph India, Tribune India, Live Law, Bar and Bench, Down to Earth, ESPNCricinfo, ESPN, Variety, TechCrunch, The Verge, Wired, etc.). NO aggregators, NO social media, NO Google News redirects.
 
-4. PUBLISHER DIVERSITY: no publisher contributes more than 3 stories across the entire brief.
+4. NEVER FABRICATE. If after MULTIPLE searches you genuinely cannot find a section's minimum, return what you have — but only after exhausting search angles.
 
-5. DEDUPE: each story in ONE section only. If a story could fit two sections, pick by priority order (major_events > india > world > business > technology > climate_health > sport > culture).
+5. PUBLISHER DIVERSITY: no publisher contributes more than 3 stories total across the brief.
 
-6. EMPTY ARRAYS ARE A LAST RESORT for sport/culture/business/technology — these have global news every day. Returning empty signals a search failure, not a quiet day.
+6. DEDUPE: each story in ONE section only. If a story could fit two sections, pick by priority (major_events > india > world > business > technology > climate_health > sport > culture).
 
-7. JSON ONLY: start with { and end with }. No markdown fences. No commentary.${personalisationContext}
+7. JSON ONLY: start with { and end with }. No markdown fences. No commentary. No "here is the JSON" preambles.${personalisationContext}
 
-Begin now. Return ONLY the JSON object.`;
+Begin now. Search aggressively across multiple angles per section. Return ONLY the JSON object.`;
 }
 
 // Strategy A: Perplexity Sonar Pro single call, all 10 sections.
@@ -1458,66 +1479,98 @@ async function fetchStrategy_Gpt4o2Phase(universe: Universe): Promise<RawStories
 // Per-phase Perplexity prompt builder for Strategy B (2-phase).
 function buildPerplexityFetchPromptByPhase(today: string, universe: Universe, phase: 'universal' | 'topical'): string {
   const personalisation = (universe.cities.length || universe.interests.length || universe.industries.length)
-    ? `\n\nPERSONALISATION CONTEXT (for tagging only — do NOT add personal sections):\n- Cities: ${universe.cities.join(', ')}\n- Interests: ${universe.interests.join(', ')}\n- Industries: ${universe.industries.join(', ')}\n`
+    ? `\n\nPERSONALISATION CONTEXT (for story tagging only — do NOT add personal sections):\n- Cities: ${universe.cities.join(', ')}\n- Interests: ${universe.interests.join(', ')}\n- Industries: ${universe.industries.join(', ')}\n`
     : '';
 
   const sourceList = 'Reuters, AP, Bloomberg, FT, WSJ, NYT, BBC, Guardian, Economist, The Hindu, Indian Express, Hindustan Times, Mint, Business Standard, Economic Times, The Print, Scroll, NDTV, Times of India, Deccan Herald, Telegraph India, Tribune India, Live Law, Bar and Bench, Down to Earth, ESPNCricinfo, ESPN, Variety, TechCrunch, The Verge, Wired';
 
+  const sharedHeader = `
+═══════════════════════════════════════════════
+PRIMARY DIRECTIVE: OVER-FETCH AGGRESSIVELY
+═══════════════════════════════════════════════
+Downstream code filters by whitelist, recency, and dedup — TYPICALLY DROPPING 30-50% of what you return. To deliver a useful brief you MUST return the UPPER BOUND of every section. Hitting the lower bound is a failure mode.
+
+For EVERY section, run MULTIPLE distinct searches with DIFFERENT angles. A single generic search per section is not enough.
+`;
+
   const sharedRules = `
 
-HARD RULES:
-1. PARAPHRASE — never quote at length. Each "body" is your own 2-3 sentence factual summary.
-2. SOURCE: direct article URLs from reputable publishers (${sourceList}, etc). NO aggregators, NO social, NO Google News redirects.
-3. NEVER FABRICATE. Return fewer stories if quota can't be filled honestly.
-4. PUBLISHER DIVERSITY: no publisher contributes more than 3 stories.
-5. EMPTY ARRAYS are a LAST RESORT — these topics have global news every day.
+═══════════════════════════════════════════════
+HARD RULES
+═══════════════════════════════════════════════
+1. MINIMUMS ARE NON-NEGOTIABLE. Below minimum = failure. Run more searches.
+2. PARAPHRASE — your "body" is your 2-3 sentence factual summary, not the original prose. Headline is your own factual summary too.
+3. SOURCE: direct article URLs from reputable publishers (${sourceList}). NO aggregators, NO social, NO Google News redirects.
+4. NEVER FABRICATE.
+5. PUBLISHER DIVERSITY: no publisher contributes more than 3 stories.
 6. JSON ONLY: start with { and end with }. No markdown.${personalisation}`;
 
   if (phase === 'universal') {
-    return `You are the universal news fetcher for Morning Brief, India's daily news digest for thoughtful urban professionals. Today is ${today} (IST).
+    return `You are the UNIVERSAL news fetcher for Morning Brief, India's daily news digest for thoughtful urban professionals. Today is ${today} (IST).
+${sharedHeader}
+═══════════════════════════════════════════════
+SECTIONS — minimums are floors, not ceilings
+═══════════════════════════════════════════════
 
-Your job: search the web for today's most consequential UNIVERSAL news. Return ONE JSON object with these sections:
+1. major_events — MINIMUM 5, target 6-8 stories. The day's biggest news, India + world. Genuinely consequential.
+   Search angles: "top news today India", "world news today", "breaking news ${today}", "biggest story today"
 
-1. major_events (4-5 stories) — the day's biggest news, India and world. Genuinely consequential, not just newsy.
-2. world (6-8 stories) — significant developments outside India. Geopolitics, conflicts, major foreign news.
-3. india (6-8 stories) — domestic: politics, policy, courts, major corporate India, social/civic, infrastructure.
-4. lens — ONE object with 4 short analytical paragraphs (india / world / markets / watch). 2-3 sentences each.
+2. world — MINIMUM 7, target 8-10 stories. Significant developments OUTSIDE India. Geopolitics, foreign policy, conflicts, foreign elections, major institutions.
+   Search angles: "world news today", "geopolitics ${today}", "US news today", "China news today", "Europe news today", "Middle East today", "international news"
 
-Use last-24h news. Over-fetch within the ranges above (downstream filters will drop some).
+3. india — MINIMUM 7, target 8-10 stories. Domestic India: politics, Supreme Court, RBI, regulatory, corporate India, civic, infrastructure, states.
+   Search angles: "India news today", "Modi government today", "Supreme Court India today", "RBI news ${today}", "India policy today", "Indian states news today"
 
-OUTPUT SHAPE (return EXACTLY this — no markdown):
+4. lens — ONE object with 4 short analytical paragraphs (india / world / markets / watch). 2-3 sentences each. Analytical not descriptive.
+
+═══════════════════════════════════════════════
+OUTPUT SHAPE (no markdown, no preamble)
+═══════════════════════════════════════════════
 {
-  "major_events": [ { "headline":"...", "body":"2-3 sentences", "source":"Publisher", "source_url":"https://...", "published_at":"${today}", "industries":[], "interests":[], "must_include":false }, ... ],
+  "major_events": [ { "headline":"...", "body":"2-3 sentences", "source":"Publisher", "source_url":"https://direct-article-url", "published_at":"${today}", "industries":[], "interests":[], "must_include":false }, ... ],
   "world":        [ { ... same ... }, ... ],
   "india":        [ { ... same ... }, ... ],
   "lens": {
     "india":   "2-3 analytical sentences on India today.",
     "world":   "2-3 analytical sentences on world today.",
-    "markets": "2-3 analytical sentences on markets context.",
+    "markets": "2-3 analytical sentences on markets.",
     "watch":   "2-3 sentences on the next 24-48h."
   }
 }${sharedRules}
 
-Begin now. Return ONLY the JSON object.`;
+Begin now. Search aggressively across multiple angles per section. Return ONLY the JSON object.`;
   }
 
   // phase === 'topical'
-  return `You are the topical news fetcher for Morning Brief, India's daily news digest. Today is ${today} (IST).
+  return `You are the TOPICAL news fetcher for Morning Brief, India's daily news digest. Today is ${today} (IST).
+${sharedHeader}
+═══════════════════════════════════════════════
+SECTIONS — minimums are floors, not ceilings
+═══════════════════════════════════════════════
 
-Your job: search the web for today's TOPICAL news. Return ONE JSON object with these sections:
+1. business — MINIMUM 5, target 6-8 stories. Corporate news, earnings, M&A, IPO, regulatory, hires. India + global.
+   Search angles: "business news today India", "corporate earnings today", "M&A deal today", "Indian company news today", "global business news today"
 
-1. business (5-6 stories) — corporate news, earnings, M&A, regulatory, financial moves. Indian and global.
-2. technology (4-5 stories) — significant launches, AI developments, big-tech regulation, cybersecurity. Skip rumour.
-3. climate_health (4-5 stories) — climate, environmental policy, major health stories. Real-world impact.
-4. sport (4-5 stories ACROSS DIFFERENT SPORTS) — cricket, football, tennis, F1, hockey, kabaddi, Olympics, athletics, golf, esports.
-5. culture (4-5 stories ACROSS DIFFERENT TYPES) — films, OTT, music, books, theatre, visual arts, awards.
-6. markets — ONE object with summary + indices (Sensex, Nifty 50, Dow Jones, Nasdaq). At 6:30 AM IST, Indian markets haven't opened (use yesterday's close); US markets closed overnight. NEVER return empty indices.
+2. technology — MINIMUM 4, target 5-7 stories. Product launches, AI, big-tech regulation, cybersecurity, chips. Skip rumour.
+   Search angles: "tech news today", "AI news today", "OpenAI Google Meta today", "tech regulation India", "cybersecurity news today"
 
-24h recency preferred; 48h acceptable for sport/culture/technology when no fresh 24h development exists.
+3. climate_health — MINIMUM 4, target 5-7 stories. Climate events, environment policy, health (outbreaks, approvals, research).
+   Search angles: "climate news today", "health news today India", "WHO news today", "disease outbreak today", "environment policy today"
 
-OUTPUT SHAPE (return EXACTLY this — no markdown):
+4. sport — MINIMUM 4 ACROSS DIFFERENT SPORTS, target 5-7. Cricket, football, tennis, F1, badminton, hockey, kabaddi, Olympics, athletics, golf, esports. NO more than 2 cricket — force breadth.
+   Search angles: "cricket news today", "tennis news today", "football news India today", "F1 news today", "badminton news today", "sports India today"
+
+5. culture — MINIMUM 4 ACROSS DIFFERENT TYPES, target 5-7. Films, OTT, music, books, theatre, visual arts, awards, viral culture.
+   Search angles: "Bollywood news today", "OTT release today", "film news today", "music news India today", "book news today", "awards news today"
+
+6. markets — ONE object with summary (2-3 sentences) + indices (Sensex, Nifty 50, Dow Jones, Nasdaq). At 6:30 AM IST, Indian markets haven't opened — use YESTERDAY'S close. US markets closed overnight — use that close. NEVER return empty indices.
+   Search angles: "Sensex Nifty close yesterday", "Dow Jones Nasdaq close ${today}"
+
+═══════════════════════════════════════════════
+OUTPUT SHAPE (no markdown, no preamble)
+═══════════════════════════════════════════════
 {
-  "business":       [ { "headline":"...", "body":"2-3 sentences", "source":"Publisher", "source_url":"https://...", "published_at":"${today}", "industries":[], "interests":[], "must_include":false }, ... ],
+  "business":       [ { "headline":"...", "body":"2-3 sentences", "source":"Publisher", "source_url":"https://direct-article-url", "published_at":"${today}", "industries":[], "interests":[], "must_include":false }, ... ],
   "technology":     [ { ... same ... }, ... ],
   "climate_health": [ { ... same ... }, ... ],
   "sport":          [ { ... same ... }, ... ],
@@ -1525,10 +1578,10 @@ OUTPUT SHAPE (return EXACTLY this — no markdown):
   "markets": {
     "summary": "2-3 sentence India-anchored summary of yesterday's session + overnight US",
     "indices": [
-      { "name": "Sensex",   "value":"...", "change":"+0.5%" },
-      { "name": "Nifty 50", "value":"...", "change":"+0.4%" },
-      { "name": "Dow Jones","value":"...", "change":"-0.2%" },
-      { "name": "Nasdaq",   "value":"...", "change":"+0.1%" }
+      { "name":"Sensex",   "value":"...", "change":"+0.5%" },
+      { "name":"Nifty 50", "value":"...", "change":"+0.4%" },
+      { "name":"Dow Jones","value":"...", "change":"-0.2%" },
+      { "name":"Nasdaq",   "value":"...", "change":"+0.1%" }
     ]
   }
 }${sharedRules}
@@ -3561,4 +3614,3 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(500).json({ ok: false, error: error.message });
   }
 }
-
