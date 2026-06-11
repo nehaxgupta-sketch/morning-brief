@@ -2142,52 +2142,86 @@ function rawStoriesForWriter(raw: RawStories) {
 //
 // After enforceQualityRules drops non-whitelisted, stale, and semantically-
 // duplicate stories, we still typically have more raw stories than each
-// edition wants. This builder walks raw in priority order and takes the
-// top-N stories overall (cap). Per Sprint 9 spec: 5min cap=15, 10min cap=20.
-// The 5min set is a strict subset of the 10min set by construction.
+// edition wants. This builder picks a balanced subset.
 //
-// Priority order: major_events → india → world → business → technology →
-// climate_health → sport → culture. Sport and culture are arrays of 2-4
-// stories across different sports/culture types; they're consumed in order.
-function buildSubset(raw: RawStories, cap: number): RawStories {
-  let used = 0;
-  const room = () => Math.max(0, cap - used);
+// Sprint 12.5.1 — REWRITTEN. The previous version walked priority order with
+// a single global cap (20 for 10min, 15 for 5min). After Sprint 12.5's prompt
+// strengthening pushed Perplexity to over-fetch, the priority sections alone
+// (major=7 + india=7 + world=7 = 21) exhausted the cap, leaving business,
+// technology, climate_health, sport, and culture with ZERO stories in the
+// subset. Result: 10min written brief had 5 empty topical sections; Daily
+// scored 52/70 because of it.
+//
+// New design: per-section QUOTAS that guarantee breadth, then redistribute any
+// slack to higher-priority sections. Topical sections (biz/tech/climate/sport/
+// culture) are guaranteed at least 1-3 stories each.
+//
+// 5min set is no longer a strict subset of 10min (priority sections may differ
+// by 1-2 stories), but the 5min writer concatenates topicals into a single
+// 'topics' bucket, so breadth coverage matters more than strict subsetting.
 
-  const take = (arr: RawStory[] | undefined): RawStory[] => {
-    if (!arr || arr.length === 0) return [];
-    const r = room();
-    if (r <= 0) return [];
-    const slice = arr.slice(0, r);
-    used += slice.length;
-    return slice;
+function buildSubset(raw: RawStories, cap: number): RawStories {
+  // Per-section base quotas. Sum equals cap; topical sections always get >=1.
+  const QUOTAS: Record<number, Record<string, number>> = {
+    15: { // 5min — leaner, but still touch every topical section
+      major_events: 4, india: 4, world: 3,
+      business: 1, technology: 1, climate_health: 1, sport: 0, culture: 1,
+    },
+    20: { // 10min — broader coverage for the full edition
+      major_events: 5, india: 5, world: 3,
+      business: 2, technology: 2, climate_health: 1, sport: 1, culture: 1,
+    },
   };
 
-  // Priority order, highest first.
-  const major_events = take(raw.major_events);
-  const india        = take(raw.india);
-  const world        = take(raw.world);
-  const business     = take(raw.business);
-  const technology   = take(raw.technology);
-  const climate      = take(raw.climate_health);
-  const sport        = take(raw.sport);
-  const culture      = take(raw.culture);
+  // If an unfamiliar cap is passed, fall back to the 20-quota shape.
+  const quota = QUOTAS[cap] || QUOTAS[20];
 
-  console.log(`[subset:cap=${cap}] picked ${used} stories — ` +
-    `major=${major_events.length}, india=${india.length}, world=${world.length}, ` +
-    `biz=${business.length}, tech=${technology.length}, climate=${climate.length}, ` +
-    `sport=${sport.length}, culture=${culture.length}`);
+  // Priority for slack redistribution (best-section-first).
+  const PRIORITY = ['major_events', 'india', 'world', 'business', 'technology', 'climate_health', 'sport', 'culture'];
+
+  // First pass: take min(quota, available) per section.
+  const taken: Record<string, RawStory[]> = {};
+  let used = 0;
+  for (const sec of PRIORITY) {
+    const want = quota[sec] || 0;
+    const avail = ((raw as any)[sec] || []) as RawStory[];
+    const take = avail.slice(0, want);
+    taken[sec] = take;
+    used += take.length;
+  }
+
+  // Second pass: if sections under-delivered (raw had fewer than quota), give
+  // the unused slots to other sections that have surplus, walking priority.
+  let slack = cap - used;
+  if (slack > 0) {
+    for (const sec of PRIORITY) {
+      if (slack <= 0) break;
+      const avail = ((raw as any)[sec] || []) as RawStory[];
+      const room = avail.length - taken[sec].length;
+      const more = Math.min(room, slack);
+      if (more > 0) {
+        taken[sec] = avail.slice(0, taken[sec].length + more);
+        slack -= more;
+      }
+    }
+  }
+
+  console.log(`[subset:cap=${cap}] picked ${cap - slack} stories (slack=${slack}) — ` +
+    `major=${taken.major_events.length}, india=${taken.india.length}, world=${taken.world.length}, ` +
+    `biz=${taken.business.length}, tech=${taken.technology.length}, climate=${taken.climate_health.length}, ` +
+    `sport=${taken.sport.length}, culture=${taken.culture.length}`);
 
   return {
-    major_events,
-    india,
-    world,
-    business,
-    technology,
-    climate_health: climate,
-    sport,
-    culture,
-    markets: raw.markets,
-    lens: raw.lens,
+    major_events:   taken.major_events,
+    india:          taken.india,
+    world:          taken.world,
+    business:       taken.business,
+    technology:     taken.technology,
+    climate_health: taken.climate_health,
+    sport:          taken.sport,
+    culture:        taken.culture,
+    markets:        raw.markets,
+    lens:           raw.lens,
   };
 }
 

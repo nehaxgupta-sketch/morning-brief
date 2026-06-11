@@ -2,6 +2,8 @@
 //
 // Sprint 11 — single source of truth for the Tier-1 source whitelist.
 // Sprint 12 — added regional sources for city-tail fetches.
+// Sprint 12.5.1 — added Beatroot News (credible curated journalism brand,
+//                 founder Faye D'Souza, Mumbai, fact-checked / non-partisan).
 //
 // Previously this list was duplicated inline in both generate-brief.tsx and
 // personalise-briefs.tsx. The two copies drifted: the personalise-briefs copy
@@ -66,6 +68,14 @@ export const TIER_1_DOMAINS = new Set<string>([
   'thequint.com',
   'caravanmagazine.in',
   'thenewsminute.com',                 // South India regional
+  // Sprint 12.5.1 — Beatroot News (Faye D'Souza, founded 2020, Mumbai;
+  // fact-checked, non-partisan, no clickbait headlines). App-first publisher;
+  // articles primarily exist inside the Beatroot app, but URLs on
+  // beatrootnews.com and app.beatrootnews.com pass the whitelist if Perplexity
+  // / gpt-4o surface them. NOTE: because Beatroot is primarily an Ember SPA
+  // without crawlable article URLs, web search engines may not surface their
+  // content often — see Sprint 13 backlog for a possible RSS/API integration.
+  'beatrootnews.com',
 
   // ─── India — specialist (legal, environment) ──────────────────────────────
   'livelaw.in',
@@ -248,6 +258,7 @@ const PUBLISHER_LABELS: Record<string, string> = {
   'thequint.com': 'The Quint',
   'caravanmagazine.in': 'The Caravan',
   'thenewsminute.com': 'The News Minute',
+  'beatrootnews.com': 'Beatroot News',
   'livelaw.in': 'Live Law',
   'barandbench.com': 'Bar and Bench',
   'downtoearth.org.in': 'Down To Earth',
