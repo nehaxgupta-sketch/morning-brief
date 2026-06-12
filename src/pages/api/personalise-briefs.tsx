@@ -738,12 +738,16 @@ function buildQuickPersonalised(
     }
   }
 
+  // Sprint 13 · Defect A: strip duplicate stories across personal sections.
+  const dedupQ = dedupPersonalSections(personal);
+  if (dedupQ.removed > 0) console.log(`[personalise:5min] dedup removed ${dedupQ.removed} duplicate personal-section stories.`);
+
   console.log(`[personalise:5min] universal=${universalCount}, personal=${TOTAL_CAP - universalCount - personalBudget}, total=${TOTAL_CAP - personalBudget}, cap=${TOTAL_CAP}`);
 
   const picks: string[] = [];
   if (major[0]?.headline) picks.push(major[0].headline);
   if (world[0]?.headline) picks.push(world[0].headline);
-  if (personal[0]?.stories?.[0]?.headline) picks.push(personal[0].stories[0].headline);
+  if (dedupQ.sections[0]?.stories?.[0]?.headline) picks.push(dedupQ.sections[0].stories[0].headline);
 
   const content = {
     edition: '5min',
@@ -752,7 +756,7 @@ function buildQuickPersonalised(
     world,
     india,
     // topics section deliberately dropped for personalised users — replaced by personal_sections.
-    personal_sections: personal,
+    personal_sections: dedupQ.sections,
   };
 
   return {
@@ -861,13 +865,17 @@ function buildDailyPersonalised(
   // Closer — verbatim from shared
   const closer = shared.closer;
 
+  // Sprint 13 · Defect A: strip duplicate stories across personal sections.
+  const dedupD = dedupPersonalSections(personal);
+  if (dedupD.removed > 0) console.log(`[personalise:10min] dedup removed ${dedupD.removed} duplicate personal-section stories.`);
+
   const content: any = {
     edition: '10min',
     date: shared.date,
     major_events: major,
     world,
     india,
-    personal_sections: personal,
+    personal_sections: dedupD.sections,
     closer,
     quick_personal_relevance,
   };
@@ -1124,6 +1132,104 @@ function fullToMicro(s: any) {
   };
 }
 
+// ─── Sprint 13 · Defect A: personal-sections dedup ──────────────────────────
+//
+// The same story (by source_url) could appear in two interest sections for
+// one user (e.g. a Bollywood story under both film_ott AND music). Fix:
+// walk sections in array order (= interest priority order), first occurrence
+// wins, later occurrences are stripped. Sections left empty are dropped.
+// Key: source_url when present, else normalised headline.
+
+function dedupPersonalSections(personal: PersonalSection[]): { sections: PersonalSection[]; removed: number } {
+  const seen = new Set<string>();
+  let removed = 0;
+  const out: PersonalSection[] = [];
+  for (const sec of personal) {
+    const stories = (sec.stories || []).filter((s: any) => {
+      const key = (s?.source_url && String(s.source_url).trim())
+        || String(s?.headline || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      if (!key) return true;
+      if (seen.has(key)) { removed++; return false; }
+      seen.add(key);
+      return true;
+    });
+    if (stories.length > 0) out.push({ ...sec, stories });
+  }
+  return { sections: out, removed };
+}
+
+// ─── Sprint 13 · Defect B: tail_briefs fallback for 0-hit fetches ───────────
+//
+// Legacy path (USE_TAIL_BRIEFS=false): when an in-handler fetch errors OR
+// returns 0 stories, fall back to today's tail_briefs row for that key. This
+// is the painful failure for low-interest-count users (2 interests → 1 hits
+// 0 → half their personalisation silently vanishes). It is also the gateway
+// to eventually flipping USE_TAIL_BRIEFS=true.
+
+async function fillEmptyFromTailBriefs(
+  uniqueCities: string[],
+  uniqueInterests: string[],
+  cityCache: Map<string, CityStory[]>,
+  interestCache: Map<string, InterestStory[]>,
+  failures: TailFailureSets,
+): Promise<{ interestsFilled: string[]; citiesFilled: string[] }> {
+  const today = getISTDate();
+  const interestsFilled: string[] = [];
+  const citiesFilled: string[] = [];
+
+  const needyInterests = uniqueInterests.filter(
+    (i) => !STANDARD_INTEREST_MAP[i] && ((interestCache.get(i) || []).length === 0),
+  );
+  const needyCities = uniqueCities.filter(
+    (c) => ((cityCache.get(cityKey(c)) || []).length === 0),
+  );
+  if (needyInterests.length === 0 && needyCities.length === 0) {
+    return { interestsFilled, citiesFilled };
+  }
+
+  const { data, error } = await supabase
+    .from('tail_briefs')
+    .select('tail_type, tail_key, stories, status')
+    .eq('date', today);
+  if (error || !data) {
+    console.warn(`[tail-fallback] tail_briefs read failed: ${error?.message || 'no data'} — fallback unavailable.`);
+    return { interestsFilled, citiesFilled };
+  }
+  const byKey = new Map<string, any>();
+  for (const row of data) byKey.set(`${row.tail_type}|${row.tail_key}`, row);
+
+  for (const interest of needyInterests) {
+    const row = byKey.get(`interest|${interest.toLowerCase().trim()}`);
+    const stories = Array.isArray(row?.stories)
+      ? row.stories.filter((s: any) => s?.source_url && isWhitelistedSource(s.source_url))
+      : [];
+    if (row?.status !== 'failed' && stories.length > 0) {
+      interestCache.set(interest, stories as InterestStory[]);
+      failures.interestErrors.delete(interest);
+      interestsFilled.push(interest);
+      console.log(`[tail-fallback] interest "${interest}" filled from tail_briefs (${stories.length} stories).`);
+    } else {
+      console.warn(`[tail-fallback] interest "${interest}" has 0 stories in-handler AND no usable tail_briefs row — section will be absent.`);
+    }
+  }
+
+  for (const city of needyCities) {
+    const key = cityKey(city);
+    const row = byKey.get(`city|${key}`);
+    const stories = Array.isArray(row?.stories)
+      ? row.stories.filter((s: any) => s?.source_url && isWhitelistedSource(s.source_url))
+      : [];
+    if (row?.status !== 'failed' && stories.length > 0) {
+      cityCache.set(key, stories as CityStory[]);
+      failures.cityErrors.delete(key);
+      citiesFilled.push(city);
+      console.log(`[tail-fallback] city "${city}" filled from tail_briefs (${stories.length} stories).`);
+    }
+  }
+
+  return { interestsFilled, citiesFilled };
+}
+
 // ─── Save ────────────────────────────────────────────────────────────────────
 
 async function savePersonalised(
@@ -1161,7 +1267,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(405).json({ success: false, error: 'Method not allowed' });
   }
 
-  // Optional cron secret
+  // Optional cron secret. Sprint 13: also accepts a logged-in user's supabase
+  // session token (the /admin page attaches it), matching generate-brief.tsx.
   const expectedSecret = process.env.CRON_SECRET;
   if (expectedSecret) {
     const authHeader = req.headers['authorization'] || '';
@@ -1171,7 +1278,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       (req.headers['x-cron-secret'] as string) ||
       (req.body && (req.body as any).secret) ||
       (req.query.secret as string);
-    if (bearer !== expectedSecret && alt !== expectedSecret) {
+    let authorised = bearer === expectedSecret || alt === expectedSecret;
+    if (!authorised && bearer) {
+      try {
+        const { data, error } = await supabase.auth.getUser(bearer);
+        if (!error && data?.user) authorised = true;
+      } catch { /* fall through */ }
+    }
+    if (!authorised) {
       return res.status(401).json({ success: false, error: 'Unauthorised' });
     }
   }
@@ -1262,6 +1376,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       buildCityCache(uniqueCities, failures),
       buildInterestCache(uniqueInterests, failures),
     ]);
+    // Sprint 13 · Defect B: any key that errored OR returned 0 stories gets a
+    // second chance from today's tail_briefs rows (written by mode=tail-fetch
+    // earlier in the cron sequence). This is the gateway to USE_TAIL_BRIEFS=true.
+    const filled = await fillEmptyFromTailBriefs(uniqueCities, uniqueInterests, cityCache, interestCache, failures);
+    if (filled.interestsFilled.length + filled.citiesFilled.length > 0) {
+      console.log(`[tail-fallback] filled from tail_briefs — interests: [${filled.interestsFilled.join(', ')}], cities: [${filled.citiesFilled.join(', ')}]`);
+    }
   }
 
   if (failures.cityErrors.size > 0) {
@@ -1329,6 +1450,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             built = buildDailyPersonalised(shared, profile, cityStories, homeStories, interestCache, industryCache);
           } else {
             built = buildEditorialPersonalised(shared, profile);
+          }
+
+          // Sprint 13 · Defect C instrumentation: one compact fingerprint line
+          // per user per edition so cross-user homogeneity can be diagnosed
+          // from Vercel logs (compare order of first 3 stories per section
+          // across users with different mood_preference).
+          if (edition === '10min') {
+            const fp = (arr: any[]) => (arr || []).slice(0, 3).map((s: any) => String(s?.headline || '').slice(0, 40)).join(' | ');
+            console.log(`[homogeneity] user=${userId} mood=${profile.mood_preference || '-'} major=[${fp((built.content as any).major_events)}] india=[${fp((built.content as any).india)}] world=[${fp((built.content as any).world)}]`);
           }
 
           // Sprint 11: write tail_status into content JSONB so admin

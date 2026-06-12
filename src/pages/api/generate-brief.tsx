@@ -24,6 +24,10 @@
 //
 // City and interest news are NOT fetched here — they live in personalise-
 // briefs.tsx, which runs as a follow-up cron.
+//
+// Sprint 13 — Follow a Story: new mode=storylines (runs after write), plus
+// CRON_SECRET enforcement, URL liveness check, deterministic scorer
+// penalties, material-relevance industry prompt, tail_used_urls cleanup.
 
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { createClient } from '@supabase/supabase-js';
@@ -56,6 +60,36 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
+
+// ─── Sprint 13: request authorisation (CRON_SECRET enforcement) ─────────────
+//
+// Accepts EITHER of:
+//   1. Authorization: Bearer <CRON_SECRET>          → cron-job.org jobs
+//   2. Authorization: Bearer <supabase access JWT>  → /admin buttons (the
+//      admin page attaches the logged-in user's session token)
+//
+// Rollout safety: if the CRON_SECRET env var is NOT set, all requests pass
+// (current open behaviour) and a warning is logged. Set CRON_SECRET in
+// Vercel → add the Bearer header to all cron-job.org jobs → enforcement is
+// live with zero downtime.
+
+async function authoriseRequest(req: NextApiRequest): Promise<{ ok: boolean; via: string }> {
+  const secret = process.env.CRON_SECRET;
+  const header = String(req.headers.authorization || '');
+  const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+  if (!secret) {
+    console.warn('[auth] CRON_SECRET not set — endpoint is open. Set it in Vercel env to enforce.');
+    return { ok: true, via: 'open' };
+  }
+  if (token && token === secret) return { ok: true, via: 'cron-secret' };
+  if (token) {
+    try {
+      const { data, error } = await supabase.auth.getUser(token);
+      if (!error && data?.user) return { ok: true, via: `user:${data.user.email || data.user.id}` };
+    } catch { /* fall through */ }
+  }
+  return { ok: false, via: 'unauthorised' };
+}
 
 // ─── Date helpers (IST) ─────────────────────────────────────────────────────
 
@@ -2422,7 +2456,7 @@ async function callOpenAIChat(
   prompt: string,
   maxTokens: number,
   label: string,
-  costPhase?: '5min' | '10min' | 'deep' | 'score',
+  costPhase?: '5min' | '10min' | 'deep' | 'score' | 'storyline',
 ): Promise<any> {
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
@@ -2681,6 +2715,80 @@ type EditionOutcome = {
   content?: BriefContent;
 };
 
+// ─── Sprint 13: URL liveness check ──────────────────────────────────────────
+//
+// Perplexity occasionally returns formulaic article URLs that 404. Before
+// saving content, HEAD-check every story URL and drop stories whose links
+// are definitively dead. CONSERVATIVE by design: only 404/410 count as dead.
+// 403/405/timeouts/network errors are assumed ALIVE — many publishers block
+// bot HEAD requests, and a false drop costs a real story. Set URL_LIVENESS=off
+// in Vercel env to disable entirely. Adds ~3-6s to each write.
+
+const URL_LIVENESS_ENABLED = (process.env.URL_LIVENESS || 'on').toLowerCase() !== 'off';
+
+async function isUrlDead(url: string): Promise<boolean> {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 3500);
+    let resp = await fetch(url, { method: 'HEAD', redirect: 'follow', signal: ctrl.signal });
+    if (resp.status === 405 || resp.status === 501) {
+      // Publisher blocks HEAD — retry as a tiny ranged GET.
+      resp = await fetch(url, {
+        method: 'GET', redirect: 'follow', signal: ctrl.signal,
+        headers: { Range: 'bytes=0-512' },
+      });
+    }
+    clearTimeout(timer);
+    return resp.status === 404 || resp.status === 410;
+  } catch {
+    return false; // network error / timeout → assume alive
+  }
+}
+
+const LIVENESS_SECTIONS: Record<string, string[]> = {
+  '5min':  ['major_events', 'world', 'india', 'topics'],
+  '10min': ['major_events', 'world', 'india', 'business', 'technology', 'climate_health', 'sport', 'culture'],
+  // deep has no per-story source_urls in the same shape — skipped.
+};
+
+async function dropDeadLinkStories(
+  content: any,
+  edition: Edition,
+): Promise<{ content: any; dropped: number }> {
+  const sections = LIVENESS_SECTIONS[edition];
+  if (!URL_LIVENESS_ENABLED || !sections) return { content, dropped: 0 };
+
+  const urls = new Set<string>();
+  for (const sec of sections) {
+    for (const s of (content?.[sec] || [])) if (s?.source_url) urls.add(s.source_url);
+  }
+  const urlList = Array.from(urls);
+  if (urlList.length === 0) return { content, dropped: 0 };
+
+  const dead = new Set<string>();
+  let cursor = 0;
+  const POOL = 8;
+  await Promise.all(
+    Array.from({ length: Math.min(POOL, urlList.length) }, async () => {
+      while (cursor < urlList.length) {
+        const u = urlList[cursor++];
+        if (await isUrlDead(u)) dead.add(u);
+      }
+    }),
+  );
+  if (dead.size === 0) return { content, dropped: 0 };
+
+  let dropped = 0;
+  const out: any = { ...content };
+  for (const sec of sections) {
+    const before = (out[sec] || []).length;
+    out[sec] = (out[sec] || []).filter((s: any) => !dead.has(s.source_url));
+    dropped += before - out[sec].length;
+  }
+  for (const u of Array.from(dead)) console.log(`[liveness] dead link dropped: ${u}`);
+  return { content: out, dropped };
+}
+
 async function runWriterForEdition(
   ed: Edition,
   rawStories: RawStories,
@@ -2716,10 +2824,15 @@ async function runWriterForEdition(
         if (dropped > 0) {
           console.log(`[${ed}] Post-write strip removed ${dropped} non-whitelisted stories.`);
         }
+        // Sprint 13: drop stories whose source_url is definitively dead (404/410).
+        const live = await dropDeadLinkStories(stripped, ed);
+        if (live.dropped > 0) {
+          console.log(`[${ed}] URL liveness dropped ${live.dropped} dead-linked stories.`);
+        }
         // Save the FULL rawStories (not the subset) into the brief row so
         // downstream consumers see the same raw for every edition.
-        await saveBriefToSupabase(ed, rawStories, stripped, lens, 'ready');
-        return { status: 'ready', content: stripped };
+        await saveBriefToSupabase(ed, rawStories, live.content, lens, 'ready');
+        return { status: 'ready', content: live.content };
       }
       // Narrowed: validation is the failure branch here.
       const errMsg = (validation as { ok: false; errors: string }).errors;
@@ -2924,6 +3037,24 @@ async function modePush() {
 //
 // Output: { date, perEdition: { '5min': {...scores}, '10min': {...}, 'deep': {...} } }
 
+// ─── Sprint 13: deterministic empty-section penalty ─────────────────────────
+//
+// The LLM scorer historically under-penalised empty sections (gpt-4o-mini once
+// gave 59/70 to a brief with 5 empty sections). Penalty is now computed in
+// CODE, not left to the model: -5 on Coverage AND -5 on Field Completeness per
+// empty section, floored at 0. deep has schema-enforced minimum counts, so no
+// section can be empty there.
+
+function emptySectionCount(edition: Edition, content: any): number {
+  const sections = LIVENESS_SECTIONS[edition]; // same section lists apply
+  if (!sections) return 0;
+  let empty = 0;
+  for (const sec of sections) {
+    if (!Array.isArray(content?.[sec]) || content[sec].length === 0) empty++;
+  }
+  return empty;
+}
+
 async function scoreBriefWithLLM(
   edition: Edition,
   content: any,
@@ -2998,13 +3129,23 @@ OUTPUT — return ONLY this JSON, no preamble, no markdown:
     return Math.max(0, Math.min(10, v));
   };
 
-  const dim_coverage            = clamp(parsed?.dim_coverage);
-  const dim_field_completeness  = clamp(parsed?.dim_field_completeness);
+  const dim_coverage_raw        = clamp(parsed?.dim_coverage);
+  const dim_field_raw           = clamp(parsed?.dim_field_completeness);
   const dim_india_anchor        = clamp(parsed?.dim_india_anchor);
   const dim_source_quality      = clamp(parsed?.dim_source_quality);
   const dim_editorial_sharpness = clamp(parsed?.dim_editorial_sharpness);
   const dim_currentness         = clamp(parsed?.dim_currentness);
   const dim_relevance           = clamp(parsed?.dim_relevance);
+
+  // Sprint 13: deterministic -5 per empty section on Coverage + Field
+  // Completeness, applied in code so the scorer model can't be lenient.
+  const emptySections = emptySectionCount(edition, content);
+  const penalty = emptySections * 5;
+  const dim_coverage           = Math.max(0, dim_coverage_raw - penalty);
+  const dim_field_completeness = Math.max(0, dim_field_raw - penalty);
+  if (emptySections > 0) {
+    console.warn(`[score:${edition}] ${emptySections} empty section(s) → -${penalty} on coverage and field_completeness.`);
+  }
 
   const total =
     dim_coverage + dim_field_completeness + dim_india_anchor +
@@ -3019,7 +3160,8 @@ OUTPUT — return ONLY this JSON, no preamble, no markdown:
     dim_currentness,
     dim_relevance,
     total,
-    notes: typeof parsed?.notes === 'string' ? parsed.notes.slice(0, 800) : '',
+    notes: (typeof parsed?.notes === 'string' ? parsed.notes.slice(0, 800) : '')
+      + (emptySections > 0 ? ` [auto-penalty: ${emptySections} empty section(s), -${penalty} on coverage & field completeness]` : ''),
   };
 }
 
@@ -3179,7 +3321,7 @@ function getTailModel(): string {
 async function callTailFetch(
   prompt: string,
   label: string,
-  costPhase: 'city' | 'interest' | 'industry',
+  costPhase: 'city' | 'interest' | 'industry' | 'storyline',
   costDetail: string,
 ): Promise<TailStory[]> {
   const model = getTailModel();
@@ -3391,13 +3533,19 @@ async function fetchIndustryTail(industry: string): Promise<TailStory[]> {
   const industryKey = industry.toLowerCase().trim();
   const excludeUrls = await loadRecentUsedUrls('industry', industryKey);
 
-  const prompt = `You are sourcing industry news about "${industry}" for an India-focused daily brief targeting working professionals. Today is ${today}.
+  const prompt = `You are sourcing news with MATERIAL RELEVANCE to the "${industry}" sector for an India-focused daily brief targeting working professionals. Today is ${today}.
+
+"Material relevance" means anything that moves the sector's economics or operations — NOT only stories about ${industry} companies. Include:
+- Policy / regulatory changes that affect the sector (budgets, duties, compliance rules, court rulings)
+- Macro moves that hit its cost base or demand (rates, rupee, commodity and energy prices, trade policy)
+- Supply-chain, infrastructure, and technology shifts the sector must respond to
+- The classics: earnings, deals, funding, leadership moves, sector-wide trends
 
 Two-pass strategy:
-1. FIRST PASS — search for 24-48h developments specifically affecting the ${industry} sector. Earnings, deals, regulations, hires, major company moves, sector-wide trends. India focus preferred; include major global moves that affect Indian operators.
+1. FIRST PASS — search for 24-48h developments materially relevant to ${industry} (per the definition above). India focus preferred; include global moves that affect Indian operators.
 2. SECOND PASS (only if first pass yields fewer than 3 stories) — search for feature articles, analyses, or trend pieces published in the LAST 7 DAYS on ${industry}. Industry shifts, regulatory trajectories, market shifts.
 
-Return 1-3 total stories. Paraphrase into 2-3 factual sentences — do NOT quote at length.
+Return 1-3 total stories. Paraphrase into 2-3 factual sentences — do NOT quote at length. Every story's body MUST end with one sentence naming the specific transmission channel to ${industry} (e.g. "For pharma: imported API costs rise as the rupee weakens.").
 ${formatExcludeBlock(excludeUrls)}
 
 SOURCE WHITELIST — direct article URLs only from:
@@ -3571,6 +3719,12 @@ async function modeTailFetch() {
   }
 
   if (usedUrlRows.length > 0) {
+    // Sprint 13: same-day manual re-runs previously appended duplicate rows
+    // forever (unbounded growth). Replace today's rows instead of appending.
+    const { error: delErr } = await supabase.from('tail_used_urls').delete().eq('date', today);
+    if (delErr) {
+      console.warn(`[tail-fetch] tail_used_urls same-day cleanup failed (non-fatal): ${delErr.message}`);
+    }
     const { error } = await supabase.from('tail_used_urls').insert(usedUrlRows);
     if (error) {
       console.warn(`[tail-fetch] tail_used_urls insert failed (non-fatal): ${error.message}`);
@@ -3611,6 +3765,481 @@ async function modeTailFetch() {
   };
 }
 
+// ─── Sprint 13: Follow a Story (storylines) ─────────────────────────────────
+//
+// A "storyline" is a named, ongoing news narrative (e.g. "US–Iran nuclear
+// standoff") that accumulates dated events over days/weeks. mode=storylines
+// runs once per morning AFTER write (it reads today's ready 10min brief):
+//
+//   1. TAG + DETECT (one gpt-4o-mini call, ~free): match today's stories to
+//      existing active/dormant storylines; propose new storylines that pass
+//      the qualifying test (multi-day arc + expected future developments +
+//      recurring named entities).
+//   2. CREATE: up to 5 new storylines/day, hard cap 25 ACTIVE system-wide.
+//      Each new storyline gets a ONE-TIME historical backfill (search call):
+//      "how we got here" context + up to 4 past milestones. Never repeated.
+//   3. FALLBACK FETCH: followed, active storylines with no tagged hit today
+//      get a dedicated search call — cap 10/day, oldest-first, concurrency 3
+//      (same TPM discipline as tail-fetch). A miss waits a day; tolerable.
+//   4. STORY-SO-FAR REGEN: gpt-4o-mini synthesis from the event timeline for
+//      every storyline that gained events. Pure synthesis — NO web fetching.
+//   5. LIFECYCLE: active → dormant after 7 quiet days (tagging continues —
+//      it's free — but paid fallback fetching stops; a tagged hit revives).
+//      dormant/active → concluded after 30 quiet days.
+//
+// Dedup at event-write is two-layered: exact source_url per storyline, plus
+// semantic-overlap vs the last 3 days of events (reuses significantWords /
+// semanticOverlap from the fetch pipeline). A partial unique index in the DB
+// is the final backstop.
+
+const STORYLINE_MAX_ACTIVE = 25;
+const STORYLINE_MAX_NEW_PER_DAY = 5;
+const STORYLINE_FALLBACK_CAP = 10;
+const STORYLINE_FALLBACK_CONCURRENCY = 3;
+const STORYLINE_DORMANT_AFTER_DAYS = 7;
+const STORYLINE_CONCLUDE_AFTER_DAYS = 30;
+
+interface StorylineRow {
+  id: string;
+  slug: string;
+  title: string;
+  story_so_far: string | null;
+  confidence: string;
+  status: string;
+  origin: string;
+  last_event_at: string | null;
+}
+
+interface FlatStory {
+  idx: number;
+  section: string;
+  headline: string;
+  summary: string;
+  source: string;
+  source_url: string;
+}
+
+function flattenDailyContent(content: any): FlatStory[] {
+  const sections = ['major_events', 'india', 'world', 'business', 'technology', 'climate_health', 'sport', 'culture'];
+  const out: FlatStory[] = [];
+  for (const sec of sections) {
+    for (const s of (content?.[sec] || [])) {
+      if (!s?.headline) continue;
+      out.push({
+        idx: out.length,
+        section: sec,
+        headline: String(s.headline),
+        summary: String(s.facts || s.what_happened || '').slice(0, 280),
+        source: String(s.source || ''),
+        source_url: String(s.source_url || ''),
+      });
+    }
+  }
+  return out;
+}
+
+function slugifyTitle(t: string): string {
+  const s = t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+  return s || `storyline-${Date.now()}`;
+}
+
+// Generic search-model call returning parsed JSON. Mirrors callTailFetch's
+// gpt-4o-mini-search-preview path but with a free-form JSON contract.
+async function callSearchModelJson(prompt: string, label: string): Promise<any | null> {
+  try {
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini-search-preview',
+        web_search_options: {},
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 2000,
+      }),
+    });
+    const data = await response.json();
+    if (response.status !== 200) {
+      console.warn(`[storyline:${label}] search model returned ${response.status}: ${JSON.stringify(data).slice(0, 300)}`);
+      return null;
+    }
+    const usage = extractUsageFromChatCompletion(data);
+    void logOpenAICost({
+      phase: 'storyline',
+      model: 'gpt-4o-mini-search-preview',
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      reasoningTokens: usage.reasoningTokens,
+      detail: label,
+    });
+    const text = data?.choices?.[0]?.message?.content || '';
+    return text ? extractJsonObject(text) : null;
+  } catch (err: any) {
+    console.warn(`[storyline:${label}] network/api error: ${err?.message || err}`);
+    return null;
+  }
+}
+
+// One gpt-4o-mini call: match today's stories to storylines + detect new ones.
+async function storylineTagAndDetect(
+  stories: FlatStory[],
+  existing: StorylineRow[],
+  today: string,
+): Promise<{ matches: any[]; proposals: any[] }> {
+  const storyList = stories
+    .map((s) => `${s.idx}. [${s.section}] ${s.headline} — ${s.summary.slice(0, 140)}`)
+    .join('\n');
+  const lineList = existing.length
+    ? existing.map((l) => `- id:${l.id} | ${l.title} | status:${l.status} | so-far: ${(l.story_so_far || '').slice(0, 120)}`).join('\n')
+    : '(none yet)';
+
+  const prompt = `You maintain "storylines" for Morning Brief — named, ongoing news narratives (e.g. "US–Iran nuclear standoff", "RBI rate-cut cycle") that accumulate updates over days or weeks. Today is ${today}.
+
+TODAY'S STORIES:
+${storyList}
+
+EXISTING STORYLINES (active + dormant):
+${lineList}
+
+TASK 1 — MATCH: for each story that is a development WITHIN an existing storyline, record the match. A match means the story advances that named narrative — same conflict, same policy arc, same case, same recurring entities. Be strict; never force a match.
+
+TASK 2 — DETECT: among stories that match nothing, decide if any deserve a NEW storyline. Qualifying test (ALL must hold):
+- Multi-day arc: clearly a chapter in a continuing situation, not a self-contained event
+- Expected future developments: a reader would plausibly ask "what happened next?" in the coming days or weeks
+- Recurring named entities: specific actors/institutions that will keep appearing in coverage
+One-off events (accidents, match results, product launches, weather) do NOT qualify even if big. An election RESULT is an event; an election SEASON is a storyline. Propose at most ${STORYLINE_MAX_NEW_PER_DAY}. Set confidence "high" ONLY when the narrative is unmistakably ongoing and broadly followed; otherwise "normal".
+
+Return ONLY this JSON, no markdown:
+{
+  "matches": [ { "story_idx": <int>, "storyline_id": "<id from list above>" } ],
+  "proposals": [ { "story_idx": <int>, "title": "<crisp 3-7 word storyline title>", "confidence": "high" | "normal", "rationale": "<one line>" } ]
+}`;
+
+  const parsed = await callOpenAIChat('gpt-4o-mini', prompt, 1500, 'storyline-tag', 'storyline');
+  return {
+    matches: Array.isArray(parsed?.matches) ? parsed.matches : [],
+    proposals: Array.isArray(parsed?.proposals) ? parsed.proposals : [],
+  };
+}
+
+// Insert one event with two-layer dedup. Touches last_event_at (forward-only,
+// so historical backfill events never drag it backwards) and revives dormant
+// storylines on a hit.
+async function insertStorylineEvent(
+  line: { id: string },
+  ev: { date: string; headline: string; summary: string; source: string; source_url: string; origin: string },
+): Promise<'inserted' | 'duplicate' | 'error'> {
+  // Layer 1 — exact URL already attached to this storyline.
+  if (ev.source_url) {
+    const { data: urlHit } = await supabase
+      .from('storyline_events')
+      .select('id')
+      .eq('storyline_id', line.id)
+      .eq('source_url', ev.source_url)
+      .limit(1);
+    if (urlHit && urlHit.length > 0) return 'duplicate';
+  }
+  // Layer 2 — semantic: same development worded differently, last 3 days.
+  const threeDaysAgo = getISTDate(-3);
+  const { data: recent } = await supabase
+    .from('storyline_events')
+    .select('headline')
+    .eq('storyline_id', line.id)
+    .gte('date', threeDaysAgo);
+  const evWords = significantWords(ev.headline);
+  for (const r of recent || []) {
+    if (semanticOverlap(evWords, significantWords(String(r.headline || ''))) >= SEMANTIC_DEDUP_THRESHOLD) {
+      return 'duplicate';
+    }
+  }
+
+  const { error } = await supabase.from('storyline_events').insert({
+    storyline_id: line.id,
+    date: ev.date,
+    headline: ev.headline.slice(0, 300),
+    summary: ev.summary ? ev.summary.slice(0, 800) : null,
+    source: ev.source || null,
+    source_url: ev.source_url || null,
+    origin: ev.origin,
+  });
+  if (error) {
+    // The DB partial unique index is the final backstop — a violation here is
+    // a duplicate, not a failure.
+    if (String(error.message || '').toLowerCase().includes('duplicate')) return 'duplicate';
+    console.warn(`[storyline] event insert failed: ${error.message}`);
+    return 'error';
+  }
+
+  // Forward-only touch + revival. The .or filter ensures a backfill event
+  // dated in the past never moves last_event_at backwards.
+  await supabase
+    .from('storylines')
+    .update({ last_event_at: ev.date, status: 'active', updated_at: new Date().toISOString() })
+    .eq('id', line.id)
+    .neq('status', 'concluded')
+    .or(`last_event_at.is.null,last_event_at.lte.${ev.date}`);
+  return 'inserted';
+}
+
+function buildBackfillPrompt(title: string, seed: FlatStory, today: string): string {
+  return `You are building the "how we got here" context for a news storyline titled "${title}". The latest development: "${seed.headline} — ${seed.summary}". Today is ${today}.
+
+Search the web for the KEY PRIOR MILESTONES of this storyline (the 2-4 moments a new reader needs to understand the arc), and write a neutral 3-4 sentence "story so far" in a calm, analytical register (Economist/FT), ending with why it matters for Indian readers where relevant.
+
+SOURCE RULES: milestone source_urls must be direct article URLs from major reputable outlets (Reuters, AP, Bloomberg, FT, BBC, The Guardian, Al Jazeera, The Hindu, Indian Express, Hindustan Times, Mint, Business Standard, Economic Times, NDTV, Times of India).
+
+Return ONLY this JSON, no markdown:
+{
+  "story_so_far": "<3-4 sentences>",
+  "milestones": [ { "date": "YYYY-MM-DD", "headline": "...", "summary": "1-2 sentences", "source": "Publisher", "source_url": "https://..." } ]
+}`;
+}
+
+// Dedicated fetch for a followed storyline that got no tagged hit today.
+async function fallbackFetchStoryline(line: StorylineRow, today: string): Promise<number> {
+  const since = line.last_event_at || getISTDate(-7);
+  const prompt = `Search for the LATEST genuine development (published after ${since}, ideally in the last 24-48 hours) in this ongoing news storyline: "${line.title}".
+Story so far: ${(line.story_so_far || '').slice(0, 400)}
+
+Only report a REAL new development — a concrete event, decision, statement, or data point that moves the story forward. If nothing new has happened since ${since}, return {"stories": []} — an empty result is a correct result.
+
+SOURCE WHITELIST — direct article URLs only from: Reuters, AP, Bloomberg, FT, WSJ, NYT, BBC, The Guardian, Al Jazeera, The Hindu, Indian Express, Hindustan Times, Mint, Business Standard, Economic Times, NDTV, Times of India, The Print, PTI, ANI.
+
+Return ONLY this JSON, no markdown:
+{ "stories": [ { "headline": "...", "body": "2-3 factual sentences", "source": "Publisher", "source_url": "https://...", "published_at": "YYYY-MM-DD" } ] }`;
+
+  const parsed = await callSearchModelJson(prompt, `fallback:${line.slug}`);
+  const s = parsed?.stories?.[0];
+  if (!s || typeof s.headline !== 'string' || !isWhitelistedSource(s.source_url)) return 0;
+  const r = await insertStorylineEvent(line, {
+    date: today,
+    headline: s.headline,
+    summary: typeof s.body === 'string' ? s.body : '',
+    source: typeof s.source === 'string' ? s.source : '',
+    source_url: s.source_url,
+    origin: 'fallback',
+  });
+  return r === 'inserted' ? 1 : 0;
+}
+
+// Regenerate the living "story so far" from the event timeline. Pure
+// synthesis on gpt-4o-mini — no web fetching, per the locked design.
+async function regenStorySoFar(line: StorylineRow): Promise<boolean> {
+  const { data: events } = await supabase
+    .from('storyline_events')
+    .select('date, headline, summary')
+    .eq('storyline_id', line.id)
+    .order('date', { ascending: true })
+    .limit(20);
+  if (!events || events.length === 0) return false;
+
+  const timeline = events
+    .map((e: any) => `${e.date}: ${e.headline}${e.summary ? ' — ' + String(e.summary).slice(0, 160) : ''}`)
+    .join('\n');
+
+  const prompt = `Rewrite the "story so far" for the ongoing news storyline "${line.title}" using its event timeline below. 4-5 sentences, calm analytical register (Economist/FT). Open with the essential framing, carry the arc through to the MOST RECENT development, and close with what to watch next or why it matters for Indian readers. No bullet lists, no headers.
+
+TIMELINE (oldest → newest):
+${timeline}
+
+Return ONLY this JSON, no markdown: { "story_so_far": "<4-5 sentences>" }`;
+
+  const parsed = await callOpenAIChat('gpt-4o-mini', prompt, 700, `storyline-sofar:${line.slug}`, 'storyline');
+  if (typeof parsed?.story_so_far !== 'string' || parsed.story_so_far.length < 40) return false;
+  await supabase
+    .from('storylines')
+    .update({ story_so_far: parsed.story_so_far.slice(0, 1500), updated_at: new Date().toISOString() })
+    .eq('id', line.id);
+  return true;
+}
+
+async function modeStorylines() {
+  const today = getISTDate();
+
+  // 1. Tagging source: today's ready 10min base brief (richest section coverage).
+  const { data: briefRow } = await supabase
+    .from('briefs')
+    .select('content, status')
+    .eq('date', today)
+    .eq('edition', '10min')
+    .maybeSingle();
+  const stories = briefRow?.status === 'ready' && briefRow?.content
+    ? flattenDailyContent(briefRow.content)
+    : [];
+
+  // 2. Active + dormant storylines (dormant still matchable — a hit revives).
+  const { data: lineRows, error: lineErr } = await supabase
+    .from('storylines')
+    .select('id, slug, title, story_so_far, confidence, status, origin, last_event_at')
+    .in('status', ['active', 'dormant']);
+  if (lineErr) return { ok: false as const, error: `storylines read failed: ${lineErr.message}` };
+  const lines = (lineRows || []) as StorylineRow[];
+  const byId = new Map<string, StorylineRow>(lines.map((l) => [l.id, l]));
+  const activeCount = lines.filter((l) => l.status === 'active').length;
+
+  const summary = {
+    stories_considered: stories.length,
+    tagged: 0, duplicates: 0, created: 0, skipped_creation: 0,
+    fallback_checked: 0, fallback_hits: 0,
+    regenerated: 0, dormant_marked: 0, concluded_marked: 0,
+  };
+  const touched = new Set<string>();
+
+  // 3. Tag + detect (skipped gracefully if today's brief isn't ready).
+  if (stories.length > 0) {
+    let tagResult: { matches: any[]; proposals: any[] } = { matches: [], proposals: [] };
+    try {
+      tagResult = await storylineTagAndDetect(stories, lines, today);
+    } catch (e: any) {
+      console.warn(`[storylines] tag call failed: ${e?.message || e}`);
+    }
+
+    for (const m of tagResult.matches) {
+      const line = byId.get(String(m?.storyline_id));
+      const st = stories[Number(m?.story_idx)];
+      if (!line || !st) continue;
+      const r = await insertStorylineEvent(line, {
+        date: today, headline: st.headline, summary: st.summary,
+        source: st.source, source_url: st.source_url, origin: 'tag',
+      });
+      if (r === 'inserted') { summary.tagged++; touched.add(line.id); }
+      if (r === 'duplicate') summary.duplicates++;
+    }
+
+    // 4. Create proposals — respect 25-active cap and 5/day cap. ONE-TIME
+    //    historical backfill at creation; never repeated on later days.
+    let canCreate = Math.min(STORYLINE_MAX_NEW_PER_DAY, Math.max(0, STORYLINE_MAX_ACTIVE - activeCount));
+    for (const p of tagResult.proposals) {
+      const st = stories[Number(p?.story_idx)];
+      if (!st || typeof p?.title !== 'string' || p.title.trim().length < 4) continue;
+      if (canCreate <= 0) { summary.skipped_creation++; continue; }
+      const slug = slugifyTitle(p.title);
+      const confidence = p.confidence === 'high' ? 'high' : 'normal';
+      const { data: created, error: cErr } = await supabase
+        .from('storylines')
+        .insert({ slug, title: p.title.trim().slice(0, 140), confidence, status: 'active', origin: 'auto', last_event_at: today })
+        .select('id')
+        .single();
+      if (cErr || !created) {
+        console.warn(`[storylines] create failed (${slug}): ${cErr?.message || 'no row returned'}`);
+        continue;
+      }
+      canCreate--;
+      summary.created++;
+      const newLine: StorylineRow = {
+        id: created.id, slug, title: p.title.trim().slice(0, 140),
+        story_so_far: null, confidence, status: 'active', origin: 'auto', last_event_at: today,
+      };
+      byId.set(created.id, newLine);
+      touched.add(created.id);
+
+      await insertStorylineEvent({ id: created.id }, {
+        date: today, headline: st.headline, summary: st.summary,
+        source: st.source, source_url: st.source_url, origin: 'tag',
+      });
+
+      try {
+        const bf = await callSearchModelJson(buildBackfillPrompt(newLine.title, st, today), `backfill:${slug}`);
+        if (bf) {
+          const milestones = Array.isArray(bf.milestones) ? bf.milestones.slice(0, 4) : [];
+          for (const ms of milestones) {
+            if (!ms?.headline) continue;
+            await insertStorylineEvent({ id: created.id }, {
+              date: typeof ms.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(ms.date) ? ms.date : today,
+              headline: String(ms.headline),
+              summary: typeof ms.summary === 'string' ? ms.summary : '',
+              source: typeof ms.source === 'string' ? ms.source : '',
+              source_url: isWhitelistedSource(ms.source_url) ? ms.source_url : '',
+              origin: 'backfill',
+            });
+          }
+          if (typeof bf.story_so_far === 'string' && bf.story_so_far.length > 40) {
+            await supabase.from('storylines').update({ story_so_far: bf.story_so_far.slice(0, 1500) }).eq('id', created.id);
+            newLine.story_so_far = bf.story_so_far;
+            touched.delete(created.id); // fresh story_so_far already written
+          }
+        }
+      } catch (e: any) {
+        console.warn(`[storylines] backfill failed (${slug}): ${e?.message || e}`);
+      }
+    }
+  } else {
+    console.warn('[storylines] No ready 10min brief for today — tagging skipped; fallback + lifecycle still run.');
+  }
+
+  // 5. Fallback fetch — FOLLOWED, ACTIVE storylines with no event today.
+  //    Cap 10/day, oldest-first, concurrency 3 (TPM discipline from tail-fetch).
+  const { data: followRows } = await supabase.from('storyline_follows').select('storyline_id');
+  const followedIds = new Set((followRows || []).map((r: any) => r.storyline_id));
+  const { data: todayEvents } = await supabase.from('storyline_events').select('storyline_id').eq('date', today);
+  const hitToday = new Set((todayEvents || []).map((r: any) => r.storyline_id));
+
+  const candidates = lines
+    .filter((l) => l.status === 'active' && followedIds.has(l.id) && !hitToday.has(l.id) && !touched.has(l.id))
+    .sort((a, b) => String(a.last_event_at || '').localeCompare(String(b.last_event_at || '')))
+    .slice(0, STORYLINE_FALLBACK_CAP);
+  summary.fallback_checked = candidates.length;
+
+  let cursor = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(STORYLINE_FALLBACK_CONCURRENCY, candidates.length) }, async () => {
+      while (cursor < candidates.length) {
+        const line = candidates[cursor++];
+        try {
+          const hits = await fallbackFetchStoryline(line, today);
+          if (hits > 0) { summary.fallback_hits += hits; touched.add(line.id); }
+        } catch (e: any) {
+          console.warn(`[storylines] fallback failed (${line.slug}): ${e?.message || e}`);
+        }
+      }
+    }),
+  );
+
+  // 6. Story-so-far regen for storylines that gained events, plus self-heal:
+  //    any active storyline missing a story_so_far (e.g. interrupted backfill).
+  const { data: missing } = await supabase
+    .from('storylines')
+    .select('id, slug, title, story_so_far, confidence, status, origin, last_event_at')
+    .eq('status', 'active')
+    .is('story_so_far', null);
+  for (const l of (missing || []) as StorylineRow[]) {
+    byId.set(l.id, l);
+    touched.add(l.id);
+  }
+  for (const id of Array.from(touched)) {
+    const line = byId.get(id);
+    if (!line) continue;
+    try {
+      if (await regenStorySoFar(line)) summary.regenerated++;
+    } catch (e: any) {
+      console.warn(`[storylines] regen failed (${line.slug}): ${e?.message || e}`);
+    }
+  }
+
+  // 7. Lifecycle — pure date math, no LLM.
+  const dormantCutoff = getISTDate(-STORYLINE_DORMANT_AFTER_DAYS);
+  const concludeCutoff = getISTDate(-STORYLINE_CONCLUDE_AFTER_DAYS);
+  const { data: cm } = await supabase
+    .from('storylines')
+    .update({ status: 'concluded', updated_at: new Date().toISOString() })
+    .in('status', ['active', 'dormant'])
+    .lt('last_event_at', concludeCutoff)
+    .select('id');
+  summary.concluded_marked = cm?.length || 0;
+  const { data: dm } = await supabase
+    .from('storylines')
+    .update({ status: 'dormant', updated_at: new Date().toISOString() })
+    .eq('status', 'active')
+    .lt('last_event_at', dormantCutoff)
+    .select('id');
+  summary.dormant_marked = dm?.length || 0;
+
+  console.log(`[storylines] Done. tagged=${summary.tagged} created=${summary.created} fallback=${summary.fallback_hits}/${summary.fallback_checked} regen=${summary.regenerated} dormant=${summary.dormant_marked} concluded=${summary.concluded_marked}`);
+  return { ok: true as const, date: today, ...summary };
+}
+
 // ─── Handler ─────────────────────────────────────────────────────────────────
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -3621,9 +4250,20 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   // would timeout.
   const { mode = 'fetch', edition, skipPush } = req.body || {};
 
+  // Sprint 13: CRON_SECRET enforcement (no-op until the env var is set).
+  const auth = await authoriseRequest(req);
+  if (!auth.ok) {
+    return res.status(401).json({ ok: false, error: 'Unauthorised. Provide Authorization: Bearer <CRON_SECRET> or a valid user session token.' });
+  }
+
   try {
     if (mode === 'fetch') {
       const result = await modeFetch();
+      return res.status(result.ok ? 200 : 500).json(result);
+    }
+
+    if (mode === 'storylines') {
+      const result = await modeStorylines();
       return res.status(result.ok ? 200 : 500).json(result);
     }
 
@@ -3657,7 +4297,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     return res.status(400).json({
       ok: false,
-      error: `Unknown mode: ${mode}. Use 'fetch', 'tail-fetch', 'write', 'push', 'score', or 'full'.`,
+      error: `Unknown mode: ${mode}. Use 'fetch', 'tail-fetch', 'write', 'storylines', 'push', 'score', or 'full'.`,
     });
   } catch (error: any) {
     console.error('Top-level error:', error.message);

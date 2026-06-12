@@ -257,6 +257,19 @@ export default function ProfilePage() {
       alert('Save failed. Please try again.')
       return
     }
+    // Sprint 13: brief_type sync defect (open since Sprint 12.5) — the client
+    // DOES write brief_type on updates, so if the value isn't sticking the
+    // failure is silent (likely RLS column policy). Read back and verify so
+    // the defect becomes visible instead of silent.
+    if ('brief_type' in updates) {
+      const { data: check } = await supabase
+        .from('profiles').select('brief_type').eq('id', user.id).single()
+      if (check && check.brief_type !== updates.brief_type) {
+        console.error(`[brief_type] write did not persist: wanted=${updates.brief_type} got=${check.brief_type}`)
+        alert('Your brief type setting did not save — please report this. (Likely a permissions issue.)')
+        return
+      }
+    }
     setProfile(p => p ? ({ ...p, ...updates } as any) : p)
     setEditing(null)
     setDraft(null)
@@ -631,7 +644,7 @@ export default function ProfilePage() {
       }}>
         {[
           { href: '/home',      label: 'Brief',   icon: '◆', active: false },
-          { href: '/bookmarks', label: 'Saved',   icon: '★', active: false },
+          { href: '/followed',  label: 'Stories', icon: '◉', active: false },
           { href: '/profile',   label: 'Profile', icon: '◑', active: true  },
         ].map(({ href, label, icon, active }) => (
           <Link key={href} href={href} style={{

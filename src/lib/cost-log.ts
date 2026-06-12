@@ -5,6 +5,8 @@
 // /admin dashboard.
 //
 // Sprint 12 — added 'industry' tail phase + gpt-4o-mini-search-preview model.
+// Sprint 13 — added 'storyline' phase (Follow a Story: tagging, backfill,
+//             fallback fetch, story-so-far regen).
 //
 // Fire-and-forget: writes are awaited but failure is logged-only, never
 // thrown. We don't want telemetry failures to take down the brief pipeline.
@@ -48,7 +50,8 @@ export type CostPhase =
   | 'deep'       // The Editorial writer
   | 'city'       // per-city tail fetch (Sprint 12: now via gpt-4o-mini-search-preview)
   | 'interest'   // per-interest tail fetch (Sprint 12)
-  | 'industry'   // per-industry tail fetch (Sprint 12 — NEW)
+  | 'industry'   // per-industry tail fetch (Sprint 12)
+  | 'storyline'  // Follow a Story: tag/detect, backfill, fallback fetch, story-so-far regen (Sprint 13 — NEW)
   | 'score';     // auto-scorer (rubric)
 
 export function calculateCostUSD(

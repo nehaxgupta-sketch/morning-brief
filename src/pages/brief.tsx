@@ -185,23 +185,50 @@ function SourceLine({ source, sourceUrl }: { source: string; sourceUrl?: string 
   return <div style={s}>via {source}</div>
 }
 
-function SaveButton({ isSaved, onToggle }: { isSaved: boolean; onToggle: () => void }) {
+// Sprint 13: bookmarks → Follow a Story. The pill has four states; the gold
+// "nudge" treatment appears only on high-confidence storylines (detection-
+// driven prompt to follow).
+type FollowState = 'none' | 'following' | 'busy' | 'declined'
+
+function FollowButton({ state, nudge, onToggle }: {
+  state: FollowState; nudge: boolean; onToggle: () => void
+}) {
+  const isNudge = nudge && state === 'none'
+  const label =
+    state === 'following' ? 'FOLLOWING ✓'
+    : state === 'busy' ? 'FOLLOWING…'
+    : state === 'declined' ? 'ONE-OFF STORY'
+    : isNudge ? '📌 FOLLOW THIS STORY'
+    : 'FOLLOW'
   return (
-    <button onClick={onToggle} style={{
-      background: 'none', border: 'none', cursor: 'pointer',
+    <button onClick={onToggle} disabled={state === 'busy' || state === 'declined'} style={{
+      background: isNudge ? C.gold : 'none',
+      border: isNudge ? 'none' : `1px solid ${state === 'following' ? 'rgba(200,164,90,0.45)' : C.border}`,
+      borderRadius: '2px',
+      cursor: state === 'busy' || state === 'declined' ? 'default' : 'pointer',
       display: 'flex', alignItems: 'center', gap: '6px',
-      padding: '8px 4px', minHeight: '44px',
-      fontFamily: "'DM Mono', monospace", fontSize: '11px',
-      letterSpacing: '1.5px', color: isSaved ? C.gold : C.textMute,
-    }} title={isSaved ? 'Remove from saved' : 'Save this story'}>
-      <span style={{ fontSize: '17px' }}>{isSaved ? '★' : '☆'}</span>
-      {isSaved ? 'SAVED' : 'SAVE'}
+      padding: '8px 12px', minHeight: '40px', whiteSpace: 'nowrap',
+      fontFamily: "'DM Mono', monospace", fontSize: '10px',
+      letterSpacing: '1.5px', fontWeight: isNudge ? 700 : 400,
+      color: isNudge ? '#1A1A1A'
+        : state === 'following' ? C.gold
+        : state === 'declined' ? C.textDim
+        : C.textMute,
+    }} title={state === 'following' ? 'Unfollow this story' : 'Follow this story for daily updates and full context'}>
+      {label}
     </button>
   )
 }
 
-function MicroCard({ story, isSaved, onToggle }: {
-  story: MicroStory; isSaved: boolean; onToggle: () => void
+// The follow API handed down from BriefPage to renderers and cards.
+interface FollowApi {
+  stateFor: (story: any) => FollowState
+  nudgeFor: (story: any) => boolean
+  toggle: (story: any) => void
+}
+
+function MicroCard({ story, follow }: {
+  story: MicroStory; follow: FollowApi
 }) {
   const what = story.what_happened || story.body || ''
   const why = story.why_it_matters || ''
@@ -234,14 +261,14 @@ function MicroCard({ story, isSaved, onToggle }: {
       )}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <SourceLine source={story.source} sourceUrl={story.source_url} />
-        <SaveButton isSaved={isSaved} onToggle={onToggle} />
+        <FollowButton state={follow.stateFor(story)} nudge={follow.nudgeFor(story)} onToggle={() => follow.toggle(story)} />
       </div>
     </div>
   )
 }
 
-function FullCard({ story, isSaved, onToggle }: {
-  story: FullStory; isSaved: boolean; onToggle: () => void
+function FullCard({ story, follow }: {
+  story: FullStory; follow: FollowApi
 }) {
   const fields: [string, string | undefined][] = [
     ['FACTS', story.facts],
@@ -285,7 +312,7 @@ function FullCard({ story, isSaved, onToggle }: {
 
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <SourceLine source={story.source} sourceUrl={story.source_url} />
-        <SaveButton isSaved={isSaved} onToggle={onToggle} />
+        <FollowButton state={follow.stateFor(story)} nudge={follow.nudgeFor(story)} onToggle={() => follow.toggle(story)} />
       </div>
     </div>
   )
@@ -483,11 +510,9 @@ function CloserBlock({ closer }: { closer: Closer }) {
 // ─── Renderer: The Brief ────────────────────────────────────────────────────
 
 function QuickRenderer({
-  brief, activeEdition, todayISO, savedKeys, onToggle,
+  brief, follow,
 }: {
-  brief: BriefContent; activeEdition: string; todayISO: string
-  savedKeys: Set<string>
-  onToggle: (section: string, index: number, story: any) => void
+  brief: BriefContent; follow: FollowApi
 }) {
   const visibleSections = QUICK_SECTIONS.filter(s => sectionHasContent(s, brief))
   const personalSections = brief.personal_sections ?? []
@@ -516,8 +541,6 @@ function QuickRenderer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [brief])
 
-  const keyFor = (s: string, i: number) => `${todayISO}-${activeEdition}-${s}-${i}`
-
   type Item = { kind: 'std'; section: SectionDef } | { kind: 'pers'; section: PersonalSection }
   const items: Item[] = []
   for (const section of visibleSections) {
@@ -545,9 +568,7 @@ function QuickRenderer({
                 }}>FOR YOU</div>
                 <SectionLabel>{p.icon} {p.label}</SectionLabel>
                 {(p.stories as MicroStory[]).map((story, i) => (
-                  <MicroCard key={i} story={story}
-                    isSaved={savedKeys.has(keyFor(p.id, i))}
-                    onToggle={() => onToggle(p.id, i, story)} />
+                  <MicroCard key={i} story={story} follow={follow} />
                 ))}
               </div>
             )
@@ -558,9 +579,7 @@ function QuickRenderer({
             <div key={section.id} id={section.id} style={{ paddingTop: idx === 0 ? '36px' : '44px' }}>
               <SectionLabel>{section.icon} {section.label}</SectionLabel>
               {stories.map((story, i) => (
-                <MicroCard key={i} story={story}
-                  isSaved={savedKeys.has(keyFor(section.id, i))}
-                  onToggle={() => onToggle(section.id, i, story)} />
+                <MicroCard key={i} story={story} follow={follow} />
               ))}
             </div>
           )
@@ -573,11 +592,9 @@ function QuickRenderer({
 // ─── Renderer: The Daily ────────────────────────────────────────────────────
 
 function DailyRenderer({
-  brief, activeEdition, todayISO, savedKeys, onToggle, isPersonalised,
+  brief, follow, isPersonalised,
 }: {
-  brief: BriefContent; activeEdition: string; todayISO: string
-  savedKeys: Set<string>
-  onToggle: (section: string, index: number, story: any) => void
+  brief: BriefContent; follow: FollowApi
   isPersonalised: boolean
 }) {
   const visibleSections = DAILY_SECTIONS.filter(s => sectionHasContent(s, brief))
@@ -609,8 +626,6 @@ function DailyRenderer({
     return () => window.removeEventListener('scroll', handleScroll)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [brief])
-
-  const keyFor = (s: string, i: number) => `${todayISO}-${activeEdition}-${s}-${i}`
 
   const renderMarkets = () => brief.markets && (
     <>
@@ -672,9 +687,7 @@ function DailyRenderer({
                 }}>FOR YOU</div>
                 <SectionLabel>{p.icon} {p.label}</SectionLabel>
                 {(p.stories as FullStory[]).map((story, i) => (
-                  <FullCard key={i} story={story}
-                    isSaved={savedKeys.has(keyFor(p.id, i))}
-                    onToggle={() => onToggle(p.id, i, story)} />
+                  <FullCard key={i} story={story} follow={follow} />
                 ))}
               </div>
             )
@@ -684,16 +697,10 @@ function DailyRenderer({
             <div key={section.id} id={section.id} style={{ paddingTop: idx === 0 ? '36px' : '44px' }}>
               <SectionLabel>{section.icon} {section.label}</SectionLabel>
               {section.kind === 'list' && ((brief as any)[section.id] as FullStory[]).map((story, i) => (
-                <FullCard key={i} story={story}
-                  isSaved={savedKeys.has(keyFor(section.id, i))}
-                  onToggle={() => onToggle(section.id, i, story)} />
+                <FullCard key={i} story={story} follow={follow} />
               ))}
               {section.kind === 'single' && (
-                <FullCard
-                  story={(brief as any)[section.id] as FullStory}
-                  isSaved={savedKeys.has(keyFor(section.id, 0))}
-                  onToggle={() => onToggle(section.id, 0, (brief as any)[section.id])}
-                />
+                <FullCard story={(brief as any)[section.id] as FullStory} follow={follow} />
               )}
               {section.kind === 'markets' && renderMarkets()}
             </div>
@@ -953,7 +960,12 @@ export default function BriefPage() {
   const [briefs, setBriefs] = useState<Record<string, BriefContent>>({})
   const [activeEdition, setActiveEdition] = useState<'5min' | '10min' | 'deep'>('10min')
   const [userId, setUserId] = useState<string | null>(null)
-  const [savedKeys, setSavedKeys] = useState<Set<string>>(new Set())
+  // Sprint 13: Follow a Story state (replaces bookmarks).
+  const [storylineByUrl, setStorylineByUrl] = useState<Map<string, { id: string; title: string; confidence: string }>>(new Map())
+  const [followedIds, setFollowedIds] = useState<Set<string>>(new Set())
+  const [busyUrls, setBusyUrls] = useState<Set<string>>(new Set())
+  const [declinedUrls, setDeclinedUrls] = useState<Set<string>>(new Set())
+  const [accessToken, setAccessToken] = useState<string>('')
   const [isPersonalised, setIsPersonalised] = useState(false)
 
   const today = new Date().toLocaleDateString('en-IN', {
@@ -1018,18 +1030,24 @@ export default function BriefPage() {
 
       setBriefs(loadedBriefs)
 
-      const { data: bookmarkRows } = await supabase
-        .from('bookmarks')
-        .select('brief_date, edition, section, story_index')
-        .eq('user_id', user.id)
-        .eq('brief_date', todayISO)
-      if (bookmarkRows) {
-        setSavedKeys(new Set(
-          bookmarkRows.map((b: any) =>
-            `${b.brief_date}-${b.edition}-${b.section}-${b.story_index}`
-          )
-        ))
+      // Sprint 13: storyline mapping (story source_url → storyline) + follows.
+      const { data: { session } } = await supabase.auth.getSession()
+      if (session?.access_token) setAccessToken(session.access_token)
+
+      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+      const [{ data: lineRows }, { data: evRows }, { data: followRows }] = await Promise.all([
+        supabase.from('storylines').select('id, title, confidence, status').in('status', ['active', 'dormant']),
+        supabase.from('storyline_events').select('storyline_id, source_url').gte('date', sevenDaysAgo),
+        supabase.from('storyline_follows').select('storyline_id').eq('user_id', user.id),
+      ])
+      const lineById = new Map<string, { id: string; title: string; confidence: string }>()
+      for (const l of (lineRows || []) as any[]) lineById.set(l.id, { id: l.id, title: l.title, confidence: l.confidence })
+      const urlMap = new Map<string, { id: string; title: string; confidence: string }>()
+      for (const e of (evRows || []) as any[]) {
+        if (e.source_url && lineById.has(e.storyline_id)) urlMap.set(e.source_url, lineById.get(e.storyline_id)!)
       }
+      setStorylineByUrl(urlMap)
+      setFollowedIds(new Set(((followRows || []) as any[]).map(f => f.storyline_id)))
 
       setLoading(false)
     }
@@ -1037,53 +1055,104 @@ export default function BriefPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const toggleBookmark = async (section: string, index: number, story: any) => {
+  // Sprint 13: follow/unfollow. Stories already mapped to a storyline toggle
+  // directly via RLS. Unmapped stories ask /api/storylines to qualify +
+  // create + follow (one-time), then fire-and-forget the historical backfill
+  // — the page never blocks on it (async story-so-far by design).
+  const toggleFollow = async (story: any) => {
     if (!userId) {
       alert('Your session was not found — please log in again.')
       return
     }
-    const key = `${todayISO}-${activeEdition}-${section}-${index}`
-    const currentlySaved = savedKeys.has(key)
+    const url = story?.source_url || ''
+    const line = url ? storylineByUrl.get(url) : undefined
 
-    setSavedKeys(prev => {
-      const next = new Set(prev)
-      if (currentlySaved) next.delete(key); else next.add(key)
-      return next
-    })
-
-    const revert = () => {
-      setSavedKeys(prev => {
+    if (line) {
+      const isFollowing = followedIds.has(line.id)
+      setFollowedIds(prev => {
         const next = new Set(prev)
-        if (currentlySaved) next.add(key); else next.delete(key)
+        if (isFollowing) next.delete(line.id); else next.add(line.id)
         return next
       })
+      if (isFollowing) {
+        const { error } = await supabase
+          .from('storyline_follows').delete()
+          .eq('user_id', userId).eq('storyline_id', line.id)
+        if (error) {
+          setFollowedIds(prev => new Set(prev).add(line.id))
+          alert('Could not unfollow: ' + error.message)
+        }
+      } else {
+        const { error } = await supabase
+          .from('storyline_follows')
+          .insert({ user_id: userId, storyline_id: line.id })
+        if (error && !String(error.message || '').toLowerCase().includes('duplicate')) {
+          setFollowedIds(prev => { const next = new Set(prev); next.delete(line.id); return next })
+          alert('Could not follow: ' + error.message)
+        }
+      }
+      return
     }
 
-    // Bookmark schema is body-based. For micro/full stories, pick the best body to store.
-    const bodyForSave =
-      story?.body ||
-      [story?.facts, story?.background, story?.why_it_matters].filter(Boolean).join(' ') ||
-      story?.what_happened ||
-      ''
-
-    if (currentlySaved) {
-      const { error } = await supabase
-        .from('bookmarks').delete()
-        .eq('user_id', userId).eq('brief_date', todayISO)
-        .eq('edition', activeEdition).eq('section', section).eq('story_index', index)
-      if (error) { revert(); alert('Could not remove bookmark: ' + error.message) }
-    } else {
-      const { error } = await supabase
-        .from('bookmarks').insert({
-          user_id: userId, brief_date: todayISO, edition: activeEdition,
-          section, story_index: index,
-          headline: story.headline,
-          body: bodyForSave,
-          source: story.source,
-          source_url: story.source_url ?? null,
-        })
-      if (error) { revert(); alert('Could not save bookmark: ' + error.message) }
+    // No storyline for this story yet — qualify + create via the API.
+    if (!url || busyUrls.has(url)) return
+    setBusyUrls(prev => new Set(prev).add(url))
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`
+      const resp = await fetch('/api/storylines', {
+        method: 'POST', headers,
+        body: JSON.stringify({
+          action: 'create-and-follow',
+          story: {
+            headline: story?.headline || '',
+            summary: story?.facts || story?.what_happened || story?.body || '',
+            source: story?.source || '',
+            source_url: url,
+          },
+        }),
+      })
+      const data = await resp.json()
+      if (data?.ok && data?.qualified && data?.storyline?.id) {
+        const newLine = { id: data.storyline.id, title: data.storyline.title, confidence: data.storyline.confidence || 'normal' }
+        setStorylineByUrl(prev => { const next = new Map(prev); next.set(url, newLine); return next })
+        setFollowedIds(prev => new Set(prev).add(newLine.id))
+        // Fire-and-forget "how we got here" backfill; the morning pipeline
+        // self-heals any storyline left without a story_so_far.
+        void fetch('/api/storylines', {
+          method: 'POST', headers,
+          body: JSON.stringify({ action: 'backfill', storylineId: newLine.id }),
+        }).catch(() => {})
+      } else if (data?.ok && data?.qualified === false) {
+        setDeclinedUrls(prev => new Set(prev).add(url))
+        setTimeout(() => {
+          setDeclinedUrls(prev => { const next = new Set(prev); next.delete(url); return next })
+        }, 4000)
+      } else {
+        alert('Could not follow this story: ' + (data?.error || 'unknown error'))
+      }
+    } catch (e: any) {
+      alert('Could not follow this story: ' + (e?.message || e))
+    } finally {
+      setBusyUrls(prev => { const next = new Set(prev); next.delete(url); return next })
     }
+  }
+
+  const followApi: FollowApi = {
+    stateFor: (story: any) => {
+      const url = story?.source_url || ''
+      if (url && busyUrls.has(url)) return 'busy'
+      if (url && declinedUrls.has(url)) return 'declined'
+      const line = url ? storylineByUrl.get(url) : undefined
+      if (line && followedIds.has(line.id)) return 'following'
+      return 'none'
+    },
+    nudgeFor: (story: any) => {
+      const url = story?.source_url || ''
+      const line = url ? storylineByUrl.get(url) : undefined
+      return !!line && line.confidence === 'high' && !followedIds.has(line.id)
+    },
+    toggle: toggleFollow,
   }
 
   const activeBrief = briefs[activeEdition]
@@ -1146,18 +1215,12 @@ export default function BriefPage() {
           activeEdition === '5min' ? (
             <QuickRenderer
               brief={activeBrief}
-              activeEdition={activeEdition}
-              todayISO={todayISO}
-              savedKeys={savedKeys}
-              onToggle={toggleBookmark}
+              follow={followApi}
             />
           ) : activeEdition === '10min' ? (
             <DailyRenderer
               brief={activeBrief}
-              activeEdition={activeEdition}
-              todayISO={todayISO}
-              savedKeys={savedKeys}
-              onToggle={toggleBookmark}
+              follow={followApi}
               isPersonalised={isPersonalised}
             />
           ) : (
@@ -1180,7 +1243,7 @@ export default function BriefPage() {
       }}>
         {[
           { href: '/home',      label: 'Brief',   icon: '◆', active: true },
-          { href: '/bookmarks', label: 'Saved',   icon: '★', active: false },
+          { href: '/followed',  label: 'Stories', icon: '◉', active: false },
           { href: '/profile',   label: 'Profile', icon: '◑', active: false },
         ].map(({ href, label, icon, active }) => (
           <Link key={href} href={href} style={{

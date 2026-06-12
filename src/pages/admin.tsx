@@ -74,10 +74,21 @@ function editionLabel(e: string): string {
 // and content-type, and either parses JSON or throws a meaningful error
 // that includes a snippet of the response so the operator can see what
 // actually came back.
+// Sprint 13: every admin API call carries the logged-in user's supabase
+// session token. The API routes accept it once CRON_SECRET enforcement is on
+// (cron jobs use the secret; the admin browser uses the session token).
+async function authHeader(): Promise<Record<string, string>> {
+  try {
+    const { data: { session } } = await supabase.auth.getSession()
+    return session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}
+  } catch { return {} }
+}
+
 async function safeJsonFetch(url: string, init?: RequestInit): Promise<any> {
   let res: Response
   try {
-    res = await fetch(url, init)
+    const auth = await authHeader()
+    res = await fetch(url, { ...init, headers: { ...auth, ...((init?.headers as Record<string, string>) || {}) } })
   } catch (e: any) {
     throw new Error(`Network error reaching ${url}: ${e.message}`)
   }
@@ -237,7 +248,7 @@ type TailBriefRow = {
 // Sprint 12.5.1: master pipeline stage tracking. Each stage in the full
 // pipeline reports its status independently so the operator can see exactly
 // where things stand and where they failed.
-type StageId = 'fetch' | 'write' | 'personalise' | 'tail' | 'score'
+type StageId = 'fetch' | 'write' | 'personalise' | 'tail' | 'storylines' | 'score'
 type StageStatus = 'pending' | 'running' | 'ok' | 'failed' | 'skipped'
 type StageState = {
   id: StageId
@@ -253,7 +264,8 @@ const STAGE_DEFS: { id: StageId; label: string }[] = [
   { id: 'write',       label: '2 · Write 3 editions' },
   { id: 'personalise', label: '3 · Personalise per user' },
   { id: 'tail',        label: '4 · Tail-fetch (city/interest/industry)' },
-  { id: 'score',       label: '5 · Quality scoring' },
+  { id: 'storylines',  label: '5 · Storylines (tag/create/update)' },
+  { id: 'score',       label: '6 · Quality scoring' },
 ]
 
 function emptyStages(): StageState[] {
@@ -346,6 +358,12 @@ export default function AdminPage() {
 
   // Sprint 12.5.1 — master pipeline state
   const [masterRunning, setMasterRunning] = useState(false)
+  // Sprint 13: storylines panel state.
+  const [storylineRows, setStorylineRows] = useState<any[]>([])
+  const [storylineCounts, setStorylineCounts] = useState<{ events: Record<string, number>; follows: Record<string, number> }>({ events: {}, follows: {} })
+  const [storylineRunning, setStorylineRunning] = useState(false)
+  const [storylineResult, setStorylineResult] = useState<string>('')
+
   const [masterStages, setMasterStages] = useState<StageState[]>(emptyStages())
   const [masterFinishedAt, setMasterFinishedAt] = useState<number | null>(null)
 
@@ -369,6 +387,7 @@ export default function AdminPage() {
       loadHistory()
       loadPersonalisedStats()
       loadCostAndScoreData()
+      loadStorylines()
       loadTailBriefsStatus()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -581,6 +600,49 @@ export default function AdminPage() {
     setTailCounts(counts)
   }
 
+  // Sprint 13: load storylines + per-storyline event/follower counts.
+  async function loadStorylines() {
+    const { data: lines } = await supabase
+      .from('storylines')
+      .select('id, slug, title, story_so_far, confidence, status, origin, last_event_at')
+      .order('status', { ascending: true })
+      .order('last_event_at', { ascending: false })
+      .limit(60)
+    setStorylineRows(lines || [])
+    const ids = (lines || []).map((l: any) => l.id)
+    if (ids.length === 0) { setStorylineCounts({ events: {}, follows: {} }); return }
+    const [{ data: evs }, { data: fls }] = await Promise.all([
+      supabase.from('storyline_events').select('storyline_id').in('storyline_id', ids),
+      supabase.from('storyline_follows').select('storyline_id').in('storyline_id', ids),
+    ])
+    const events: Record<string, number> = {}
+    for (const e of (evs || []) as any[]) events[e.storyline_id] = (events[e.storyline_id] || 0) + 1
+    const follows: Record<string, number> = {}
+    for (const f of (fls || []) as any[]) follows[f.storyline_id] = (follows[f.storyline_id] || 0) + 1
+    setStorylineCounts({ events, follows })
+  }
+
+  async function runStorylines() {
+    setStorylineRunning(true)
+    setStorylineResult('Running storylines stage…')
+    try {
+      const data = await safeJsonFetch('/api/generate-brief', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'storylines' }),
+      })
+      if (data.ok) {
+        setStorylineResult(`Done. tagged=${data.tagged} created=${data.created} fallback=${data.fallback_hits}/${data.fallback_checked} regen=${data.regenerated} dormant=${data.dormant_marked} concluded=${data.concluded_marked}`)
+        await loadStorylines()
+      } else {
+        setStorylineResult('Failed: ' + (data.error || JSON.stringify(data)))
+      }
+    } catch (e: any) {
+      setStorylineResult('Error: ' + e.message)
+    }
+    setStorylineRunning(false)
+  }
+
   async function triggerScoring() {
     setScoring(true)
     setScoreResult('Scoring…')
@@ -608,7 +670,8 @@ export default function AdminPage() {
   //   2. write x3      POST /api/generate-brief {mode:'write', edition: <e>}   (parallel)
   //   3. personalise   POST /api/personalise-briefs
   //   4. tail-fetch    POST /api/generate-brief {mode:'tail-fetch'}
-  //   5. score         POST /api/generate-brief {mode:'score'}
+  //   5. storylines    POST /api/generate-brief {mode:'storylines'}   (Sprint 13)
+  //   6. score         POST /api/generate-brief {mode:'score'}
   //
   // Each stage updates masterStages so the operator can see progress live.
   // On stage failure the pipeline stops and downstream stages are marked
@@ -625,7 +688,7 @@ export default function AdminPage() {
     }
 
     const skipRemaining = (afterId: StageId) => {
-      const order: StageId[] = ['fetch', 'write', 'personalise', 'tail', 'score']
+      const order: StageId[] = ['fetch', 'write', 'personalise', 'tail', 'storylines', 'score']
       const idx = order.indexOf(afterId)
       for (let i = idx + 1; i < order.length; i++) {
         setStage(order[i], { status: 'skipped', detail: 'skipped — upstream stage failed' })
@@ -747,7 +810,30 @@ export default function AdminPage() {
       }
       await loadTailBriefsStatus()
 
-      // ─── Stage 5: score ──────────────────────────────────────────────
+      // ─── Stage 5: storylines (Sprint 13) ─────────────────────────────
+      setStage('storylines', { status: 'running', detail: 'tagging stories, creating storylines, fetching updates…', startedAt: Date.now() })
+      try {
+        const slData = await safeJsonFetch('/api/generate-brief', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: 'storylines' }),
+        })
+        if (slData?.ok) {
+          setStage('storylines', {
+            status: 'ok',
+            detail: `tagged=${slData.tagged ?? '?'} created=${slData.created ?? '?'} fallback=${slData.fallback_hits ?? '?'}/${slData.fallback_checked ?? '?'} regen=${slData.regenerated ?? '?'}`,
+            endedAt: Date.now(),
+          })
+        } else {
+          setStage('storylines', { status: 'failed', detail: slData?.error || 'storylines returned ok=false', endedAt: Date.now() })
+        }
+      } catch (e: any) {
+        // Storyline failure does NOT block scoring — continue.
+        setStage('storylines', { status: 'failed', detail: e.message, endedAt: Date.now() })
+      }
+      await loadStorylines()
+
+      // ─── Stage 6: score ──────────────────────────────────────────────
       setStage('score', { status: 'running', detail: 'scoring all 3 editions on 7-dim rubric…', startedAt: Date.now() })
       try {
         const scoreData = await safeJsonFetch('/api/generate-brief', {
@@ -1363,6 +1449,88 @@ export default function AdminPage() {
               maxHeight: '220px', overflowY: 'auto', whiteSpace: 'pre-wrap',
             }}>{tailFetchResult}</pre>
           )}
+        </div>
+
+        {/* ─── PANEL: Storylines (Sprint 13) ───────────────────────────── */}
+        <div style={{ marginTop: '36px', paddingTop: '28px', borderTop: `1px solid ${C.border}` }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '12px', marginBottom: '16px' }}>
+            <div style={{
+              fontFamily: "'DM Mono', monospace", fontSize: '11px',
+              letterSpacing: '2.5px', color: C.gold,
+            }}>STORYLINES · FOLLOW A STORY</div>
+            <button onClick={runStorylines} disabled={storylineRunning} style={{
+              background: 'none', border: `1px solid ${C.gold}`, color: C.gold,
+              padding: '10px 16px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
+              letterSpacing: '2px',
+              cursor: storylineRunning ? 'not-allowed' : 'pointer',
+              opacity: storylineRunning ? 0.5 : 1, minHeight: '44px',
+            }}>{storylineRunning ? 'RUNNING…' : 'RUN STORYLINES NOW'}</button>
+          </div>
+
+          {storylineResult && (
+            <div style={{
+              padding: '10px 14px', marginBottom: '16px',
+              border: `1px solid ${storylineResult.startsWith('Failed') || storylineResult.startsWith('Error') ? C.err : C.border}`,
+              background: C.surface2,
+              fontFamily: "'DM Mono', monospace", fontSize: '12px',
+              color: storylineResult.startsWith('Failed') || storylineResult.startsWith('Error') ? C.err : C.textSoft,
+            }}>{storylineResult}</div>
+          )}
+
+          {storylineRows.length === 0 ? (
+            <div style={{
+              padding: '18px', background: C.surface, border: `1px solid ${C.border}`,
+              fontFamily: "'DM Sans', sans-serif", fontSize: '14px', color: C.textMute,
+            }}>
+              No storylines yet. They appear after the first storylines run (auto-detected from the day's brief) or when a user follows a story.
+            </div>
+          ) : (
+            <div style={{ background: C.surface, border: `1px solid ${C.border}` }}>
+              {storylineRows.map((l: any, i: number) => {
+                const sc = l.status === 'active' ? C.ok : l.status === 'dormant' ? C.gold : C.textDim
+                return (
+                  <div key={l.id} style={{
+                    display: 'flex', alignItems: 'center', gap: '12px',
+                    padding: '12px 16px',
+                    borderBottom: i < storylineRows.length - 1 ? `1px solid ${C.border}` : 'none',
+                  }}>
+                    <span style={{
+                      fontFamily: "'DM Mono', monospace", fontSize: '9px',
+                      letterSpacing: '1px', color: sc, border: `1px solid ${sc}`,
+                      borderRadius: '2px', padding: '3px 7px', whiteSpace: 'nowrap',
+                    }}>{String(l.status || '').toUpperCase()}</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{
+                        fontFamily: "'DM Sans', sans-serif", fontSize: '14px',
+                        color: C.text, fontWeight: 600,
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}>
+                        {l.confidence === 'high' ? '📌 ' : ''}{l.title}
+                      </div>
+                      <div style={{
+                        fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                        letterSpacing: '1px', color: C.textMute, marginTop: '2px',
+                      }}>
+                        {l.origin === 'user' ? 'USER' : 'AUTO'} · last event {l.last_event_at || '—'} · {l.story_so_far ? 'so-far ✓' : 'so-far pending'}
+                      </div>
+                    </div>
+                    <div style={{
+                      fontFamily: "'DM Mono', monospace", fontSize: '11px',
+                      color: C.textSoft, whiteSpace: 'nowrap',
+                    }}>
+                      {storylineCounts.events[l.id] || 0} ev · {storylineCounts.follows[l.id] || 0} fl
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+          <div style={{
+            marginTop: '10px', fontFamily: "'DM Mono', monospace",
+            fontSize: '10px', letterSpacing: '1px', color: C.textDim,
+          }}>
+            CAPS · 25 ACTIVE · 5 NEW/DAY · 10 FALLBACK FETCHES/DAY · DORMANT AFTER 7 QUIET DAYS · CONCLUDED AFTER 30
+          </div>
         </div>
 
         {/* ─── PANEL 4: Quality Scores ─────────────────────────────────── */}

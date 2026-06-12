@@ -1,6 +1,7 @@
 // src/pages/home.tsx
 //
 // Sprint 9 — home screen with the lens flash card and three edition buttons.
+// Sprint 13 — bottom nav: Saved/bookmarks → Stories/followed.
 //
 // Changes from previous build:
 // - Name backfill: if profile.full_name is missing, fall back to the auth
@@ -340,7 +341,7 @@ export default function Home() {
       }}>
         {[
           { href: '/home',      label: 'Brief',   icon: '◆', active: true },
-          { href: '/bookmarks', label: 'Saved',   icon: '★', active: false },
+          { href: '/followed',  label: 'Stories', icon: '◉', active: false },
           { href: '/profile',   label: 'Profile', icon: '◑', active: false },
         ].map(({ href, label, icon, active }) => (
           <Link key={href} href={href} style={{
