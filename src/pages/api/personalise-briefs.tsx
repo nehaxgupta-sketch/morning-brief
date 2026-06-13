@@ -869,13 +869,29 @@ function buildDailyPersonalised(
   const dedupD = dedupPersonalSections(personal);
   if (dedupD.removed > 0) console.log(`[personalise:10min] dedup removed ${dedupD.removed} duplicate personal-section stories.`);
 
+  // Sprint 13.2: users with a Markets-mapped interest get the REAL markets
+  // section (summary + indices grid) instead of the flattened pseudo-story.
+  // The pseudo-story carried only the summary text, so the indices grid
+  // vanished from personalised Dailies. The pseudo-story is identifiable by
+  // its fixed headline written in makeInterestSection.
+  const hasMarketsInterest = ((profile?.interests || []) as string[])
+    .some((i) => STANDARD_INTEREST_MAP[i]?.section === 'markets');
+  const personalFinal = hasMarketsInterest
+    ? dedupD.sections.filter((sec) => !(
+        sec.id.startsWith('interest_') &&
+        sec.stories.length === 1 &&
+        (sec.stories[0] as any)?.headline === 'Markets today'
+      ))
+    : dedupD.sections;
+
   const content: any = {
     edition: '10min',
     date: shared.date,
     major_events: major,
     world,
     india,
-    personal_sections: dedupD.sections,
+    ...(hasMarketsInterest && shared.markets ? { markets: shared.markets } : {}),
+    personal_sections: personalFinal,
     closer,
     quick_personal_relevance,
   };

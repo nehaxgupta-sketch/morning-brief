@@ -245,6 +245,23 @@ type TailBriefRow = {
   reason: string | null
 }
 
+// Sprint 14 — Desks panel rows: catalog joined to today's edition, score,
+// and subscriber count at render time.
+type DeskAdminRow = {
+  slug: string
+  name: string
+  emoji: string
+  status: string
+  sort_order: number
+}
+
+type DeskEditionAdminRow = {
+  desk_slug: string
+  status: 'ready' | 'thin' | 'failed'
+  generated_at: string | null
+  content: any
+}
+
 // Sprint 12.5.1: master pipeline stage tracking. Each stage in the full
 // pipeline reports its status independently so the operator can see exactly
 // where things stand and where they failed.
@@ -364,6 +381,13 @@ export default function AdminPage() {
   const [storylineRunning, setStorylineRunning] = useState(false)
   const [storylineResult, setStorylineResult] = useState<string>('')
 
+  // Sprint 14: Desks panel state.
+  const [deskRows, setDeskRows] = useState<DeskAdminRow[]>([])
+  const [deskEditions, setDeskEditions] = useState<Record<string, DeskEditionAdminRow>>({})
+  const [deskSubCounts, setDeskSubCounts] = useState<Record<string, number>>({})
+  const [desksRunning, setDesksRunning] = useState(false)
+  const [desksResult, setDesksResult] = useState<string>('')
+
   const [masterStages, setMasterStages] = useState<StageState[]>(emptyStages())
   const [masterFinishedAt, setMasterFinishedAt] = useState<number | null>(null)
 
@@ -389,6 +413,7 @@ export default function AdminPage() {
       loadCostAndScoreData()
       loadStorylines()
       loadTailBriefsStatus()
+      loadDesksPanel()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authorized, selectedDate])
@@ -641,6 +666,64 @@ export default function AdminPage() {
       setStorylineResult('Error: ' + e.message)
     }
     setStorylineRunning(false)
+  }
+
+  // ─── Sprint 14: Desks panel loaders + runner ───────────────────────────
+
+  // Catalog + per-desk edition (selected date) + subscriber counts.
+  async function loadDesksPanel() {
+    const [{ data: desks }, { data: editions }, { data: subs }] = await Promise.all([
+      supabase.from('desks')
+        .select('slug, name, emoji, status, sort_order')
+        .order('sort_order', { ascending: true }),
+      supabase.from('desk_editions')
+        .select('desk_slug, status, generated_at, content')
+        .eq('date', selectedDate),
+      supabase.from('desk_subscriptions').select('desk_slug'),
+    ])
+    setDeskRows((desks || []) as DeskAdminRow[])
+    const edMap: Record<string, DeskEditionAdminRow> = {}
+    for (const e of (editions || []) as DeskEditionAdminRow[]) edMap[e.desk_slug] = e
+    setDeskEditions(edMap)
+    const counts: Record<string, number> = {}
+    for (const s of (subs || []) as any[]) counts[s.desk_slug] = (counts[s.desk_slug] || 0) + 1
+    setDeskSubCounts(counts)
+  }
+
+  function deskEditionStoryCount(content: any): number {
+    if (!content) return 0
+    return ['top_stories', 'india', 'global', 'features', 'quick_takes']
+      .reduce((n, k) => n + (Array.isArray(content[k]) ? content[k].length : 0), 0)
+  }
+
+  async function runDesksNow(slug?: string) {
+    setDesksRunning(true)
+    setDesksResult(slug
+      ? `Force-running ${slug} desk (2 search fetches + write + score, ~60-90s)…`
+      : 'Running desks (subscribed desks lacking today\'s edition, concurrency 2)…')
+    try {
+      const data = await safeJsonFetch('/api/generate-desks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(slug ? { desk: slug } : {}),
+      })
+      if (data.ok) {
+        const s = data.summary || {}
+        const processedNames = (data.processed || []).map((r: any) => `${r.slug}:${r.status}`).join(' ')
+        setDesksResult(
+          `Done in ${data.elapsed_s ?? '?'}s. ready=${s.ready ?? 0} thin=${s.thin ?? 0} failed=${s.failed ?? 0} deferred=${s.deferred ?? 0}`
+          + (processedNames ? ` · ${processedNames}` : '')
+          + (data.note ? ` · ${data.note}` : '')
+        )
+        await loadDesksPanel()
+        await loadCostAndScoreData()
+      } else {
+        setDesksResult('Failed: ' + (data.error || JSON.stringify(data)))
+      }
+    } catch (e: any) {
+      setDesksResult('Error: ' + e.message)
+    }
+    setDesksRunning(false)
   }
 
   async function triggerScoring() {
@@ -1533,6 +1616,127 @@ export default function AdminPage() {
           </div>
         </div>
 
+        {/* ─── PANEL: Desks (Sprint 14) ────────────────────────────────── */}
+        <div style={{ marginTop: '36px', paddingTop: '28px', borderTop: `1px solid ${C.border}` }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '12px', marginBottom: '16px' }}>
+            <div style={{
+              fontFamily: "'DM Mono', monospace", fontSize: '11px',
+              letterSpacing: '2.5px', color: C.gold,
+            }}>DESKS · {selectedDate}</div>
+            <button onClick={() => runDesksNow()} disabled={desksRunning} style={{
+              background: 'none', border: `1px solid ${C.gold}`, color: C.gold,
+              padding: '10px 16px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
+              letterSpacing: '2px',
+              cursor: desksRunning ? 'not-allowed' : 'pointer',
+              opacity: desksRunning ? 0.5 : 1, minHeight: '44px',
+            }}>{desksRunning ? 'RUNNING…' : 'RUN DESKS NOW'}</button>
+          </div>
+
+          {desksResult && (
+            <div style={{
+              padding: '10px 14px', marginBottom: '16px',
+              border: `1px solid ${desksResult.startsWith('Failed') || desksResult.startsWith('Error') ? C.err : C.border}`,
+              background: C.surface2,
+              fontFamily: "'DM Mono', monospace", fontSize: '12px',
+              color: desksResult.startsWith('Failed') || desksResult.startsWith('Error') ? C.err : C.textSoft,
+            }}>{desksResult}</div>
+          )}
+
+          {deskRows.length === 0 ? (
+            <div style={{
+              padding: '18px', background: C.surface, border: `1px solid ${C.border}`,
+              fontFamily: "'DM Sans', sans-serif", fontSize: '14px', color: C.textMute,
+            }}>
+              No desks in the catalog. Run sprint14_migration.sql in Supabase to create and seed the desks tables.
+            </div>
+          ) : (
+            <div style={{ background: C.surface, border: `1px solid ${C.border}` }}>
+              {deskRows.map((d, i) => {
+                const ed = deskEditions[d.slug]
+                const subs = deskSubCounts[d.slug] || 0
+                const score = scoresToday.find(s => s.edition === `desk:${d.slug}`)
+                const stateColor =
+                  !ed ? C.textDim :
+                  ed.status === 'ready' ? C.ok :
+                  ed.status === 'thin' ? C.warn : C.err
+                const stateLabel =
+                  !ed ? (subs === 0 ? 'NO SUBS · SKIPPED' : 'PENDING') :
+                  ed.status.toUpperCase()
+                const storyCount = ed ? deskEditionStoryCount(ed.content) : 0
+                return (
+                  <div key={d.slug} style={{
+                    display: 'flex', alignItems: 'center', gap: '12px',
+                    padding: '12px 16px',
+                    borderBottom: i < deskRows.length - 1 ? `1px solid ${C.border}` : 'none',
+                    flexWrap: 'wrap',
+                  }}>
+                    <span style={{
+                      fontFamily: "'DM Mono', monospace", fontSize: '9px',
+                      letterSpacing: '1px', color: stateColor, border: `1px solid ${stateColor}`,
+                      borderRadius: '2px', padding: '3px 7px', whiteSpace: 'nowrap',
+                    }}>{stateLabel}</span>
+                    <div style={{ flex: 1, minWidth: '140px' }}>
+                      <div style={{
+                        fontFamily: "'DM Sans', sans-serif", fontSize: '14px',
+                        color: d.status === 'active' ? C.text : C.textDim, fontWeight: 600,
+                      }}>
+                        {d.emoji} {d.name}{d.status !== 'active' ? ' (hidden)' : ''}
+                      </div>
+                      <div style={{
+                        fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                        letterSpacing: '1px', color: C.textMute, marginTop: '2px',
+                      }}>
+                        {subs} subscriber{subs === 1 ? '' : 's'}
+                        {ed ? ` · ${storyCount} stories` : ''}
+                        {ed?.generated_at ? ` · ${new Date(ed.generated_at).toLocaleTimeString('en-IN', { hour12: false })}` : ''}
+                      </div>
+                    </div>
+                    <div style={{
+                      fontFamily: "'DM Mono', monospace", fontSize: '12px',
+                      fontWeight: 700, whiteSpace: 'nowrap',
+                      color: totalColor(score?.total ?? null),
+                    }}>
+                      {score?.total != null ? `${score.total}/70` : '—'}
+                    </div>
+                    <button onClick={() => runDesksNow(d.slug)} disabled={desksRunning} style={{
+                      background: 'none', border: `1px solid ${C.border}`, color: C.textSoft,
+                      padding: '8px 12px', fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                      letterSpacing: '1.5px',
+                      cursor: desksRunning ? 'not-allowed' : 'pointer',
+                      opacity: desksRunning ? 0.5 : 1, minHeight: '40px',
+                    }}>RE-RUN</button>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+
+          {/* Desk scorer notes */}
+          {scoresToday.filter(s => s.edition.startsWith('desk:') && s.notes).length > 0 && (
+            <div style={{ marginTop: '16px' }}>
+              {scoresToday.filter(s => s.edition.startsWith('desk:') && s.notes).map(s => (
+                <div key={`desk-notes-${s.edition}`} style={{ marginBottom: '12px' }}>
+                  <div style={{
+                    fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                    letterSpacing: '1.5px', color: C.textMute, marginBottom: '4px',
+                  }}>{s.edition.slice('desk:'.length).toUpperCase()} DESK · SCORER NOTES</div>
+                  <div style={{
+                    fontFamily: "'DM Sans', sans-serif", fontSize: '13px',
+                    color: C.textSoft, lineHeight: 1.55, fontStyle: 'italic',
+                  }}>{s.notes}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{
+            marginTop: '10px', fontFamily: "'DM Mono', monospace",
+            fontSize: '10px', letterSpacing: '1px', color: C.textDim,
+          }}>
+            COST GATE · ONLY DESKS WITH ≥1 SUBSCRIBER RUN · ~$0.05/DESK/DAY · CRON HITS TWICE (06:20 + 06:27) — SECOND HIT SWEEPS DEFERRED DESKS
+          </div>
+        </div>
+
         {/* ─── PANEL 4: Quality Scores ─────────────────────────────────── */}
         <div style={{ marginTop: '36px', paddingTop: '28px', borderTop: `1px solid ${C.border}` }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '12px', marginBottom: '16px' }}>
@@ -1587,7 +1791,7 @@ export default function AdminPage() {
                 <div style={{ textAlign: 'center' }} title="Relevance">REL</div>
                 <div style={{ textAlign: 'right' }}>TOTAL</div>
               </div>
-              {scoresToday.map(s => (
+              {scoresToday.filter(s => !s.edition.startsWith('desk:')).map(s => (
                 <div key={s.edition} style={{
                   display: 'grid', gridTemplateColumns: '1.6fr repeat(7, 0.5fr) 0.7fr',
                   gap: '8px', padding: '14px',
@@ -1613,10 +1817,10 @@ export default function AdminPage() {
             </div>
           )}
 
-          {/* Scorer notes */}
-          {scoresToday.filter(s => s.notes).length > 0 && (
+          {/* Scorer notes (core editions only — desk notes live in the Desks panel) */}
+          {scoresToday.filter(s => !s.edition.startsWith('desk:') && s.notes).length > 0 && (
             <div style={{ marginTop: '16px' }}>
-              {scoresToday.filter(s => s.notes).map(s => (
+              {scoresToday.filter(s => !s.edition.startsWith('desk:') && s.notes).map(s => (
                 <div key={`notes-${s.edition}`} style={{ marginBottom: '12px' }}>
                   <div style={{
                     fontFamily: "'DM Mono', monospace", fontSize: '10px',

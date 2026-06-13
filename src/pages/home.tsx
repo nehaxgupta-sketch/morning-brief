@@ -2,6 +2,7 @@
 //
 // Sprint 9 — home screen with the lens flash card and three edition buttons.
 // Sprint 13 — bottom nav: Saved/bookmarks → Stories/followed.
+// Sprint 14 — bottom nav grows to 4 tabs: Brief · Stories · Desks · Profile.
 //
 // Changes from previous build:
 // - Name backfill: if profile.full_name is missing, fall back to the auth
@@ -332,7 +333,7 @@ export default function Home() {
         )}
       </div>
 
-      {/* Bottom nav */}
+      {/* Bottom nav — Sprint 14: 4 tabs */}
       <div style={{
         position: 'fixed', bottom: 0, left: 0, right: 0,
         background: C.surface, borderTop: `1px solid ${C.border}`,
@@ -342,6 +343,7 @@ export default function Home() {
         {[
           { href: '/home',      label: 'Brief',   icon: '◆', active: true },
           { href: '/followed',  label: 'Stories', icon: '◉', active: false },
+          { href: '/desks',     label: 'Desks',   icon: '▦', active: false },
           { href: '/profile',   label: 'Profile', icon: '◑', active: false },
         ].map(({ href, label, icon, active }) => (
           <Link key={href} href={href} style={{

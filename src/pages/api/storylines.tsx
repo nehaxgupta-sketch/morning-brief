@@ -164,23 +164,29 @@ Qualifying test (ALL must hold):
 - Recurring named entities: specific actors/institutions that will keep appearing in coverage
 One-off events (accidents, match results, product launches, weather) do NOT qualify even if big. An election RESULT is an event; an election SEASON is a storyline.
 
-Return ONLY JSON:
-{ "qualified": true|false, "title": "<crisp 3-7 word storyline title, empty if not qualified>", "confidence": "high"|"normal", "reason": "<one line>" }`;
+ALWAYS provide a crisp 3-7 word title naming the story topic — even when qualified=false (the user may still choose to track it).
 
-  let verdict: any;
+Return ONLY JSON:
+{ "qualified": true|false, "title": "<crisp 3-7 word title - ALWAYS provided>", "confidence": "high"|"normal", "reason": "<one line>" }`;
+
+  // Sprint 13.3 (locked with Neha): a user follow is NEVER refused - the
+  // choice is theirs. The qualify call now only supplies the storyline TITLE
+  // and confidence. Short-arc stories that get no updates go dormant in 7
+  // days and conclude in 30; the lifecycle is the gatekeeper, not this API.
+  // (Pipeline AUTO-creation keeps the strict qualifying test - the system
+  // never nudges users toward junk; it just does not overrule them.)
+  let verdict: any = null;
   try {
     verdict = await callMiniJson(qualifyPrompt, `qualify:${headline.slice(0, 40)}`);
   } catch (e: any) {
-    return res.status(500).json({ ok: false, error: `Qualification failed: ${e?.message || e}` });
+    console.warn(`[storylines-api] qualify call failed (continuing with headline as title): ${e?.message || e}`);
   }
 
-  if (!verdict?.qualified || typeof verdict?.title !== 'string' || verdict.title.trim().length < 4) {
-    return res.status(200).json({ ok: true, qualified: false, reason: verdict?.reason || 'Looks like a one-off event.' });
-  }
-
-  const title = verdict.title.trim().slice(0, 140);
+  const title = (typeof verdict?.title === 'string' && verdict.title.trim().length >= 4)
+    ? verdict.title.trim().slice(0, 140)
+    : headline.slice(0, 80);
   const slug = slugifyTitle(title);
-  const confidence = verdict.confidence === 'high' ? 'high' : 'normal';
+  const confidence = verdict?.qualified === true && verdict?.confidence === 'high' ? 'high' : 'normal';
 
   // 2. Reuse an existing storyline if the slug already exists (any status —
   //    a user re-following a concluded narrative revives it).
@@ -262,6 +268,8 @@ async function actionBackfill(storylineId: string, res: NextApiResponse) {
 
 Search the web for the KEY PRIOR MILESTONES of this storyline (the 2-4 moments a new reader needs to understand the arc), and write a neutral 3-4 sentence "story so far" in a calm, analytical register (Economist/FT), ending with why it matters for Indian readers where relevant.
 
+WRITING RULES for story_so_far: plain prose only — NO markdown links, NO URLs, NO citation brackets, NO "([domain](url))" references. Sources belong in the milestones array, never in the prose.
+
 SOURCE RULES: milestone source_urls must be direct article URLs from major reputable outlets (Reuters, AP, Bloomberg, FT, BBC, The Guardian, Al Jazeera, The Hindu, Indian Express, Hindustan Times, Mint, Business Standard, Economic Times, NDTV, Times of India).
 
 Return ONLY this JSON, no markdown:
@@ -275,7 +283,18 @@ Return ONLY this JSON, no markdown:
     return res.status(200).json({ ok: false, error: 'Backfill fetch failed — the morning pipeline will retry.' });
   }
 
-  const milestones = Array.isArray(bf.milestones) ? bf.milestones.slice(0, 4) : [];
+  // Dedup milestones within the batch: search results often report the same
+  // development via two publishers (e.g. BS + TOI on the same announcement).
+  const sigWords = (h: string) => new Set(String(h).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 3));
+  const overlap = (a: Set<string>, b: Set<string>) => { let n = 0; for (const w of Array.from(a)) if (b.has(w)) n++; return n; };
+  const seen: Set<string>[] = [];
+  const rawMilestones = Array.isArray(bf.milestones) ? bf.milestones.slice(0, 4) : [];
+  const milestones = rawMilestones.filter((ms: any) => {
+    const w = sigWords(ms?.headline || '');
+    if (seen.some(prev => overlap(prev, w) >= 3)) return false;
+    seen.push(w);
+    return true;
+  });
   for (const ms of milestones) {
     if (!ms?.headline) continue;
     await insertEvent(line.id, {

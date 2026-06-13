@@ -188,12 +188,19 @@ function SourceLine({ source, sourceUrl }: { source: string; sourceUrl?: string 
 // Sprint 13: bookmarks → Follow a Story. The pill has four states; the gold
 // "nudge" treatment appears only on high-confidence storylines (detection-
 // driven prompt to follow).
-type FollowState = 'none' | 'following' | 'busy' | 'declined'
+// Sprint 13.3 (locked with Neha): EVERY story shows the Follow pill — the
+// user chooses what to track. Short-arc stories simply go quiet and the
+// dormancy/conclusion lifecycle retires them. Set to false to show pills
+// only on pipeline-detected storylines.
+const SHOW_FOLLOW_ON_UNMAPPED = true
+
+type FollowState = 'hidden' | 'none' | 'following' | 'busy' | 'declined' 
 
 function FollowButton({ state, nudge, onToggle }: {
   state: FollowState; nudge: boolean; onToggle: () => void
 }) {
-  const isNudge = nudge && state === 'none'
+  if (state === 'hidden') return null
+  const isNudge = nudge && state === 'none' 
   const label =
     state === 'following' ? 'FOLLOWING ✓'
     : state === 'busy' ? 'FOLLOWING…'
@@ -913,6 +920,38 @@ function EditorialRenderer({
                     fontSize: '20px', fontWeight: 700, color: C.text,
                     marginBottom: '12px', lineHeight: 1.3,
                   }}>{brief.signature.one_chart.title}</div>
+                  {/* Sprint 13.2: actual bars when the writer supplied real
+                      numbers from today's stories; description-only otherwise. */}
+                  {Array.isArray((brief.signature.one_chart as any).data_points)
+                    && (brief.signature.one_chart as any).data_points.length >= 2 && (
+                    <div style={{ margin: '6px 0 16px' }}>
+                      {(() => {
+                        const pts = ((brief.signature.one_chart as any).data_points as { label: string; value: number }[])
+                          .filter(p => typeof p?.value === 'number' && isFinite(p.value))
+                        const maxV = Math.max(...pts.map(p => Math.abs(p.value)), 1)
+                        return pts.map((pt, i) => (
+                          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '8px' }}>
+                            <div style={{
+                              fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                              letterSpacing: '1px', color: C.textMute,
+                              width: '72px', textAlign: 'right', flexShrink: 0,
+                              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                            }}>{pt.label}</div>
+                            <div style={{ flex: 1, background: C.surface2, borderRadius: '2px', height: '18px', position: 'relative' }}>
+                              <div style={{
+                                width: `${Math.max(2, Math.round(Math.abs(pt.value) / maxV * 100))}%`,
+                                height: '100%', background: C.gold, opacity: 0.85, borderRadius: '2px',
+                              }} />
+                            </div>
+                            <div style={{
+                              fontFamily: "'DM Mono', monospace", fontSize: '11px',
+                              color: C.text, width: '64px', flexShrink: 0,
+                            }}>{pt.value}</div>
+                          </div>
+                        ))
+                      })()}
+                    </div>
+                  )}
                   <div style={{
                     fontFamily: "'DM Sans', sans-serif", fontSize: '15px',
                     color: C.textSoft, lineHeight: 1.65, fontStyle: 'italic',
@@ -1145,7 +1184,10 @@ export default function BriefPage() {
       if (url && declinedUrls.has(url)) return 'declined'
       const line = url ? storylineByUrl.get(url) : undefined
       if (line && followedIds.has(line.id)) return 'following'
-      return 'none'
+      if (line) return 'none'
+      // Unmapped story: the pipeline's qualifying test didn't make it part of
+      // any storyline today — hide the pill (Sprint 13.2 decision).
+      return SHOW_FOLLOW_ON_UNMAPPED ? 'none' : 'hidden'
     },
     nudgeFor: (story: any) => {
       const url = story?.source_url || ''
@@ -1242,8 +1284,10 @@ export default function BriefPage() {
         paddingBottom: 'env(safe-area-inset-bottom, 0px)',
       }}>
         {[
+          // Sprint 14: 4 tabs — Brief · Stories · Desks · Profile.
           { href: '/home',      label: 'Brief',   icon: '◆', active: true },
           { href: '/followed',  label: 'Stories', icon: '◉', active: false },
+          { href: '/desks',     label: 'Desks',   icon: '▦', active: false },
           { href: '/profile',   label: 'Profile', icon: '◑', active: false },
         ].map(({ href, label, icon, active }) => (
           <Link key={href} href={href} style={{

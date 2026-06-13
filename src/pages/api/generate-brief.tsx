@@ -241,7 +241,7 @@ interface BriefEditorial {
   watching_this_week: WatchItem[];
   signature: {
     one_number: { value: string; context: string };
-    one_chart: { title: string; description: string };
+    one_chart: { title: string; description: string; data_points?: { label: string; value: number }[] };
     one_quote?: { quote: string; attribution: string; context: string } | null;
   };
 }
@@ -357,6 +357,12 @@ const BriefEditorialSchema = z.object({
     one_chart: z.object({
       title: z.string().min(3),
       description: z.string().min(15),
+      // Sprint 13.2: real numeric points so the UI can draw an actual chart.
+      // Optional + permissive: missing points just means description-only.
+      data_points: z.array(z.object({
+        label: z.string().min(1),
+        value: z.number(),
+      })).max(8).optional(),
     }),
     one_quote: z.object({
       quote: z.string().min(10),
@@ -2411,7 +2417,7 @@ SECTIONS REQUIRED
 
 4. signature — three small editorial set pieces:
      - one_number: a single number that captures something important today. value is the number with units (e.g. "$87/barrel" or "12%"). context is 1-2 sentences on why this number matters today.
-     - one_chart: a chart description (we render it client-side if at all). title is the chart's subject (e.g. "Brent crude, last 30 days"). description is 1-2 sentences on what the chart would show and why it's the right cut today.
+     - one_chart: a REAL renderable chart. title is the chart's subject (e.g. "Brent crude, last 30 days"). description is 1-2 sentences on what the chart shows and why it's the right cut today. data_points: 3-6 {label, value} pairs using ONLY numbers that actually appear in today's stories (quarters, years, index levels, prices). If today's stories contain no usable numeric series, OMIT data_points entirely — never invent numbers.
      - one_quote: a quote from THIS WEEK worth sitting with. ONLY use a quote if it appears verbatim in the raw stories below or is a well-documented public statement by a named figure. Do NOT paraphrase a story and attribute it as a quote. Do NOT invent quotes. If no real quote is available, return null for this field — omission is correct. quote is the quote itself (≤ 40 words). attribution is who said it (name, role, publication). context is 1-2 sentences on why it lands.
 
 ═══════════════════════════════════════════════
@@ -2440,7 +2446,7 @@ OUTPUT SHAPE:
   ],
   "signature": {
     "one_number": { "value": "...", "context": "..." },
-    "one_chart": { "title": "...", "description": "..." },
+    "one_chart": { "title": "...", "description": "...", "data_points": [ { "label": "2024", "value": 36.8 }, { "label": "2025", "value": 37.4 } ] },
     "one_quote": { "quote": "...", "attribution": "...", "context": "..." }  // or null if no real quote available
   }
 }
@@ -2726,16 +2732,26 @@ type EditionOutcome = {
 
 const URL_LIVENESS_ENABLED = (process.env.URL_LIVENESS || 'on').toLowerCase() !== 'off';
 
+// Browser-like headers: many publishers return 404/403 to headerless
+// datacenter requests (bot mitigation). Without these, real articles can
+// test "dead" — see the 2026-06-12 midday incident (28/34 URLs dropped).
+const LIVENESS_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'en-IN,en;q=0.9',
+};
+
 async function isUrlDead(url: string): Promise<boolean> {
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 3500);
-    let resp = await fetch(url, { method: 'HEAD', redirect: 'follow', signal: ctrl.signal });
-    if (resp.status === 405 || resp.status === 501) {
-      // Publisher blocks HEAD — retry as a tiny ranged GET.
+    let resp = await fetch(url, { method: 'HEAD', redirect: 'follow', signal: ctrl.signal, headers: LIVENESS_HEADERS });
+    if (resp.status === 405 || resp.status === 501 || resp.status === 404 || resp.status === 410) {
+      // HEAD blocked OR HEAD says dead — confirm with a tiny ranged GET.
+      // Some servers 404 HEAD requests but serve GET fine.
       resp = await fetch(url, {
         method: 'GET', redirect: 'follow', signal: ctrl.signal,
-        headers: { Range: 'bytes=0-512' },
+        headers: { ...LIVENESS_HEADERS, Range: 'bytes=0-1024' },
       });
     }
     clearTimeout(timer);
@@ -2777,6 +2793,19 @@ async function dropDeadLinkStories(
     }),
   );
   if (dead.size === 0) return { content, dropped: 0 };
+
+  // CIRCUIT BREAKER (2026-06-12 incident): if more than 30% of a brief's
+  // URLs test dead, something systemic is wrong — either the checker is
+  // being bot-blocked, or the fetch fabricated most of its URLs. Dropping
+  // them would gut the brief (Daily went to 3 stories, score 63→38).
+  // Fail OPEN: drop nothing, log loudly, ship the brief intact. The log
+  // line reveals which failure mode it was so it can be fixed at the
+  // fetch-prompt level rather than by hollowing out the product.
+  const deadShare = dead.size / urlList.length;
+  if (deadShare > 0.3) {
+    console.error(`[liveness] CIRCUIT BREAKER: ${dead.size}/${urlList.length} URLs (${Math.round(deadShare * 100)}%) tested dead for ${edition} — refusing to drop anything. Either the checker is blocked or the fetch hallucinated URLs. Sample: ${Array.from(dead).slice(0, 3).join(' , ')}`);
+    return { content, dropped: 0 };
+  }
 
   let dropped = 0;
   const out: any = { ...content };
@@ -3941,13 +3970,19 @@ async function insertStorylineEvent(
       .limit(1);
     if (urlHit && urlHit.length > 0) return 'duplicate';
   }
-  // Layer 2 — semantic: same development worded differently, last 3 days.
-  const threeDaysAgo = getISTDate(-3);
-  const { data: recent } = await supabase
+  // Layer 2 — semantic: same development worded differently. For tag/fallback
+  // events: compare vs the last 3 days. For BACKFILL milestones: compare vs
+  // ALL events of the storyline — historical milestones are dated in the past
+  // and slipped through the 3-day window (2026-06-12: the NEET storyline got
+  // the same "computer-based from 2027" milestone twice, via BS and TOI).
+  let recentQuery = supabase
     .from('storyline_events')
     .select('headline')
-    .eq('storyline_id', line.id)
-    .gte('date', threeDaysAgo);
+    .eq('storyline_id', line.id);
+  if (ev.origin !== 'backfill') {
+    recentQuery = recentQuery.gte('date', getISTDate(-3));
+  }
+  const { data: recent } = await recentQuery;
   const evWords = significantWords(ev.headline);
   for (const r of recent || []) {
     if (semanticOverlap(evWords, significantWords(String(r.headline || ''))) >= SEMANTIC_DEDUP_THRESHOLD) {
@@ -3987,6 +4022,8 @@ function buildBackfillPrompt(title: string, seed: FlatStory, today: string): str
   return `You are building the "how we got here" context for a news storyline titled "${title}". The latest development: "${seed.headline} — ${seed.summary}". Today is ${today}.
 
 Search the web for the KEY PRIOR MILESTONES of this storyline (the 2-4 moments a new reader needs to understand the arc), and write a neutral 3-4 sentence "story so far" in a calm, analytical register (Economist/FT), ending with why it matters for Indian readers where relevant.
+
+WRITING RULES for story_so_far: plain prose only — NO markdown links, NO URLs, NO citation brackets, NO "([domain](url))" references. Sources belong in the milestones array, never in the prose.
 
 SOURCE RULES: milestone source_urls must be direct article URLs from major reputable outlets (Reuters, AP, Bloomberg, FT, BBC, The Guardian, Al Jazeera, The Hindu, Indian Express, Hindustan Times, Mint, Business Standard, Economic Times, NDTV, Times of India).
 
@@ -4039,7 +4076,7 @@ async function regenStorySoFar(line: StorylineRow): Promise<boolean> {
     .map((e: any) => `${e.date}: ${e.headline}${e.summary ? ' — ' + String(e.summary).slice(0, 160) : ''}`)
     .join('\n');
 
-  const prompt = `Rewrite the "story so far" for the ongoing news storyline "${line.title}" using its event timeline below. 4-5 sentences, calm analytical register (Economist/FT). Open with the essential framing, carry the arc through to the MOST RECENT development, and close with what to watch next or why it matters for Indian readers. No bullet lists, no headers.
+  const prompt = `Rewrite the "story so far" for the ongoing news storyline "${line.title}" using its event timeline below. 4-5 sentences, calm analytical register (Economist/FT). Open with the essential framing, carry the arc through to the MOST RECENT development, and close with what to watch next or why it matters for Indian readers. No bullet lists, no headers. Plain prose only — NO markdown links, NO URLs, NO citation brackets.
 
 TIMELINE (oldest → newest):
 ${timeline}

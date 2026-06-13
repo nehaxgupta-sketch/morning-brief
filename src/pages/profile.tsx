@@ -643,8 +643,10 @@ export default function ProfilePage() {
         paddingBottom: 'env(safe-area-inset-bottom, 0px)',
       }}>
         {[
+          // Sprint 14: 4 tabs — Brief · Stories · Desks · Profile.
           { href: '/home',      label: 'Brief',   icon: '◆', active: false },
           { href: '/followed',  label: 'Stories', icon: '◉', active: false },
+          { href: '/desks',     label: 'Desks',   icon: '▦', active: false },
           { href: '/profile',   label: 'Profile', icon: '◑', active: true  },
         ].map(({ href, label, icon, active }) => (
           <Link key={href} href={href} style={{
