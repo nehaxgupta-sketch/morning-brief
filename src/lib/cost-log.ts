@@ -7,6 +7,7 @@
 // Sprint 12 — added 'industry' tail phase + gpt-4o-mini-search-preview model.
 // Sprint 13 — added 'storyline' phase (Follow a Story: tagging, backfill,
 //             fallback fetch, story-so-far regen).
+// Sprint 14 — added 'desk' phase (Desks: two-pass fetch, writer, scorer).
 //
 // Fire-and-forget: writes are awaited but failure is logged-only, never
 // thrown. We don't want telemetry failures to take down the brief pipeline.
@@ -30,6 +31,8 @@ const supabase = createClient(
 // our volume (~20 tail fetches × 2-3 searches each = 40-60 searches/day) the
 // per-search fee is ≈ $0.0015/day, well within rounding error. Revisit if
 // tail fetch volume grows past a few hundred per day.
+// Sprint 14 note: desks add 2 search calls per subscribed desk per day
+// (≤12 calls at full catalog) — still within rounding error.
 const PRICING: Record<string, { input: number; output: number }> = {
   'gpt-5':                        { input: 1.25,  output: 10.00 },
   'gpt-4o':                       { input: 2.50,  output: 10.00 },
@@ -51,7 +54,8 @@ export type CostPhase =
   | 'city'       // per-city tail fetch (Sprint 12: now via gpt-4o-mini-search-preview)
   | 'interest'   // per-interest tail fetch (Sprint 12)
   | 'industry'   // per-industry tail fetch (Sprint 12)
-  | 'storyline'  // Follow a Story: tag/detect, backfill, fallback fetch, story-so-far regen (Sprint 13 — NEW)
+  | 'storyline'  // Follow a Story: tag/detect, backfill, fallback fetch, story-so-far regen (Sprint 13)
+  | 'desk'       // Desks: per-desk two-pass fetch + writer + scorer (Sprint 14 — NEW)
   | 'score';     // auto-scorer (rubric)
 
 export function calculateCostUSD(
