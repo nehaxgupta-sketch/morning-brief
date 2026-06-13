@@ -265,7 +265,7 @@ type DeskEditionAdminRow = {
 // Sprint 12.5.1: master pipeline stage tracking. Each stage in the full
 // pipeline reports its status independently so the operator can see exactly
 // where things stand and where they failed.
-type StageId = 'fetch' | 'write' | 'personalise' | 'tail' | 'storylines' | 'score'
+type StageId = 'fetch' | 'write' | 'personalise' | 'tail' | 'storylines' | 'score' | 'desks'
 type StageStatus = 'pending' | 'running' | 'ok' | 'failed' | 'skipped'
 type StageState = {
   id: StageId
@@ -283,6 +283,7 @@ const STAGE_DEFS: { id: StageId; label: string }[] = [
   { id: 'tail',        label: '4 · Tail-fetch (city/interest/industry)' },
   { id: 'storylines',  label: '5 · Storylines (tag/create/update)' },
   { id: 'score',       label: '6 · Quality scoring' },
+  { id: 'desks',       label: '7 · Desks (subscribed only)' },
 ]
 
 function emptyStages(): StageState[] {
@@ -771,7 +772,7 @@ export default function AdminPage() {
     }
 
     const skipRemaining = (afterId: StageId) => {
-      const order: StageId[] = ['fetch', 'write', 'personalise', 'tail', 'storylines', 'score']
+      const order: StageId[] = ['fetch', 'write', 'personalise', 'tail', 'storylines', 'score', 'desks']
       const idx = order.indexOf(afterId)
       for (let i = idx + 1; i < order.length; i++) {
         setStage(order[i], { status: 'skipped', detail: 'skipped — upstream stage failed' })
@@ -933,6 +934,36 @@ export default function AdminPage() {
         setStage('score', { status: 'failed', detail: e.message, endedAt: Date.now() })
       }
       await loadCostAndScoreData()
+
+      // ─── Stage 7: desks (Sprint 14) ──────────────────────────────────
+      // Independent of the brief — processes only subscribed desks lacking
+      // today's edition (concurrency 2, ~200s start budget). In production
+      // this also runs on its own cron twice (06:20 + 06:27); the button
+      // runs it once here for convenience.
+      setStage('desks', { status: 'running', detail: 'generating subscribed desks…', startedAt: Date.now() })
+      try {
+        const deskData = await safeJsonFetch('/api/generate-desks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        })
+        if (deskData?.ok) {
+          const s = deskData.summary || {}
+          const hasWork = (deskData.processed || []).length > 0 || (deskData.deferred || []).length > 0
+          setStage('desks', {
+            status: 'ok',
+            detail: hasWork
+              ? `ready=${s.ready ?? 0} thin=${s.thin ?? 0} failed=${s.failed ?? 0} deferred=${s.deferred ?? 0}`
+              : (deskData.note || 'no subscribed desks to generate'),
+            endedAt: Date.now(),
+          })
+        } else {
+          setStage('desks', { status: 'failed', detail: deskData?.error || 'desks returned ok=false', endedAt: Date.now() })
+        }
+      } catch (e: any) {
+        setStage('desks', { status: 'failed', detail: e.message, endedAt: Date.now() })
+      }
+      await loadDesksPanel()
     } finally {
       setMasterFinishedAt(Date.now())
       setMasterRunning(false)
@@ -1118,9 +1149,9 @@ export default function AdminPage() {
             color: C.textSoft, lineHeight: 1.55, marginBottom: '18px',
           }}>
             Runs the full morning sequence in order: fetch news → write 3 editions →
-            personalise per user → tail-fetch (city/interest/industry) → score on rubric.
-            Each stage is a separate Vercel invocation, so the 300s timeout applies
-            per stage, not to the whole pipeline.
+            personalise per user → tail-fetch (city/interest/industry) → score on rubric →
+            desks (subscribed only). Each stage is a separate Vercel invocation, so the
+            300s timeout applies per stage, not to the whole pipeline.
           </div>
 
           <button onClick={runFullPipeline} disabled={masterRunning} style={{
