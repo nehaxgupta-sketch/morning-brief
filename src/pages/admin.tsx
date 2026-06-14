@@ -825,7 +825,7 @@ export default function AdminPage() {
       const counts: Record<string, number> = {}
       const errors: Record<string, string> = {}
 
-      async function pull(table: string, useDate: boolean) {
+      const pull = async (table: string, useDate: boolean) => {
         let res = useDate && since
           ? await supabase.from(table).select('*').gte('date', since)
           : await supabase.from(table).select('*')
