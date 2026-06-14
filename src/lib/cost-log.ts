@@ -1,6 +1,6 @@
 // src/lib/cost-log.ts
 //
-// Sprint 11 — per-OpenAI-call cost capture. One row per API call goes to
+// Sprint 11 — per-API-call cost capture. One row per API call goes to
 // brief_costs in Supabase. Daily totals are computed at read time on the
 // /admin dashboard.
 //
@@ -8,12 +8,16 @@
 // Sprint 13 — added 'storyline' phase (Follow a Story: tagging, backfill,
 //             fallback fetch, story-so-far regen).
 // Sprint 14 — added 'desk' phase (Desks: two-pass fetch, writer, scorer).
+// Sprint 14.3 — added Perplexity Sonar pricing so sonar-pro (the main fetch
+//             model) is costed correctly instead of falling back to the
+//             gpt-4o-mini rate. Despite the name, logOpenAICost now covers
+//             every provider whose model appears in PRICING.
 //
 // Fire-and-forget: writes are awaited but failure is logged-only, never
 // thrown. We don't want telemetry failures to take down the brief pipeline.
 //
-// Pricing snapshot last reviewed June 2026. Update PRICING when OpenAI
-// prices change. Source: openai.com/pricing.
+// Pricing snapshot last reviewed June 2026. Update PRICING when prices
+// change. Sources: openai.com/api/pricing, docs.perplexity.ai/guides/pricing.
 
 import { createClient } from '@supabase/supabase-js';
 
@@ -24,6 +28,8 @@ const supabase = createClient(
 
 // USD per 1M tokens. Reasoning tokens are billed at the output rate.
 //
+// OpenAI
+// ------
 // Sprint 12 note: gpt-4o-mini-search-preview has the same token rates as
 // gpt-4o-mini ($0.15 in / $0.60 out per 1M). It also charges a per-search
 // fee (~$25 per 1K searches per OpenAI's pricing page). The per-search fee
@@ -33,11 +39,27 @@ const supabase = createClient(
 // tail fetch volume grows past a few hundred per day.
 // Sprint 14 note: desks add 2 search calls per subscribed desk per day
 // (≤12 calls at full catalog) — still within rounding error.
+//
+// Perplexity (Sprint 14.3)
+// ------------------------
+// sonar-pro is the main-fetch model. Token rates below are per 1M and were
+// verified June 2026 ($3 in / $15 out). Like OpenAI's search models, Sonar
+// also charges a per-request search fee (~$5–$14 per 1K requests for sonar-pro,
+// scaling with search-context size). That per-request fee is NOT captured here
+// for the same reason as OpenAI's — at our volume (a handful of fetch calls a
+// day) it's ≈ $0.01–0.05/day. Revisit if Perplexity call volume grows.
+// If you adopt other Sonar tiers, add them here after checking the current
+// rate: e.g. sonar-reasoning-pro (~$2 in / $8 out) and sonar-reasoning
+// (~$1 in / $5 out) — verify before trusting these.
 const PRICING: Record<string, { input: number; output: number }> = {
+  // OpenAI
   'gpt-5':                        { input: 1.25,  output: 10.00 },
   'gpt-4o':                       { input: 2.50,  output: 10.00 },
   'gpt-4o-mini':                  { input: 0.15,  output: 0.60 },
   'gpt-4o-mini-search-preview':   { input: 0.15,  output: 0.60 },
+  // Perplexity (Sonar)
+  'sonar-pro':                    { input: 3.00,  output: 15.00 },
+  'sonar':                        { input: 1.00,  output: 1.00 },
 };
 
 function getISTDate(): string {
@@ -46,7 +68,7 @@ function getISTDate(): string {
 }
 
 export type CostPhase =
-  | 'fetch'      // gpt-5 web_search fetch (base brief)
+  | 'fetch'      // main web_search fetch (base brief)
   | 'lens'       // standalone lens fallback
   | '5min'       // The Brief writer
   | '10min'      // The Daily writer
@@ -55,7 +77,7 @@ export type CostPhase =
   | 'interest'   // per-interest tail fetch (Sprint 12)
   | 'industry'   // per-industry tail fetch (Sprint 12)
   | 'storyline'  // Follow a Story: tag/detect, backfill, fallback fetch, story-so-far regen (Sprint 13)
-  | 'desk'       // Desks: per-desk two-pass fetch + writer + scorer (Sprint 14 — NEW)
+  | 'desk'       // Desks: per-desk two-pass fetch + writer + scorer (Sprint 14)
   | 'score';     // auto-scorer (rubric)
 
 export function calculateCostUSD(
@@ -111,7 +133,9 @@ export async function logOpenAICost(args: {
 // ─── Extractors ─────────────────────────────────────────────────────────────
 //
 // OpenAI's two endpoints return token counts in slightly different shapes.
-// These helpers normalise them.
+// These helpers normalise them. Perplexity's response mirrors OpenAI's
+// chat-completion shape (usage.prompt_tokens / usage.completion_tokens), so
+// extractUsageFromChatCompletion works for sonar models too.
 
 export function extractUsageFromChatCompletion(data: any): {
   inputTokens: number;

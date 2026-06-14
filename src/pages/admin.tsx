@@ -346,6 +346,42 @@ function fetchSourceLabel(s: string | null | undefined): { label: string; colour
   return { label: s.toUpperCase(), colour: C.textSoft }
 }
 
+// ─── Provider attribution ────────────────────────────────────────────────
+// Maps a logged model string to the company that bills for it, so the cost
+// panel can show OpenAI vs Perplexity spend separately. Matched by prefix
+// because the family is in the name ('gpt-4o-mini-search-preview', 'sonar-pro',
+// 'claude-3-5-sonnet').
+type Provider = 'OpenAI' | 'Perplexity' | 'Anthropic' | 'Other'
+function providerOf(model: string): Provider {
+  const m = (model || '').toLowerCase()
+  if (m.startsWith('sonar') || m.startsWith('pplx') || m.includes('perplexity')) return 'Perplexity'
+  if (m.startsWith('claude') || m.includes('anthropic')) return 'Anthropic'
+  if (m.startsWith('gpt') || m.startsWith('o1') || m.startsWith('o3') || m.startsWith('o4') ||
+      m.startsWith('text-embedding') || m.startsWith('davinci') || m.includes('openai')) return 'OpenAI'
+  return 'Other'
+}
+const PROVIDER_COLOUR: Record<Provider, string> = {
+  OpenAI: '#5FB87E', Perplexity: '#7FA8D8', Anthropic: C.gold, Other: C.textMute,
+}
+
+// One in-memory line of the admin's run output, captured from console.
+type LogEntry = { ts: string; level: 'log' | 'info' | 'warn' | 'error'; msg: string }
+
+// ─── Download-as-JSON helper ─────────────────────────────────────────────
+// Builds a JSON blob in the browser and triggers a download. Used by both the
+// data export and the run-log export, so neither needs a server endpoint.
+function downloadJSON(filename: string, payload: any) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+}
+
 export default function AdminPage() {
   const [authorized, setAuthorized] = useState<boolean | null>(null)
   const [email, setEmail] = useState<string>('')
@@ -394,6 +430,11 @@ export default function AdminPage() {
   const [exporting, setExporting] = useState(false)
   const [exportResult, setExportResult] = useState<string>('')
 
+  // Sprint 14.3: capture the admin page's own run output so it can be
+  // downloaded as JSON without opening the browser console.
+  const [adminLog, setAdminLog] = useState<LogEntry[]>([])
+  const [showLog, setShowLog] = useState(false)
+
   const [masterStages, setMasterStages] = useState<StageState[]>(emptyStages())
   const [masterFinishedAt, setMasterFinishedAt] = useState<number | null>(null)
 
@@ -409,6 +450,36 @@ export default function AdminPage() {
       else setAuthorized(false)
     }
     checkAuth()
+  }, [])
+
+  // Sprint 14.3: mirror everything the page logs into an in-memory buffer so
+  // the operator can download the full run output as JSON. Console still works
+  // as before; we just tee each call into state. Capped to the last 800 lines.
+  useEffect(() => {
+    const orig = { log: console.log, info: console.info, warn: console.warn, error: console.error }
+    const tee = (level: LogEntry['level'], passthrough: (...a: any[]) => void) => (...args: any[]) => {
+      try {
+        const msg = args.map(a => {
+          if (typeof a === 'string') return a
+          try { return JSON.stringify(a) } catch { return String(a) }
+        }).join(' ')
+        const ts = new Date(Date.now() + 5.5 * 60 * 60 * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' IST'
+        setAdminLog(prev => {
+          const next = prev.length >= 800 ? prev.slice(prev.length - 799) : prev.slice()
+          next.push({ ts, level, msg })
+          return next
+        })
+      } catch { /* never let logging break the page */ }
+      passthrough(...args)
+    }
+    console.log = tee('log', orig.log)
+    console.info = tee('info', orig.info)
+    console.warn = tee('warn', orig.warn)
+    console.error = tee('error', orig.error)
+    return () => {
+      console.log = orig.log; console.info = orig.info
+      console.warn = orig.warn; console.error = orig.error
+    }
   }, [])
 
   useEffect(() => {
@@ -732,37 +803,80 @@ export default function AdminPage() {
     setDesksRunning(false)
   }
 
-  // ─── Sprint 14: one-click export ───────────────────────────────────────
-  // Pulls every relevant table in one request and downloads it as a single
-  // JSON file, so the whole dataset can be shared back in one step instead of
-  // exporting each Supabase table by hand. days=0 means all-time.
+  // ─── Sprint 14.3: one-click export (client-side) ──────────────────────
+  // Pulls every relevant table straight from Supabase in the browser — the
+  // same client the panels already read from — and downloads one JSON file.
+  // No /api/admin-export route needed, so there's nothing server-side to
+  // deploy or 404. days=0 exports everything; otherwise the last N days for
+  // tables that carry a `date` column. Small reference tables export whole.
   async function exportAllData(days: number) {
     setExporting(true)
-    setExportResult('Gathering data…')
+    setExportResult('Gathering data from Supabase…')
     try {
-      const qs = days === 0 ? 'days=all' : `days=${days}`
-      const data = await safeJsonFetch(`/api/admin-export?${qs}`, { method: 'GET' })
-      if (!data?.ok) {
-        setExportResult('Failed: ' + (data?.error || 'export returned ok=false'))
-        setExporting(false)
-        return
+      const since = days === 0 ? null : getISTDate(-days)
+      const datedTables = [
+        'briefs', 'personalised_briefs', 'tail_briefs', 'tail_used_urls',
+        'brief_costs', 'brief_scores', 'storyline_scores', 'storyline_events',
+        'desk_editions',
+      ]
+      const fullTables = ['desks', 'desk_subscriptions', 'storylines', 'storyline_follows']
+
+      const data: Record<string, any[]> = {}
+      const counts: Record<string, number> = {}
+      const errors: Record<string, string> = {}
+
+      async function pull(table: string, useDate: boolean) {
+        let res = useDate && since
+          ? await supabase.from(table).select('*').gte('date', since)
+          : await supabase.from(table).select('*')
+        // If the window filter hit a table with no `date` column, retry plain
+        // so it still exports rather than silently dropping out.
+        if (res.error && useDate) {
+          res = await supabase.from(table).select('*')
+        }
+        if (res.error) { errors[table] = res.error.message; return }
+        data[table] = res.data || []
+        counts[table] = (res.data || []).length
       }
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
+
+      await Promise.all([
+        ...datedTables.map(t => pull(t, true)),
+        ...fullTables.map(t => pull(t, false)),
+      ])
+
+      const payload = {
+        ok: true,
+        exported_at: new Date().toISOString(),
+        window: days === 0 ? 'all-time' : `last ${days} days (since ${since})`,
+        counts,
+        errors: Object.keys(errors).length ? errors : undefined,
+        data,
+      }
       const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
-      a.download = `morning-brief-export-${stamp}.json`
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(url)
-      const totalRows = Object.values(data.counts || {}).reduce((n: number, v: any) => n + (Number(v) || 0), 0)
-      setExportResult(`Downloaded · ${totalRows} rows · ${data.window}`)
+      downloadJSON(`morning-brief-export-${stamp}.json`, payload)
+
+      const totalRows = Object.values(counts).reduce((n, v) => n + v, 0)
+      const skipped = Object.keys(errors)
+      const note = skipped.length ? ` · skipped ${skipped.join(', ')}` : ''
+      setExportResult(`Downloaded · ${totalRows} rows · ${payload.window}${note}`)
+      console.info(`[admin] Data export: ${totalRows} rows across ${Object.keys(counts).length} tables (${payload.window})${note}`)
     } catch (e: any) {
-      setExportResult('Failed: ' + (e?.message || e))
+      setExportResult('Could not export: ' + (e?.message || String(e)))
+      console.error('[admin] Data export failed:', e?.message || e)
     }
     setExporting(false)
+  }
+
+  // Download the captured admin run output as JSON.
+  function downloadAdminLog() {
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
+    downloadJSON(`morning-brief-admin-log-${stamp}.json`, {
+      exported_at: new Date().toISOString(),
+      date_selected: selectedDate,
+      line_count: adminLog.length,
+      entries: adminLog,
+    })
+    setExportResult(`Log downloaded · ${adminLog.length} line${adminLog.length === 1 ? '' : 's'}`)
   }
 
   async function triggerScoring() {
@@ -1185,13 +1299,70 @@ export default function AdminPage() {
             letterSpacing: '1.5px', cursor: exporting ? 'not-allowed' : 'pointer',
             opacity: exporting ? 0.5 : 1, minHeight: '44px',
           }}>ALL-TIME</button>
+          <button onClick={downloadAdminLog} disabled={adminLog.length === 0} style={{
+            background: 'none', border: `1px solid ${C.border}`, color: C.textSoft,
+            padding: '10px 14px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
+            letterSpacing: '1.5px', cursor: adminLog.length === 0 ? 'not-allowed' : 'pointer',
+            opacity: adminLog.length === 0 ? 0.4 : 1, minHeight: '44px',
+          }}>↓ DOWNLOAD LOG</button>
+          <button onClick={() => setShowLog(v => !v)} style={{
+            background: 'none', border: `1px solid ${C.border}`, color: C.textMute,
+            padding: '10px 14px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
+            letterSpacing: '1.5px', cursor: 'pointer', minHeight: '44px',
+          }}>{showLog ? 'HIDE LOG' : `VIEW LOG (${adminLog.length})`}</button>
           {exportResult && (
             <span style={{
               fontFamily: "'DM Mono', monospace", fontSize: '11px',
-              color: exportResult.startsWith('Failed') ? C.err : C.textMute,
+              color: /^(Failed|Could not)/.test(exportResult) ? C.err : C.textMute,
             }}>{exportResult}</span>
           )}
         </div>
+
+        {/* ─── Sprint 14.3: admin run log (toggle) ──────────────────────── */}
+        {/* Live mirror of everything the page logs — pipeline stages, fetch
+            warnings, scoring, export results. Download button writes the same
+            entries to a JSON file. */}
+        {showLog && (
+          <div style={{ marginBottom: '28px', border: `1px solid ${C.border}`, background: C.surfaceDeep }}>
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              padding: '12px 16px', borderBottom: `1px solid ${C.border}`,
+              fontFamily: "'DM Mono', monospace", fontSize: '10px', letterSpacing: '2px', color: C.textMute,
+            }}>
+              <span>ADMIN RUN LOG · {adminLog.length} LINE{adminLog.length === 1 ? '' : 'S'}</span>
+              <button onClick={() => setAdminLog([])} style={{
+                background: 'none', border: `1px solid ${C.border}`, color: C.textMute,
+                padding: '4px 10px', fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                letterSpacing: '1.5px', cursor: 'pointer',
+              }}>CLEAR</button>
+            </div>
+            <div style={{ maxHeight: '300px', overflowY: 'auto', padding: '8px 0' }}>
+              {adminLog.length === 0 && (
+                <div style={{
+                  padding: '14px 16px', color: C.textDim, fontStyle: 'italic',
+                  fontFamily: "'DM Sans', sans-serif", fontSize: '13px',
+                }}>Nothing logged yet. Run a stage or the full pipeline and it'll appear here.</div>
+              )}
+              {adminLog.slice().reverse().map((e, i) => (
+                <div key={i} style={{
+                  display: 'grid', gridTemplateColumns: '150px 56px 1fr', gap: '10px',
+                  padding: '4px 16px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
+                  alignItems: 'start', lineHeight: 1.45,
+                }}>
+                  <span style={{ color: C.textDim }}>{e.ts.slice(11)}</span>
+                  <span style={{
+                    color: e.level === 'error' ? C.err : e.level === 'warn' ? C.warn : C.textMute,
+                    letterSpacing: '1px',
+                  }}>{e.level.toUpperCase()}</span>
+                  <span style={{
+                    color: e.level === 'error' ? C.err : e.level === 'warn' ? C.warn : C.textSoft,
+                    wordBreak: 'break-word',
+                  }}>{e.msg}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* ─── Sprint 12.5.1: MASTER PIPELINE PANEL ─────────────────────── */}
         {/* Sits between date picker and editions grid so it's the first
@@ -2102,6 +2273,75 @@ export default function AdminPage() {
             </div>
           )}
 
+          {/* By provider — OpenAI vs Perplexity vs Anthropic spend, today
+              and across the 8-day window. Lets Neha see which vendor the
+              money is going to without cross-referencing model names. */}
+          {(costsToday.length > 0 || costs7d.length > 0) && (() => {
+            const tally = (rows: CostRow[]) => {
+              const m = new Map<Provider, { calls: number; usd: number }>()
+              for (const r of rows) {
+                const p = providerOf(r.model)
+                const cur = m.get(p) || { calls: 0, usd: 0 }
+                cur.calls += 1
+                cur.usd += Number(r.usd_cost)
+                m.set(p, cur)
+              }
+              return m
+            }
+            const today = tally(costsToday)
+            const week = tally(costs7d)
+            const order: Provider[] = (['OpenAI', 'Perplexity', 'Anthropic', 'Other'] as Provider[])
+              .filter(p => today.has(p) || week.has(p))
+            return (
+              <div style={{ marginTop: '24px' }}>
+                <div style={{
+                  fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                  letterSpacing: '2px', color: C.textMute, marginBottom: '12px',
+                }}>BY PROVIDER · today / 8-day</div>
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: `repeat(${Math.max(1, order.length)}, minmax(0, 1fr))`,
+                  gap: '10px',
+                }}>
+                  {order.map(p => {
+                    const t = today.get(p) || { calls: 0, usd: 0 }
+                    const w = week.get(p) || { calls: 0, usd: 0 }
+                    return (
+                      <div key={p} style={{
+                        border: `1px solid ${C.border}`, borderTop: `2px solid ${PROVIDER_COLOUR[p]}`,
+                        padding: '14px', background: C.surface2,
+                      }}>
+                        <div style={{
+                          fontFamily: "'DM Mono', monospace", fontSize: '11px',
+                          letterSpacing: '1.5px', color: PROVIDER_COLOUR[p], marginBottom: '6px',
+                        }}>{p.toUpperCase()}</div>
+                        <div style={{
+                          fontFamily: "'Playfair Display', serif", fontSize: '20px',
+                          fontWeight: 700, color: C.text,
+                        }}>{formatUSD(t.usd)}</div>
+                        <div style={{
+                          fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                          color: C.textMute, marginTop: '4px',
+                        }}>{t.calls} call{t.calls === 1 ? '' : 's'} today</div>
+                        <div style={{
+                          fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                          color: C.textDim, marginTop: '6px',
+                        }}>8-day {formatUSD(w.usd)} · {w.calls} call{w.calls === 1 ? '' : 's'}</div>
+                      </div>
+                    )
+                  })}
+                </div>
+                <div style={{
+                  fontFamily: "'DM Mono', monospace", fontSize: '10px', color: C.textDim,
+                  marginTop: '8px', lineHeight: 1.5,
+                }}>
+                  Figures are what the app logged per call. Perplexity reads low until the
+                  {' '}sonar-pro rate is set in cost-log.ts — right now it falls back to the gpt-4o-mini rate.
+                </div>
+              </div>
+            )
+          })()}
+
           {/* 8-day cost trend */}
           {(() => {
             const byDay = new Map<string, number>()
@@ -2121,15 +2361,22 @@ export default function AdminPage() {
                 }}>8-DAY TREND · TOTAL {formatUSD(weekTotal)}</div>
                 <div style={{ display: 'flex', alignItems: 'flex-end', gap: '6px', height: '70px' }}>
                   {days.map(d => {
-                    const heightPct = (d.usd / maxDay) * 100
+                    // Fixed-pixel bar height against a known track height (54px),
+                    // so the bar renders instead of collapsing — a percentage
+                    // height needs a parent with a resolved height, which the
+                    // per-day column doesn't have.
+                    const barPx = d.usd > 0 ? Math.max(3, Math.round((d.usd / maxDay) * 54)) : 2
                     const isSelected = d.date === selectedDate
                     return (
-                      <div key={d.date} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
+                      <div key={d.date} style={{
+                        flex: 1, height: '100%',
+                        display: 'flex', flexDirection: 'column',
+                        alignItems: 'center', justifyContent: 'flex-end', gap: '4px',
+                      }}>
                         <div style={{
                           width: '100%',
-                          height: `${Math.max(2, heightPct)}%`,
-                          background: isSelected ? C.gold : C.borderHi,
-                          minHeight: '2px',
+                          height: `${barPx}px`,
+                          background: isSelected ? C.gold : (d.usd > 0 ? C.gold + '66' : C.border),
                         }} title={`${d.date}: ${formatUSD(d.usd)}`} />
                         <div style={{
                           fontFamily: "'DM Mono', monospace", fontSize: '9px',
