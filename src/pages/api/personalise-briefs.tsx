@@ -115,7 +115,7 @@ const STANDARD_INTEREST_MAP: Record<string, { section: string; label: string; ic
   'Music':                { section: 'culture',        label: 'Music',                icon: '🎵' },
   'Books & Literature':   { section: 'culture',        label: 'Books',                icon: '📚' },
   'World Affairs':        { section: 'world',          label: 'World',                icon: '🌍' },
-  'Indian Politics':      { section: 'india',          label: 'India',                icon: '🇮🇳' },
+  'Indian Politics':      { section: 'politics',       label: 'Politics & Policy',    icon: '🏛️' },
 };
 
 // Default pre-checked interests for new personalised users.
@@ -1087,6 +1087,14 @@ function makeInterestSection(
       }
       // Limit
       stories = stories.slice(0, storiesPerSection);
+      // Sprint 14.2: append dedicated markets/finance ARTICLES (markets_news)
+      // after the snapshot, so Markets-interested readers get real stories,
+      // not just the index summary. Keeps the widget; adds depth.
+      const mNews = Array.isArray(shared.markets_news) ? shared.markets_news : [];
+      if (mNews.length > 0) {
+        const extra = (shape === 'micro' ? mNews.map(fullToMicro) : mNews).slice(0, storiesPerSection);
+        stories = stories.concat(extra);
+      }
     } else if (sec === 'sport' || sec === 'culture') {
       // Sport/culture are arrays of 2-4 stories as of Sprint 9.
       const arr = Array.isArray(shared[sec]) ? shared[sec] : [];

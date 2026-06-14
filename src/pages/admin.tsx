@@ -265,7 +265,7 @@ type DeskEditionAdminRow = {
 // Sprint 12.5.1: master pipeline stage tracking. Each stage in the full
 // pipeline reports its status independently so the operator can see exactly
 // where things stand and where they failed.
-type StageId = 'fetch' | 'write' | 'personalise' | 'tail' | 'storylines' | 'score' | 'desks'
+type StageId = 'fetch' | 'write' | 'personalise' | 'tail' | 'storylines' | 'score' | 'desks' | 'extras'
 type StageStatus = 'pending' | 'running' | 'ok' | 'failed' | 'skipped'
 type StageState = {
   id: StageId
@@ -284,6 +284,7 @@ const STAGE_DEFS: { id: StageId; label: string }[] = [
   { id: 'storylines',  label: '5 · Storylines (tag/create/update)' },
   { id: 'score',       label: '6 · Quality scoring' },
   { id: 'desks',       label: '7 · Desks (subscribed only)' },
+  { id: 'extras',      label: '8 · Score personalised + storylines' },
 ]
 
 function emptyStages(): StageState[] {
@@ -388,6 +389,10 @@ export default function AdminPage() {
   const [deskSubCounts, setDeskSubCounts] = useState<Record<string, number>>({})
   const [desksRunning, setDesksRunning] = useState(false)
   const [desksResult, setDesksResult] = useState<string>('')
+
+  // Sprint 14: one-click data export (for sharing back during testing).
+  const [exporting, setExporting] = useState(false)
+  const [exportResult, setExportResult] = useState<string>('')
 
   const [masterStages, setMasterStages] = useState<StageState[]>(emptyStages())
   const [masterFinishedAt, setMasterFinishedAt] = useState<number | null>(null)
@@ -727,6 +732,39 @@ export default function AdminPage() {
     setDesksRunning(false)
   }
 
+  // ─── Sprint 14: one-click export ───────────────────────────────────────
+  // Pulls every relevant table in one request and downloads it as a single
+  // JSON file, so the whole dataset can be shared back in one step instead of
+  // exporting each Supabase table by hand. days=0 means all-time.
+  async function exportAllData(days: number) {
+    setExporting(true)
+    setExportResult('Gathering data…')
+    try {
+      const qs = days === 0 ? 'days=all' : `days=${days}`
+      const data = await safeJsonFetch(`/api/admin-export?${qs}`, { method: 'GET' })
+      if (!data?.ok) {
+        setExportResult('Failed: ' + (data?.error || 'export returned ok=false'))
+        setExporting(false)
+        return
+      }
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
+      a.download = `morning-brief-export-${stamp}.json`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+      const totalRows = Object.values(data.counts || {}).reduce((n: number, v: any) => n + (Number(v) || 0), 0)
+      setExportResult(`Downloaded · ${totalRows} rows · ${data.window}`)
+    } catch (e: any) {
+      setExportResult('Failed: ' + (e?.message || e))
+    }
+    setExporting(false)
+  }
+
   async function triggerScoring() {
     setScoring(true)
     setScoreResult('Scoring…')
@@ -772,7 +810,7 @@ export default function AdminPage() {
     }
 
     const skipRemaining = (afterId: StageId) => {
-      const order: StageId[] = ['fetch', 'write', 'personalise', 'tail', 'storylines', 'score', 'desks']
+      const order: StageId[] = ['fetch', 'write', 'personalise', 'tail', 'storylines', 'score', 'desks', 'extras']
       const idx = order.indexOf(afterId)
       for (let i = idx + 1; i < order.length; i++) {
         setStage(order[i], { status: 'skipped', detail: 'skipped — upstream stage failed' })
@@ -964,6 +1002,26 @@ export default function AdminPage() {
         setStage('desks', { status: 'failed', detail: e.message, endedAt: Date.now() })
       }
       await loadDesksPanel()
+
+      // ─── Stage 8: extras — score personalised briefs + storylines ────
+      setStage('extras', { status: 'running', detail: 'scoring personalised sample + storylines…', startedAt: Date.now() })
+      try {
+        const exData = await safeJsonFetch('/api/score-extras', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        })
+        if (exData?.ok) {
+          const p = exData.personalised?.results ? Object.keys(exData.personalised.results).length : 0
+          const s = exData.storylines?.results ? Object.keys(exData.storylines.results).length : 0
+          setStage('extras', { status: 'ok', detail: `personalised editions=${p}, storylines=${s}`, endedAt: Date.now() })
+        } else {
+          setStage('extras', { status: 'failed', detail: exData?.error || 'extras returned ok=false', endedAt: Date.now() })
+        }
+      } catch (e: any) {
+        setStage('extras', { status: 'failed', detail: e.message, endedAt: Date.now() })
+      }
+      await loadCostAndScoreData()
     } finally {
       setMasterFinishedAt(Date.now())
       setMasterRunning(false)
@@ -1115,6 +1173,24 @@ export default function AdminPage() {
             padding: '10px 14px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
             letterSpacing: '1.5px', cursor: 'pointer', minHeight: '44px',
           }}>TODAY</button>
+          <button onClick={() => exportAllData(14)} disabled={exporting} style={{
+            background: 'none', border: `1px solid ${C.gold}`, color: C.gold,
+            padding: '10px 14px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
+            letterSpacing: '1.5px', cursor: exporting ? 'not-allowed' : 'pointer',
+            opacity: exporting ? 0.5 : 1, minHeight: '44px',
+          }}>{exporting ? 'EXPORTING…' : '↓ EXPORT DATA (14d)'}</button>
+          <button onClick={() => exportAllData(0)} disabled={exporting} style={{
+            background: 'none', border: `1px solid ${C.border}`, color: C.textMute,
+            padding: '10px 14px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
+            letterSpacing: '1.5px', cursor: exporting ? 'not-allowed' : 'pointer',
+            opacity: exporting ? 0.5 : 1, minHeight: '44px',
+          }}>ALL-TIME</button>
+          {exportResult && (
+            <span style={{
+              fontFamily: "'DM Mono', monospace", fontSize: '11px',
+              color: exportResult.startsWith('Failed') ? C.err : C.textMute,
+            }}>{exportResult}</span>
+          )}
         </div>
 
         {/* ─── Sprint 12.5.1: MASTER PIPELINE PANEL ─────────────────────── */}

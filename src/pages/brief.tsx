@@ -77,6 +77,8 @@ interface BriefContent {
   business?: any[]
   technology?: any[]
   climate_health?: any[]
+  politics?: any[]
+  markets_news?: any[]
   markets?: { summary: string; indices: MarketIndex[] }
   sport?: any[]
   culture?: any[]
@@ -128,8 +130,10 @@ const DAILY_SECTIONS: SectionDef[] = [
   { id: 'major_events',   label: 'Major events', icon: '🔥', kind: 'list' },
   { id: 'world',          label: 'World',        icon: '🌍', kind: 'list' },
   { id: 'india',          label: 'India',        icon: '🇮🇳', kind: 'list' },
+  { id: 'politics',       label: 'Politics & Policy', icon: '🏛️', kind: 'list' },
   { id: 'business',       label: 'Business',     icon: '💼', kind: 'list' },
   { id: 'markets',        label: 'Markets',      icon: '📈', kind: 'markets' },
+  { id: 'markets_news',   label: 'Markets & Money', icon: '💹', kind: 'list' },
   { id: 'technology',     label: 'Technology',   icon: '💻', kind: 'list' },
   { id: 'climate_health', label: 'Climate & Health', icon: '🌱', kind: 'list' },
   { id: 'sport',          label: 'Sport',        icon: '🏏', kind: 'list' },
@@ -598,6 +602,51 @@ function QuickRenderer({
 
 // ─── Renderer: The Daily ────────────────────────────────────────────────────
 
+function DeskFeatureCard({ deskSlug, deskName, feature }: {
+  deskSlug: string; deskName: string; feature: any
+}) {
+  return (
+    <div style={{ padding: '20px 20px 0' }}>
+      <Link href={`/desk/${deskSlug}`} style={{ textDecoration: 'none', display: 'block' }}>
+        <div style={{
+          background: C.surface,
+          border: `1px solid ${C.border}`,
+          borderLeft: `3px solid ${C.gold}`,
+          padding: '18px 20px',
+        }}>
+          <div style={{
+            fontFamily: "'DM Mono', monospace", fontSize: '10px',
+            letterSpacing: '1.5px', color: C.gold, marginBottom: '10px',
+          }}>FROM YOUR {deskName.toUpperCase()} DESK</div>
+          {feature?.kind && (
+            <span style={{
+              display: 'inline-block', fontFamily: "'DM Mono', monospace",
+              fontSize: '9px', letterSpacing: '1.5px', color: C.textMute,
+              border: `1px solid ${C.border}`, borderRadius: '2px',
+              padding: '3px 7px', marginBottom: '10px',
+            }}>{String(feature.kind).toUpperCase()}</span>
+          )}
+          <div style={{
+            fontFamily: "'Playfair Display', Georgia, serif",
+            fontSize: '19px', fontWeight: 700, color: C.text,
+            lineHeight: 1.35, marginBottom: '8px',
+          }}>{feature?.headline || ''}</div>
+          {feature?.body && (
+            <div style={{
+              fontFamily: "'DM Sans', sans-serif", fontSize: '15px',
+              color: C.textSoft, lineHeight: 1.65, marginBottom: '10px',
+            }}>{feature.body}</div>
+          )}
+          <div style={{
+            fontFamily: "'DM Mono', monospace", fontSize: '11px',
+            letterSpacing: '1.5px', color: C.gold,
+          }}>READ THE {deskName.toUpperCase()} DESK →</div>
+        </div>
+      </Link>
+    </div>
+  )
+}
+
 function DailyRenderer({
   brief, follow, isPersonalised,
 }: {
@@ -1006,6 +1055,10 @@ export default function BriefPage() {
   const [declinedUrls, setDeclinedUrls] = useState<Set<string>>(new Set())
   const [accessToken, setAccessToken] = useState<string>('')
   const [isPersonalised, setIsPersonalised] = useState(false)
+  // Sprint 14.2: one desk feature surfaced inside the personalised brief,
+  // matched to the reader's interests (read-time, since desks generate after
+  // the personalise stage).
+  const [deskFeature, setDeskFeature] = useState<{ deskSlug: string; deskName: string; feature: any } | null>(null)
 
   const today = new Date().toLocaleDateString('en-IN', {
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
@@ -1068,6 +1121,46 @@ export default function BriefPage() {
       }
 
       setBriefs(loadedBriefs)
+
+      // Sprint 14.2: surface one desk feature matching the reader's interests.
+      if (isPers && Array.isArray(profileData?.interests) && profileData.interests.length > 0) {
+        const INTEREST_TO_DESK: Record<string, string> = {
+          'Business & Economy': 'business',
+          'Markets & Investing': 'markets',
+          'Technology': 'tech', 'Artificial Intelligence': 'tech', 'Science': 'tech',
+          'Culture & Arts': 'entertainment', 'Film & OTT': 'entertainment', 'Music': 'entertainment', 'Books & Literature': 'entertainment',
+          'Sport': 'sport', 'Cricket': 'sport', 'Football': 'sport', 'Formula 1': 'sport',
+          'Indian Politics': 'politics', 'World Affairs': 'politics',
+        }
+        const wantedSlugs: string[] = []
+        for (const i of profileData.interests as string[]) {
+          const slug = INTEREST_TO_DESK[i]
+          if (slug && !wantedSlugs.includes(slug)) wantedSlugs.push(slug)
+        }
+        if (wantedSlugs.length > 0) {
+          try {
+            const [{ data: edRows }, { data: deskRows }] = await Promise.all([
+              supabase.from('desk_editions')
+                .select('desk_slug, content, status, date')
+                .in('desk_slug', wantedSlugs)
+                .in('status', ['ready', 'thin'])
+                .eq('date', todayISO),
+              supabase.from('desks').select('slug, name').in('slug', wantedSlugs),
+            ])
+            const nameBySlug: Record<string, string> = {}
+            for (const d of (deskRows || []) as any[]) nameBySlug[d.slug] = d.name
+            // First desk (in the reader's interest order) that has a feature.
+            for (const slug of wantedSlugs) {
+              const ed = (edRows || []).find((r: any) => r.desk_slug === slug && r.content)
+              const feats = ed?.content?.features
+              if (Array.isArray(feats) && feats.length > 0) {
+                setDeskFeature({ deskSlug: slug, deskName: nameBySlug[slug] || slug, feature: feats[0] })
+                break
+              }
+            }
+          } catch { /* non-fatal — card just won't show */ }
+        }
+      }
 
       // Sprint 13: storyline mapping (story source_url → storyline) + follows.
       const { data: { session } } = await supabase.auth.getSession()
@@ -1254,23 +1347,32 @@ export default function BriefPage() {
         {loading ? (
           <BriefLoading />
         ) : hasBriefs && activeBrief ? (
-          activeEdition === '5min' ? (
-            <QuickRenderer
-              brief={activeBrief}
-              follow={followApi}
-            />
-          ) : activeEdition === '10min' ? (
-            <DailyRenderer
-              brief={activeBrief}
-              follow={followApi}
-              isPersonalised={isPersonalised}
-            />
-          ) : (
-            <EditorialRenderer
-              brief={activeBrief}
-              isPersonalised={isPersonalised}
-            />
-          )
+          <>
+            {isPersonalised && deskFeature && (
+              <DeskFeatureCard
+                deskSlug={deskFeature.deskSlug}
+                deskName={deskFeature.deskName}
+                feature={deskFeature.feature}
+              />
+            )}
+            {activeEdition === '5min' ? (
+              <QuickRenderer
+                brief={activeBrief}
+                follow={followApi}
+              />
+            ) : activeEdition === '10min' ? (
+              <DailyRenderer
+                brief={activeBrief}
+                follow={followApi}
+                isPersonalised={isPersonalised}
+              />
+            ) : (
+              <EditorialRenderer
+                brief={activeBrief}
+                isPersonalised={isPersonalised}
+              />
+            )}
+          </>
         ) : (
           <NoBrief profile={profile} />
         )}
@@ -1284,7 +1386,6 @@ export default function BriefPage() {
         paddingBottom: 'env(safe-area-inset-bottom, 0px)',
       }}>
         {[
-          // Sprint 14: 4 tabs — Brief · Stories · Desks · Profile.
           { href: '/home',      label: 'Brief',   icon: '◆', active: true },
           { href: '/followed',  label: 'Stories', icon: '◉', active: false },
           { href: '/desks',     label: 'Desks',   icon: '▦', active: false },

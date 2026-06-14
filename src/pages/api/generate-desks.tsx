@@ -63,8 +63,7 @@ const DESK_CONCURRENCY = 2;          // desks in flight at once (TPM discipline,
                                      // desks ≈ 4 concurrent search requests)
 const TIME_BUDGET_MS = 200_000;      // stop STARTING new desks after this
 const STORY_FLOOR = 15;              // below this → status 'thin' + warning
-const HARD_NEWS_TARGET = 12;         // pass-1 ask (we request a couple extra
-const FEATURE_TARGET = 8;            // pass-2 ask    to survive whitelist drops)
+const FEATURE_TARGET = 8;            // 7-day features fetch ask (a couple extra to survive whitelist drops)
 const DESK_FETCH_MODEL = 'gpt-4o-mini-search-preview';
 const DESK_WRITE_MODEL = 'gpt-4o-mini'; // writer AND scorer (mini, per cost gate)
 
@@ -123,7 +122,8 @@ interface RawDeskStory {
   source: string;
   source_url: string;
   published_at?: string;
-  kind?: string; // pass-2 only: FEATURE | ANALYSIS | INTERVIEW | EXPLAINER
+  kind?: string;    // features only: FEATURE | ANALYSIS | INTERVIEW | EXPLAINER
+  segment?: string; // pool stories only: which raw_stories/tail bucket it came from
 }
 
 interface DeskEditionContent {
@@ -136,6 +136,93 @@ interface DeskEditionContent {
   features: any[];
   quick_takes: any[];
   desk_editorial: { title: string; body: string };
+}
+
+// ─── Shared daily pool (Sprint 14.2) ────────────────────────────────────────
+//
+// The big change: desks no longer fetch their own hard news with the weak
+// search model. They draw from the SHARED POOL the main pipeline already
+// fetched with the strong tools (gpt-5 / Perplexity) — every article section
+// of today's brief plus every tail brief — deduped by URL and whitelist-
+// rechecked. Each desk's writer reads the WHOLE pool and selects what's
+// relevant to its scope (cross-listing allowed: one RBI story can surface in
+// business, markets, and politics). Only the 7-day features pass still does a
+// fresh fetch, because that depth isn't in the daily pool.
+//
+// Pool sources:
+//   briefs.raw_stories  — major_events, world, india, business, technology,
+//                         climate_health, sport, culture, politics, markets_news
+//   tail_briefs.stories — city / interest / industry tail fetches (today, ready)
+// (Personalised briefs are derived from these same sources, so including them
+//  would add nothing but duplicates — we skip them.)
+
+const POOL_SECTIONS = [
+  'major_events', 'world', 'india', 'business', 'technology',
+  'climate_health', 'sport', 'culture', 'politics', 'markets_news',
+];
+
+function normalisePoolStory(s: any, segment: string): RawDeskStory | null {
+  if (!s || typeof s !== 'object') return null;
+  const headline = typeof s.headline === 'string' ? s.headline : '';
+  const body = typeof s.body === 'string' ? s.body
+    : typeof s.what_happened === 'string' ? s.what_happened
+    : typeof s.facts === 'string' ? s.facts
+    : typeof s.summary === 'string' ? s.summary : '';
+  const source = typeof s.source === 'string' ? s.source : '';
+  const source_url = typeof s.source_url === 'string' ? s.source_url : '';
+  if (!headline || !source_url) return null;
+  if (!isWhitelistedSource(source_url)) return null;
+  return { headline, body, source, source_url, segment } as RawDeskStory;
+}
+
+async function loadSharedPool(): Promise<RawDeskStory[]> {
+  const today = getISTDate();
+  const byUrl = new Map<string, RawDeskStory>();
+
+  // 1. Main brief raw_stories (any one edition row — all three share it).
+  const { data: briefRows, error: briefErr } = await supabase
+    .from('briefs')
+    .select('raw_stories')
+    .eq('date', today)
+    .limit(1);
+  if (briefErr) {
+    console.warn(`[desks:pool] briefs read failed (non-fatal): ${briefErr.message}`);
+  } else if (briefRows && briefRows[0]?.raw_stories) {
+    const raw = briefRows[0].raw_stories as any;
+    for (const sec of POOL_SECTIONS) {
+      const arr = raw[sec];
+      if (Array.isArray(arr)) {
+        for (const s of arr) {
+          const n = normalisePoolStory(s, sec);
+          if (n && !byUrl.has(n.source_url)) byUrl.set(n.source_url, n);
+        }
+      }
+    }
+  }
+
+  // 2. Tail briefs (city / interest / industry), today, ready.
+  const { data: tailRows, error: tailErr } = await supabase
+    .from('tail_briefs')
+    .select('tail_type, tail_key, stories, status')
+    .eq('date', today)
+    .eq('status', 'ready');
+  if (tailErr) {
+    console.warn(`[desks:pool] tail_briefs read failed (non-fatal): ${tailErr.message}`);
+  } else {
+    for (const row of (tailRows || []) as any[]) {
+      const arr = row.stories;
+      if (Array.isArray(arr)) {
+        for (const s of arr) {
+          const n = normalisePoolStory(s, `tail:${row.tail_type}`);
+          if (n && !byUrl.has(n.source_url)) byUrl.set(n.source_url, n);
+        }
+      }
+    }
+  }
+
+  const pool = Array.from(byUrl.values());
+  console.log(`[desks:pool] assembled ${pool.length} unique stories from raw_stories + tail`);
+  return pool;
 }
 
 // ─── 7-day URL dedup (self-contained, derived from this desk's own editions) ─
@@ -273,34 +360,7 @@ async function callDeskSearch(
   return kept;
 }
 
-// ─── Two-pass fetch ─────────────────────────────────────────────────────────
-
-async function fetchDeskHardNews(desk: DeskRow, excludeUrls: string[]): Promise<RawDeskStory[]> {
-  const today = getISTDate();
-  const prompt = `You are the news desk sourcing today's "${desk.name}" section for Morning Brief, a daily digest for thoughtful urban Indian professionals (25-45). Today is ${today}.
-
-DESK SCOPE: ${desk.description}
-
-Search the web for the ${HARD_NEWS_TARGET}-14 most consequential HARD NEWS developments in this desk's scope from the LAST 24-48 HOURS. India focus preferred; include global developments that matter to Indian readers in this space. Spread across the desk's sub-areas — do not let one story or one company dominate. Source diversity matters: do not take more than 3 stories from any single publisher.
-
-Each story: paraphrase into 2-4 factual sentences with specific numbers, names, and dates — do NOT quote at length. Headlines must be your own factual summary describing TODAY'S development, not the underlying narrative, and not the article's title verbatim.
-${formatExcludeBlock(excludeUrls)}
-${whitelistBlock()}
-
-Return ONLY a JSON object — no markdown, no commentary:
-{
-  "stories": [
-    {
-      "headline": "clear factual headline (max 120 chars)",
-      "body": "2-4 sentence factual summary",
-      "source": "Publisher Name",
-      "source_url": "https://... direct article link",
-      "published_at": "${today}"
-    }
-  ]
-}`;
-  return callDeskSearch(prompt, `${desk.slug}:hard`, desk.slug, HARD_NEWS_TARGET + 2);
-}
+// ─── Features fetch (the one fresh fetch desks still do) ─────────────────────
 
 async function fetchDeskFeatures(desk: DeskRow, excludeUrls: string[]): Promise<RawDeskStory[]> {
   const today = getISTDate();
@@ -363,7 +423,7 @@ async function callDeskWriter(prompt: string, label: string): Promise<any> {
 
 async function writeDeskEdition(
   desk: DeskRow,
-  hardNews: RawDeskStory[],
+  poolForDesk: RawDeskStory[],
   features: RawDeskStory[],
 ): Promise<DeskEditionContent> {
   const today = getISTDate();
@@ -373,10 +433,12 @@ DESK VOICE (write the ENTIRE edition in this register):
 ${desk.voice}
 
 You are given two pools of raw stories:
-- HARD NEWS (last 24-48h): for top_stories, india, global, and quick_takes
-- FEATURES (last 7 days): for the features section ONLY
+- POOL (today's hard news, fetched across ALL of today's news — NOT pre-filtered to this desk): the candidate set for top_stories, india, global, and quick_takes. SELECT only the stories genuinely relevant to THIS desk's scope and IGNORE the rest. A single story may be relevant to several desks — judge it on this desk's scope. Each pool story carries a "segment" hint (e.g. business, india, world, tail:interest) — a clue, not a rule.
+- FEATURES (last 7 days, already specific to this desk): for the features section ONLY.
 
-STRUCTURE — distribute the raw stories into these sections:
+DESK SCOPE (use this to decide what's relevant from the POOL): ${desk.description}
+
+STRUCTURE — distribute the SELECTED stories into these sections:
 
 1. lens: ONE sentence (≤ 30 words) capturing what today means for this desk. The line a section editor would put at the top of the page.
 
@@ -405,10 +467,11 @@ STRUCTURE — distribute the raw stories into these sections:
 7. desk_editorial: 250-350 words of flowing prose IN THE DESK VOICE — the section's leader column. Pick the day's most important thread in this desk's world and go deep: context, stakes, second-order implications, a forward-looking close. Title ≤ 12 words, an angle not a headline. Do not merely summarise the stories above.
 
 HARD RULES:
-- USE ONLY THE RAW STORIES PROVIDED BELOW. Do not invent, infer, or recall stories from your own knowledge. Every source_url you output must appear VERBATIM in the raw stories.
-- Each raw story may be used in AT MOST ONE section. No story appears twice.
-- If the pools are smaller than the slots, fill sections in priority order (top_stories → india → global → features → quick_takes) and leave later arrays SHORT or empty rather than fabricating. Never pad.
-- If there are not enough India-centred stories for the india section, move global stories up — but never fabricate an Indian angle that the raw story does not support.
+- USE ONLY THE RAW STORIES PROVIDED BELOW. Do not invent, infer, or recall stories from your own knowledge. Every source_url you output must appear VERBATIM in the inputs below.
+- SELECT for relevance: only include POOL stories that genuinely belong in this desk. A thin but relevant edition beats a padded one full of off-topic stories.
+- Each story may be used in AT MOST ONE section. No story appears twice.
+- If relevant stories are fewer than the slots, fill sections in priority order (top_stories → india → global → features → quick_takes) and leave later arrays SHORT or empty rather than fabricating. Never pad with off-topic stories.
+- If there are not enough India-centred stories for the india section, move global stories up — but never fabricate an Indian angle the raw story does not support.
 - EVERY field listed for a section is REQUIRED on every story in it. Null/missing text fields are NOT acceptable.
 - Output ONLY JSON. No markdown fences, no commentary. Start with { and end with }.
 
@@ -425,10 +488,10 @@ OUTPUT SHAPE:
   "desk_editorial": { "title": "...", "body": "250-350 words" }
 }
 
-RAW HARD NEWS (last 24-48h):
-${JSON.stringify(hardNews)}
+POOL (today's cross-topic hard news — SELECT what fits this desk):
+${JSON.stringify(poolForDesk)}
 
-RAW FEATURES (last 7 days):
+RAW FEATURES (last 7 days, this desk):
 ${JSON.stringify(features)}`;
 
   return callDeskWriter(prompt, `write:${desk.slug}`);
@@ -580,34 +643,34 @@ interface DeskRunResult {
   reason?: string;
 }
 
-async function runDesk(desk: DeskRow): Promise<DeskRunResult> {
+async function runDesk(desk: DeskRow, pool: RawDeskStory[]): Promise<DeskRunResult> {
   const today = getISTDate();
   const t0 = Date.now();
   console.log(`[desk:${desk.slug}] starting`);
 
   try {
-    // 1. Two-pass fetch (parallel — both hit the same cheap search model).
-    const excludeUrls = await loadRecentUsedUrls(desk.slug);
-    const [hardNews, features] = await Promise.all([
-      fetchDeskHardNews(desk, excludeUrls),
-      fetchDeskFeatures(desk, excludeUrls),
-    ]);
-    console.log(`[desk:${desk.slug}] fetched hard=${hardNews.length} features=${features.length}`);
+    // 1. Hard news = the shared pool (already strong-fetched), minus anything
+    //    this desk already ran in the last 6 days. Features = a fresh 7-day
+    //    fetch (that depth isn't in the daily pool).
+    const excludeUrls = new Set(await loadRecentUsedUrls(desk.slug));
+    const poolForDesk = pool.filter((s) => !excludeUrls.has(s.source_url));
+    const features = await fetchDeskFeatures(desk, Array.from(excludeUrls));
+    console.log(`[desk:${desk.slug}] pool=${poolForDesk.length} features=${features.length}`);
 
-    const fetched = hardNews.length + features.length;
-    if (fetched === 0) {
+    if (poolForDesk.length === 0 && features.length === 0) {
       await supabase.from('desk_editions').upsert(
         { desk_slug: desk.slug, date: today, content: null, status: 'failed', generated_at: new Date().toISOString() },
         { onConflict: 'desk_slug,date' },
       );
-      return { slug: desk.slug, status: 'failed', stories: 0, reason: 'both fetch passes returned 0 stories' };
+      return { slug: desk.slug, status: 'failed', stories: 0, reason: 'empty pool and no features' };
     }
 
-    // 2. Write in desk voice.
-    let content = await writeDeskEdition(desk, hardNews, features);
+    // 2. Write in desk voice — the writer SELECTS pool stories relevant to
+    //    this desk's scope (cross-listing allowed) and distributes them.
+    let content = await writeDeskEdition(desk, poolForDesk, features);
 
-    // 3. Enforce: every output URL must come from the raw pools + whitelist.
-    const rawUrls = new Set<string>([...hardNews, ...features].map((s) => s.source_url));
+    // 3. Enforce: every output URL must come from the inputs + whitelist.
+    const rawUrls = new Set<string>([...poolForDesk, ...features].map((s) => s.source_url));
     const enforced = enforceDeskSourceUrls(content, rawUrls);
     content = enforced.content;
     if (enforced.dropped > 0) {
@@ -634,8 +697,8 @@ async function runDesk(desk: DeskRow): Promise<DeskRunResult> {
     );
     if (saveErr) throw new Error(`desk_editions save failed: ${saveErr.message}`);
 
-    // 5. Score (non-fatal). 7-day dedup needs no write step now — the next
-    //    run derives its exclude list from saved editions (see loadRecentUsedUrls).
+    // 5. Score (non-fatal). 7-day dedup needs no write step — the next run
+    //    derives its exclude list from saved editions (see loadRecentUsedUrls).
     await scoreDeskEdition(desk, content);
 
     console.log(`[desk:${desk.slug}] done in ${Math.round((Date.now() - t0) / 1000)}s — ${count} stories, status=${status}`);
@@ -726,6 +789,12 @@ async function runDesks(forceSlug?: string) {
 
   console.log(`[desks] ${pending.length} desk(s) to process: ${pending.map((d) => d.slug).join(', ')}`);
 
+  // Load the shared pool ONCE (all desks select from the same set).
+  const pool = await loadSharedPool();
+  if (pool.length === 0) {
+    console.warn('[desks] shared pool is EMPTY — today\'s main brief raw_stories and tail briefs are both missing/unreadable. Desks will rely on their features fetch only.');
+  }
+
   // 4. Process with concurrency 2 and the 200s start budget. A simple
   //    worker-pool: each worker pulls the next desk off the queue, but only
   //    if we're still inside the time budget — anything left is swept by the
@@ -743,7 +812,7 @@ async function runDesks(forceSlug?: string) {
       }
       const desk = queue.shift();
       if (!desk) return;
-      const result = await runDesk(desk);
+      const result = await runDesk(desk, pool);
       processed.push(result);
     }
   }

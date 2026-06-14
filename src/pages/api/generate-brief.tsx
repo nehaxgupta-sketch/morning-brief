@@ -142,6 +142,12 @@ interface RawStories {
   climate_health: RawStory[];
   sport: RawStory[];      // Was single; now array (Sprint 9) — 2-4 stories across different sports.
   culture: RawStory[];    // Was single; now array (Sprint 9) — 2-4 stories across different culture types.
+  // Sprint 14.2: dedicated article buckets for politics & markets. Always
+  // fetched (feed the Desks pool); shown in the brief only to users who opt
+  // into the 'Indian Politics' / 'Markets & Investing' interests. Optional so
+  // older rows and quiet days never break validation.
+  politics?: RawStory[];
+  markets_news?: RawStory[];
   markets: { summary: string; indices: MarketIndex[] };
   // Lens — the four-line summary used by the home flash card.
   lens: {
@@ -206,6 +212,8 @@ interface BriefDaily {
   india: FullStory[];
   business: FullStory[];
   markets: { summary: string; indices: MarketIndex[] };
+  markets_news?: FullStory[];  // Sprint 14.2
+  politics?: FullStory[];      // Sprint 14.2
   technology: FullStory[];
   climate_health: FullStory[];
   sport?: FullStory;
@@ -316,6 +324,10 @@ const BriefDailySchema = z.object({
   }),
   technology: z.array(FullStorySchema),
   climate_health: z.array(FullStorySchema),
+  // Sprint 14.2: optional + default so the brief never fails if the writer
+  // omits them; they render only for opted-in users.
+  politics: z.array(FullStorySchema).optional().default([]),
+  markets_news: z.array(FullStorySchema).optional().default([]),
   // sport/culture became arrays in Sprint 9 to support breadth across multiple
   // sports/culture types. Permissive on count — empty on quiet days is fine.
   sport: z.array(FullStorySchema).max(6),
@@ -2260,6 +2272,12 @@ function buildSubset(raw: RawStories, cap: number): RawStories {
     climate_health: taken.climate_health,
     sport:          taken.sport,
     culture:        taken.culture,
+    // Sprint 14.2: politics & markets_news pass through in full (NOT counted
+    // against the cap) so the dedicated-section writer sees them. The brief
+    // shows them only to opted-in users; everyone else's personalise step
+    // drops them.
+    politics:       ((raw as any).politics || []) as RawStory[],
+    markets_news:   ((raw as any).markets_news || []) as RawStory[],
     markets:        raw.markets,
     lens:           raw.lens,
   };
@@ -2334,6 +2352,8 @@ FORMAT — each story has FIVE labelled fields:
 
 SELECTION: Include EVERY story from the raw stories. Do not drop anything. Maintain the ordering from the raw stories within each section (raw is already impact-ordered). If raw stories has empty "sport" or "culture" arrays, output empty arrays for those keys — do NOT fabricate stories to fill them.
 
+POLITICS & MARKETS_NEWS (Sprint 14.2): raw stories may include "politics" and "markets_news" arrays — dedicated Indian-politics and market/finance article buckets. If present, output them as same-shape FullStory arrays under the "politics" and "markets_news" keys. If absent or empty, output empty arrays. Treat them like any other section: every field required, source_url verbatim, no fabrication.
+
 NO DUPLICATION ACROSS SECTIONS: a story belongs in ONLY ONE section. If raw stories has duplicate-feeling entries across sections, pick the section that fits best and skip the others.
 
 CLOSER — include a "closer" object at the end with:
@@ -2357,6 +2377,8 @@ OUTPUT SHAPE:
   "india":          [ /* same shape */ ],
   "business":       [ /* same shape */ ],
   "markets":        { "summary": "rewritten 2-sentence India-anchored summary", "indices": [ /* unchanged */ ] },
+  "markets_news":   [ /* same shape as a story; market/finance ARTICLES (not the indices widget). [] if none in raw */ ],
+  "politics":       [ /* same shape as a story; Indian-politics articles. [] if none in raw */ ],
   "technology":     [ /* same shape */ ],
   "climate_health": [ /* same shape */ ],
   "sport":   [
@@ -2910,6 +2932,29 @@ async function modeFetch() {
   } catch (err: any) {
     console.error('OpenAI fetch failed:', err.message);
     return { ok: false as const, error: `OpenAI fetch failed: ${err.message}` };
+  }
+
+  // Sprint 14.2: dedicated politics + markets_news article buckets. Fetched
+  // here as two self-contained list-section calls (NOT woven into the multi-
+  // strategy core fetch, to keep blast radius small). Always fetched so the
+  // Desks pool has genuine markets/politics depth; shown in the brief only to
+  // opted-in users. Non-fatal — failure leaves the section empty.
+  {
+    const todayF = getISTDate();
+    const politicsGuidance = `Focus: INDIAN POLITICS & GOVERNANCE. Parliament, central and state governments, parties, elections, the Supreme Court and high courts, key appointments, bills and policy decisions, major political developments. Strictly factual and non-partisan — report positions and actions, attribute claims. Prefer the last 24-48 hours.`;
+    const marketsNewsGuidance = `Focus: MARKETS & FINANCE ARTICLES (not index levels). Equities, bonds, currencies, commodities, RBI/SEBI actions, IPOs, earnings that move markets, fund flows, what professional investors are watching — anchored to Indian portfolios where possible. Prefer the last 24-48 hours.`;
+    const [politics, marketsNews] = await Promise.all([
+      fetchListSection('politics', politicsGuidance, '6-8', universe, todayF).catch((e) => {
+        console.warn('[fetch:politics] failed (non-fatal):', e?.message || e); return [];
+      }),
+      fetchListSection('markets_news', marketsNewsGuidance, '6-8', universe, todayF).catch((e) => {
+        console.warn('[fetch:markets_news] failed (non-fatal):', e?.message || e); return [];
+      }),
+    ]);
+    const wl = (arr: any) => (Array.isArray(arr) ? arr : []).filter((s: any) => s?.source_url && isWhitelistedSource(s.source_url));
+    (rawStories as any).politics = wl(politics);
+    (rawStories as any).markets_news = wl(marketsNews);
+    console.log(`[fetch] sprint14.2 buckets — politics=${(rawStories as any).politics.length}, markets_news=${(rawStories as any).markets_news.length}`);
   }
 
   const lensOk = !!rawStories.lens && validateLens(rawStories.lens);
