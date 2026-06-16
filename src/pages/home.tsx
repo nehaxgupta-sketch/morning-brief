@@ -3,6 +3,11 @@
 // Sprint 9 — home screen with the lens flash card and three edition buttons.
 // Sprint 13 — bottom nav: Saved/bookmarks → Stories/followed.
 // Sprint 14 — bottom nav grows to 4 tabs: Brief · Stories · Desks · Profile.
+// Sprint 14.5 — date toggle: a reader who missed a day can read the last 3
+//   days' briefs (today + 2 prior). Segmented control at the top-left of the
+//   Briefs tab; dates with no brief are shown disabled. The chosen date is
+//   passed to /brief via ?date=, and we default to the most recent date that
+//   actually has a brief (so at 6am, before today's run, it opens yesterday's).
 //
 // Changes from previous build:
 // - Name backfill: if profile.full_name is missing, fall back to the auth
@@ -43,17 +48,34 @@ function editionTagline(e: string) {
   return ''
 }
 
+// Sprint 14.5: IST-anchored dates (briefs are dated by IST on the backend).
+// offsetDays 0 = today, 1 = yesterday, 2 = the day before.
+function istDateISO(offsetDays = 0): string {
+  const istMs = Date.now() + 5.5 * 60 * 60 * 1000 - offsetDays * 86400000
+  return new Date(istMs).toISOString().slice(0, 10)
+}
+
+// Label for a date segment: a relative word + a short date.
+function dateSegmentLabel(iso: string): { rel: string; sub: string } {
+  const d = new Date(`${iso}T00:00:00`)
+  const sub = d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
+  if (iso === istDateISO(0)) return { rel: 'Today', sub }
+  if (iso === istDateISO(1)) return { rel: 'Yesterday', sub }
+  return { rel: d.toLocaleDateString('en-IN', { weekday: 'long' }), sub }
+}
+
+type DayAvailability = { editions: string[]; lens: Lens | null }
+
 export default function Home() {
   const [profile, setProfile] = useState<Profile | null>(null)
   const [loading, setLoading] = useState(true)
-  const [briefReady, setBriefReady] = useState(false)
-  const [lens, setLens] = useState<Lens | null>(null)
-  const [availableEditions, setAvailableEditions] = useState<Set<string>>(new Set())
+  // Sprint 14.5: availability for the last 3 days, keyed by ISO date.
+  const [availByDate, setAvailByDate] = useState<Record<string, DayAvailability>>({})
+  const [selectedDate, setSelectedDate] = useState<string>(istDateISO(0))
 
   const today = new Date().toLocaleDateString('en-IN', {
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
   })
-  const todayISO = new Date().toISOString().split('T')[0]
 
   useEffect(() => {
     const load = async () => {
@@ -74,45 +96,46 @@ export default function Home() {
 
       setProfile(data)
 
+      const dates = [istDateISO(0), istDateISO(1), istDateISO(2)]
       const isPersonalised = data?.brief_type === 'personalised'
+      const byDate: Record<string, DayAvailability> = {}
+      for (const d of dates) byDate[d] = { editions: [], lens: null }
 
-      // 1. Try personalised briefs first (for personalised users)
-      let editionsFound = new Set<string>()
-      let lensFound: Lens | null = null
+      const absorb = (rows: any[] | null | undefined) => {
+        for (const row of (rows || []) as any[]) {
+          const b = byDate[row.date]
+          if (!b) continue
+          if (!b.editions.includes(row.edition)) b.editions.push(row.edition)
+          if (!b.lens && row.content?.lens) b.lens = row.content.lens
+        }
+      }
 
+      // 1. Personalised briefs first (for personalised users), across all 3 days.
       if (isPersonalised) {
         const { data: personalised } = await supabase
           .from('personalised_briefs')
-          .select('edition, content')
+          .select('edition, content, date')
           .eq('user_id', user.id)
-          .eq('date', todayISO)
+          .in('date', dates)
           .in('status', ['ready', 'fallback'])
-        if (personalised && personalised.length > 0) {
-          for (const row of personalised as any[]) {
-            editionsFound.add(row.edition)
-            if (!lensFound && row.content?.lens) lensFound = row.content.lens
-          }
-        }
+        absorb(personalised)
       }
 
-      // 2. Fallback to standard briefs
-      if (editionsFound.size === 0) {
+      // 2. Fallback to standard briefs for any date still empty.
+      const needStandard = dates.filter((d) => byDate[d].editions.length === 0)
+      if (needStandard.length > 0) {
         const { data: standard } = await supabase
           .from('briefs')
-          .select('edition, content')
-          .eq('date', todayISO)
+          .select('edition, content, date')
+          .in('date', needStandard)
           .in('status', ['ready', 'fallback'])
-        if (standard && standard.length > 0) {
-          for (const row of standard as any[]) {
-            editionsFound.add(row.edition)
-            if (!lensFound && row.content?.lens) lensFound = row.content.lens
-          }
-        }
+        absorb(standard)
       }
 
-      setAvailableEditions(editionsFound)
-      setLens(lensFound)
-      setBriefReady(editionsFound.size > 0)
+      setAvailByDate(byDate)
+      // Default to the most recent day that actually has a brief; else today.
+      const firstAvail = dates.find((d) => byDate[d].editions.length > 0) || dates[0]
+      setSelectedDate(firstAvail)
       setLoading(false)
     }
     load()
@@ -125,7 +148,15 @@ export default function Home() {
   const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening'
   const isPersonalised = profile?.brief_type === 'personalised'
 
-  // Preview lines for when the brief isn't ready yet.
+  const dates = [istDateISO(0), istDateISO(1), istDateISO(2)]
+  const sel: DayAvailability = availByDate[selectedDate] || { editions: [], lens: null }
+  const availableEditions = new Set(sel.editions)
+  const lens = sel.lens
+  const briefReady = sel.editions.length > 0
+  const anyDateHasBrief = dates.some((d) => (availByDate[d]?.editions.length || 0) > 0)
+  const viewingToday = selectedDate === istDateISO(0)
+
+  // Preview lines for when today's brief isn't ready yet.
   const previewLines: string[] = isPersonalised
     ? [
         `📍 ${profile?.city_current || 'Your city'} local news`,
@@ -180,6 +211,50 @@ export default function Home() {
 
       <div style={{ padding: '0 20px', maxWidth: '480px', margin: '0 auto' }}>
 
+        {/* ─── Sprint 14.5: date toggle (today + 2 prior) ─────────────── */}
+        {anyDateHasBrief && (
+          <>
+            <div style={{
+              fontFamily: "'DM Mono', monospace", fontSize: '10px',
+              letterSpacing: '2px', color: C.textMute, marginBottom: '10px',
+            }}>READING</div>
+            <div style={{ display: 'flex', gap: '8px', marginBottom: '22px' }}>
+              {dates.map((d) => {
+                const has = (availByDate[d]?.editions.length || 0) > 0
+                const isSel = selectedDate === d
+                const { rel, sub } = dateSegmentLabel(d)
+                return (
+                  <button
+                    key={d}
+                    onClick={() => { if (has) setSelectedDate(d) }}
+                    disabled={!has}
+                    style={{
+                      flex: 1,
+                      background: isSel ? C.goldSoft : C.surface,
+                      border: `1px solid ${isSel ? C.goldBorder : C.border}`,
+                      borderRadius: '2px',
+                      padding: '10px 6px',
+                      cursor: has ? 'pointer' : 'not-allowed',
+                      opacity: has ? 1 : 0.45,
+                      textAlign: 'center',
+                      minHeight: '54px',
+                    }}
+                  >
+                    <div style={{
+                      fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                      letterSpacing: '1px', color: isSel ? C.gold : C.textMute,
+                    }}>{rel.toUpperCase()}</div>
+                    <div style={{
+                      fontFamily: "'DM Sans', sans-serif", fontSize: '12px',
+                      color: isSel ? C.text : C.textMute, marginTop: '3px',
+                    }}>{has ? sub : 'No brief'}</div>
+                  </button>
+                )
+              })}
+            </div>
+          </>
+        )}
+
         {briefReady ? (
           <>
             {/* Flash card — lens table */}
@@ -193,7 +268,7 @@ export default function Home() {
               <div style={{
                 fontFamily: "'DM Mono', monospace", fontSize: '10px',
                 letterSpacing: '2px', color: C.gold, marginBottom: '18px',
-              }}>TODAY'S LENS</div>
+              }}>{viewingToday ? "TODAY'S LENS" : `${dateSegmentLabel(selectedDate).rel.toUpperCase()}'S LENS`}</div>
 
               {lens ? (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
@@ -225,7 +300,7 @@ export default function Home() {
                   fontFamily: "'Playfair Display', Georgia, serif",
                   fontSize: '20px', fontWeight: 700, color: C.text,
                   lineHeight: 1.35, marginBottom: '4px',
-                }}>Your brief is ready.</div>
+                }}>{viewingToday ? 'Your brief is ready.' : 'This day\'s brief is ready.'}</div>
               )}
             </div>
 
@@ -241,7 +316,7 @@ export default function Home() {
                 return (
                   <Link
                     key={ed}
-                    href={isAvailable ? `/brief?edition=${ed}` : '#'}
+                    href={isAvailable ? `/brief?edition=${ed}&date=${selectedDate}` : '#'}
                     style={{
                       display: 'flex',
                       alignItems: 'center',
@@ -286,8 +361,26 @@ export default function Home() {
               }}>YOUR BRIEF IS PERSONALISED FOR YOU</div>
             )}
           </>
+        ) : !viewingToday ? (
+          /* A past day that has no brief (rare — those segments are disabled). */
+          <div style={{
+            background: C.surface,
+            border: `1px solid ${C.border}`,
+            borderTop: `3px solid ${C.border}`,
+            padding: '22px',
+            marginBottom: '20px',
+          }}>
+            <div style={{
+              fontFamily: "'DM Mono', monospace", fontSize: '10px',
+              letterSpacing: '2px', color: C.textMute, marginBottom: '10px',
+            }}>NO BRIEF FOR THIS DAY</div>
+            <div style={{
+              fontFamily: "'DM Sans', sans-serif", fontSize: '15px',
+              color: C.textSoft, lineHeight: 1.6,
+            }}>There's no brief on file for {dateSegmentLabel(selectedDate).sub}. Try another day above.</div>
+          </div>
         ) : (
-          /* Not ready yet — show the preview card */
+          /* Today not ready yet — show the preview card */
           <div style={{
             background: C.surface,
             border: `1px solid ${C.border}`,

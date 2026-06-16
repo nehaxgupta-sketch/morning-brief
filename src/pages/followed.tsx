@@ -16,6 +16,7 @@ import { useEffect, useState } from 'react'
 import Head from 'next/head'
 import Link from 'next/link'
 import { supabase } from '@/lib/supabase'
+import { listSavedStories, unsaveStory, SavedStory } from '@/lib/saved'
 
 const C = {
   bg: '#0E0E0E', surface: '#161616', surface2: '#1E1E1E',
@@ -66,12 +67,24 @@ export default function FollowedPage() {
   const [eventsByLine, setEventsByLine] = useState<Map<string, StoryEvent[]>>(new Map())
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [busy, setBusy] = useState<string | null>(null)
+  const [saved, setSaved] = useState<SavedStory[]>([]) // Sprint 14.6
+
+  // Sprint 14.6: optimistic unsave from the Saved list.
+  const handleUnsave = async (sourceUrl: string) => {
+    if (!userId) return
+    const prev = saved
+    setSaved(p => p.filter(x => x.source_url !== sourceUrl))
+    const res = await unsaveStory(userId, sourceUrl)
+    if (res.error) { setSaved(prev); console.warn('[saved] unsave failed:', res.error) }
+  }
 
   useEffect(() => {
     const load = async () => {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) { window.location.href = '/login'; return }
       setUserId(user.id)
+      // Sprint 14.6: load this user's saved stories.
+      listSavedStories(user.id).then(setSaved).catch(() => {})
 
       const { data: followRows } = await supabase
         .from('storyline_follows')
@@ -212,6 +225,49 @@ export default function FollowedPage() {
         </div>
 
         <div style={{ padding: '28px 20px 0', maxWidth: '480px', margin: '0 auto' }}>
+
+          {/* Sprint 14.6: Saved stories */}
+          {!loading && saved.length > 0 && (
+            <div style={{ marginBottom: '36px' }}>
+              <p style={{
+                fontFamily: "'DM Mono', monospace", fontSize: '11px',
+                color: C.gold, letterSpacing: '2.5px',
+                textTransform: 'uppercase', margin: '0 0 16px',
+              }}>
+                Saved stories
+              </p>
+              {saved.map(item => (
+                <div key={item.source_url} style={{
+                  background: C.surface,
+                  border: `1px solid ${C.border}`,
+                  borderLeft: `3px solid ${C.gold}`,
+                  padding: '16px 18px',
+                  marginBottom: '12px',
+                }}>
+                  <a href={item.source_url} target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none' }}>
+                    <div style={{
+                      fontFamily: "'Playfair Display', Georgia, serif",
+                      fontSize: '17px', fontWeight: 700, color: C.text,
+                      lineHeight: 1.35, marginBottom: '6px',
+                    }}>{item.headline || 'Saved story'}</div>
+                  </a>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+                    <div style={{
+                      fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                      letterSpacing: '1px', color: C.textMute,
+                    }}>{(item.source || 'Source').toUpperCase()}</div>
+                    <button
+                      onClick={() => handleUnsave(item.source_url)}
+                      style={{
+                        background: 'none', border: 'none', cursor: 'pointer',
+                        fontFamily: "'DM Mono', monospace", fontSize: '11px',
+                        color: C.textMute, padding: '6px 0', minHeight: '36px',
+                      }}>Remove</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
 
           {loading && (
             <div style={{ textAlign: 'center', paddingTop: '80px' }}>

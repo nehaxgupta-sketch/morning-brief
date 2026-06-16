@@ -31,6 +31,8 @@ import { createClient } from '@supabase/supabase-js';
 import { isWhitelistedSource } from '@/lib/whitelist';
 // Sprint 11: per-call cost capture.
 import { logOpenAICost, extractUsageFromResponses } from '@/lib/cost-log';
+import { attachLogCapture } from '@/lib/log-capture';
+import { applyCitySafety } from '@/lib/editorial-safety';
 
 export const config = { maxDuration: 60 };
 
@@ -142,6 +144,7 @@ interface CityStory {
   source: string;
   source_url: string;
   published_at?: string;
+  why_it_matters?: string; // Sprint 14.5: real relevance line, replaces template filler
 }
 
 async function fetchCityStories(city: string): Promise<CityStory[]> {
@@ -164,6 +167,7 @@ Return ONLY a JSON object — no markdown, no commentary:
     {
       "headline": "clear factual headline (max 120 chars)",
       "body": "2-3 sentence factual summary",
+      "why_it_matters": "ONE concrete sentence on why this matters to a resident of ${city} (commute, costs, safety, civic services, local economy). No filler.",
       "source": "publication name",
       "source_url": "https://... real direct link",
       "published_at": "${today}"
@@ -213,17 +217,17 @@ Return ONLY a JSON object — no markdown, no commentary:
   try {
     const parsed = JSON.parse(cleaned.slice(start, end + 1));
     const raw = Array.isArray(parsed?.stories) ? parsed.stories : [];
-    const kept: CityStory[] = [];
+    const candidates: CityStory[] = [];
     for (const s of raw) {
       if (!s || typeof s.headline !== 'string' || typeof s.body !== 'string' || typeof s.source !== 'string') continue;
       if (!isWhitelistedSource(s.source_url)) {
         console.warn(`City story dropped (source not whitelisted) — ${city}: ${s.source_url}`);
         continue;
       }
-      kept.push(s as CityStory);
-      if (kept.length >= 3) break;
+      candidates.push(s as CityStory);
     }
-    return kept;
+    // Sprint 14.5: keep crime/tragedy out of the lead of a "your city" section.
+    return applyCitySafety(candidates).slice(0, 3);
   } catch {
     return [];
   }
@@ -311,7 +315,7 @@ Specialist (only where general sources don't cover): Nature, Science, STAT, Tech
 Return ONLY a JSON object — no markdown:
 {
   "stories": [
-    { "headline": "...", "body": "2-3 sentences", "source": "Publisher Name", "source_url": "https://...", "published_at": "${today}" }
+    { "headline": "...", "body": "2-3 sentences", "why_it_matters": "ONE concrete sentence on why a reader who follows this should care — name the stake. No filler.", "source": "Publisher Name", "source_url": "https://...", "published_at": "${today}" }
   ]
 }`;
 
@@ -461,7 +465,8 @@ async function loadFromTailBriefs(
     const stories = Array.isArray(row.stories) ? row.stories : [];
     // Defensive whitelist re-check.
     const kept = stories.filter((s: any) => s?.source_url && isWhitelistedSource(s.source_url));
-    cityCache.set(key, kept as CityStory[]);
+    // Sprint 14.5: same city-safety ordering for tail-sourced city stories.
+    cityCache.set(key, applyCitySafety(kept) as CityStory[]);
   }
 
   // Interests (non-standard only — standard ones map to brief sections)
@@ -522,7 +527,9 @@ function makeIndustrySection(
   const stories = industryCache.get(industry) || [];
   if (stories.length === 0) return null;
   const sliced = stories.slice(0, storiesPerSection);
-  const shaped: any[] = shape === 'micro' ? sliced.map(cityToMicro) : sliced.map(cityToFull);
+  const shaped: any[] = shape === 'micro'
+    ? sliced.map((s) => interestToMicro(s, industry, 'sector'))
+    : sliced.map((s) => interestToFull(s, industry, 'sector'));
   return {
     id: `industry_${industry.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '')}`,
     label: `${industry} sector`,
@@ -543,7 +550,8 @@ function cityToMicro(s: CityStory) {
   // body is 2-3 sentences; first sentence = what_happened.
   const sentences = s.body.split(/(?<=[.!?])\s+/);
   const what = sentences[0] || s.body;
-  const why = sentences.slice(1).join(' ') || 'Relevant local development for readers in your city.';
+  const derivedWhy = sentences.slice(1).join(' ') || 'Relevant local development for readers in your city.';
+  const why = (s.why_it_matters && s.why_it_matters.trim()) || derivedWhy;
   return {
     headline: s.headline,
     what_happened: what.trim(),
@@ -559,14 +567,77 @@ function cityToMicro(s: CityStory) {
 }
 
 function cityToFull(s: CityStory) {
-  // Use the full body as facts; leave other fields populated with derived text.
+  // Use the full body as facts; derive why_it_matters from the story's own
+  // content (Sprint 14.5) instead of a flat template, and prefer the model's
+  // why_it_matters when the fetch supplied one.
+  const sentences = String(s.body || '').split(/(?<=[.!?])\s+/).filter(Boolean);
+  const derivedWhy = sentences.slice(1).join(' ').trim();
   return {
     headline: s.headline,
     facts: s.body,
-    background: 'A development from your city today.',
-    why_it_matters: 'Local news worth knowing as a resident.',
+    background: 'A development from your city.',
+    why_it_matters: (s.why_it_matters && s.why_it_matters.trim()) || derivedWhy || 'Local news worth knowing as a resident.',
     what_happens_next: 'Watch for follow-up coverage and official updates.',
-    analysis: 'Selected for you based on your city preference.',
+    analysis: 'Included because it is local to your city.',
+    source: s.source,
+    source_url: s.source_url,
+    industries: [],
+    interests: [],
+    city_tags: [],
+    topic_tags: [],
+    must_include: false,
+  };
+}
+
+// Sprint 14.4: interest-aware builders. Previously non-standard interests
+// (e.g. "Law & Policy") were rendered through cityToFull / cityToMicro, so an
+// interest story carried the line "Selected for you based on your city
+// preference." — a mislabel a reader notices immediately. These mirror the
+// city builders' SHAPE (so the renderer is unaffected) but with honest,
+// interest-correct framing, and derive why_it_matters from the story body
+// instead of a flat template.
+function interestToMicro(s: any, topic: string, kind: 'interest' | 'sector' = 'interest') {
+  const body = String(s?.body || '');
+  const sentences = body.split(/(?<=[.!?])\s+/).filter(Boolean);
+  const what = sentences[0] || body;
+  const derivedWhy = sentences.slice(1).join(' ').trim();
+  const fallbackWhy = kind === 'sector'
+    ? `Relevant to your sector, ${topic}.`
+    : `Relevant to your interest in ${topic}.`;
+  return {
+    headline: s.headline,
+    what_happened: what.trim(),
+    why_it_matters: (s?.why_it_matters && String(s.why_it_matters).trim()) || derivedWhy || fallbackWhy,
+    source: s.source,
+    source_url: s.source_url,
+    industries: [],
+    interests: [],
+    city_tags: [],
+    topic_tags: [],
+    must_include: false,
+  };
+}
+
+function interestToFull(s: any, topic: string, kind: 'interest' | 'sector' = 'interest') {
+  const body = String(s?.body || '');
+  const sentences = body.split(/(?<=[.!?])\s+/).filter(Boolean);
+  const derivedWhy = sentences.slice(1).join(' ').trim();
+  const fallbackWhy = kind === 'sector'
+    ? `Relevant to your sector, ${topic}.`
+    : `Relevant to your interest in ${topic}.`;
+  const analysis = kind === 'sector'
+    ? `Included because ${topic} is your industry.`
+    : `Included because ${topic} is one of your interests.`;
+  const background = kind === 'sector'
+    ? `Recent development in the ${topic} sector.`
+    : `Recent development in ${topic}.`;
+  return {
+    headline: s.headline,
+    facts: body,
+    background,
+    why_it_matters: (s?.why_it_matters && String(s.why_it_matters).trim()) || derivedWhy || fallbackWhy,
+    what_happens_next: 'Watch for follow-up coverage and official updates.',
+    analysis,
     source: s.source,
     source_url: s.source_url,
     industries: [],
@@ -1123,12 +1194,12 @@ function makeInterestSection(
   const fetched = interestCache.get(interest) || [];
   if (fetched.length === 0) return null;
   // Branch the map so TypeScript sees a single concrete callback per call.
-  // (A conditional `.map(shape === 'micro' ? cityToMicro : cityToFull)` fails
-  // type-check because the two return shapes don't unify.)
+  // (A conditional `.map(shape === 'micro' ? ... : ...)` fails type-check
+  // because the two return shapes don't unify.)
   const sliced = fetched.slice(0, storiesPerSection);
   const stories: any[] = shape === 'micro'
-    ? sliced.map(cityToMicro)
-    : sliced.map(cityToFull);
+    ? sliced.map((s) => interestToMicro(s, interest))
+    : sliced.map((s) => interestToFull(s, interest));
 
   return {
     id,
@@ -1287,6 +1358,7 @@ async function savePersonalised(
 // ─── Handler ────────────────────────────────────────────────────────────────
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  attachLogCapture(res); // Sprint 14.5: tee server logs into the JSON response
   if (req.method !== 'POST' && req.method !== 'GET') {
     return res.status(405).json({ success: false, error: 'Method not allowed' });
   }

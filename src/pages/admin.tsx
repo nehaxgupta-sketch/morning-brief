@@ -112,7 +112,16 @@ async function safeJsonFetch(url: string, init?: RequestInit): Promise<any> {
     )
   }
   try {
-    return JSON.parse(text)
+    const parsed = JSON.parse(text)
+    // Sprint 14.5: each /api route now returns its own server-side logs
+    // (per-story strip/dead-link/backfill lines, per-desk writer/scorer lines,
+    // coherence flags). Emit them so the console tee folds them into the
+    // downloadable run log. Tagged so they're distinguishable from page logs.
+    if (parsed && Array.isArray(parsed.logs) && parsed.logs.length) {
+      const tag = url.replace('/api/', '')
+      for (const line of parsed.logs) console.info(`[srv:${tag}] ${line}`)
+    }
+    return parsed
   } catch (e: any) {
     const snippet = text.slice(0, 300).replace(/\s+/g, ' ').trim()
     throw new Error(`Failed to parse JSON response: ${e.message}. Snippet: ${snippet}`)
@@ -454,7 +463,9 @@ export default function AdminPage() {
 
   // Sprint 14.3: mirror everything the page logs into an in-memory buffer so
   // the operator can download the full run output as JSON. Console still works
-  // as before; we just tee each call into state. Capped to the last 800 lines.
+  // as before; we just tee each call into state. Sprint 14.5: cap raised to
+  // 4000 lines because the routes now stream their server-side detail through
+  // here too.
   useEffect(() => {
     const orig = { log: console.log, info: console.info, warn: console.warn, error: console.error }
     const tee = (level: LogEntry['level'], passthrough: (...a: any[]) => void) => (...args: any[]) => {
@@ -465,7 +476,7 @@ export default function AdminPage() {
         }).join(' ')
         const ts = new Date(Date.now() + 5.5 * 60 * 60 * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' IST'
         setAdminLog(prev => {
-          const next = prev.length >= 800 ? prev.slice(prev.length - 799) : prev.slice()
+          const next = prev.length >= 4000 ? prev.slice(prev.length - 3999) : prev.slice()
           next.push({ ts, level, msg })
           return next
         })
@@ -825,23 +836,29 @@ export default function AdminPage() {
       const counts: Record<string, number> = {}
       const errors: Record<string, string> = {}
 
-      const pull = async (table: string, useDate: boolean) => {
+      const pull = async (table: string, useDate: boolean, columns: string = '*') => {
         let res = useDate && since
-          ? await supabase.from(table).select('*').gte('date', since)
-          : await supabase.from(table).select('*')
+          ? await supabase.from(table).select(columns).gte('date', since)
+          : await supabase.from(table).select(columns)
         // If the window filter hit a table with no `date` column, retry plain
         // so it still exports rather than silently dropping out.
         if (res.error && useDate) {
-          res = await supabase.from(table).select('*')
+          res = await supabase.from(table).select(columns)
         }
         if (res.error) { errors[table] = res.error.message; return }
-        data[table] = res.data || []
+        data[table] = (res.data || []) as any[]
         counts[table] = (res.data || []).length
       }
 
       await Promise.all([
         ...datedTables.map(t => pull(t, true)),
         ...fullTables.map(t => pull(t, false)),
+        // Sprint 14.4: profiles was the one table missing from the export, so
+        // the dashboard could never answer "which users should have received a
+        // brief today?". Pulled with an explicit column list — NOT select(*) —
+        // so email and other PII stay out of the downloaded JSON. Add a column
+        // here only if you actually need it for QA.
+        pull('profiles', false, 'id, full_name, city_current, city_home, brief_type, interests, onboarding_complete, created_at, updated_at'),
       ])
 
       const payload = {
@@ -867,16 +884,111 @@ export default function AdminPage() {
     setExporting(false)
   }
 
-  // Download the captured admin run output as JSON.
+  // Download the captured admin run output + a full page snapshot as JSON.
+  //
+  // Sprint 14.4: the log alone was near-useless (the pipeline reported through
+  // UI state, so only the final line was captured — now fixed by the setStage
+  // tee). On top of that, this bundles a PAGE SNAPSHOT recomputed from the same
+  // state the panels render from, using the same pure helpers — so the operator
+  // never has to screenshot the dashboard. Everything visible (brief statuses,
+  // scores, desks, cost by phase/provider, top publishers, tails, history) lands
+  // in one diffable JSON.
   function downloadAdminLog() {
+    // Cost rollup (today + 8-day) by phase and by provider — mirrors the
+    // cost panel's COST / BY PROVIDER / 8-DAY TREND sections.
+    const rollCost = (list: CostRow[]) => {
+      const byPhase: Record<string, { calls: number; usd: number; in: number; out: number }> = {}
+      const byProvider: Record<string, { calls: number; usd: number }> = {}
+      let usd = 0
+      for (const r of list) {
+        const c = Number(r.usd_cost) || 0
+        usd += c
+        const ph = r.phase || '?'
+        if (!byPhase[ph]) byPhase[ph] = { calls: 0, usd: 0, in: 0, out: 0 }
+        byPhase[ph].calls++; byPhase[ph].usd = Number((byPhase[ph].usd + c).toFixed(6))
+        byPhase[ph].in += r.input_tokens || 0; byPhase[ph].out += r.output_tokens || 0
+        const pv = providerOf(r.model)
+        if (!byProvider[pv]) byProvider[pv] = { calls: 0, usd: 0 }
+        byProvider[pv].calls++; byProvider[pv].usd = Number((byProvider[pv].usd + c).toFixed(6))
+      }
+      return {
+        total_usd: Number(usd.toFixed(6)),
+        total_inr_approx: Math.round(usd * 83),
+        calls: list.length,
+        by_phase: byPhase,
+        by_provider: byProvider,
+      }
+    }
+
+    // Per-edition 7-day score averages — mirrors the 8-DAY AVERAGES panel.
+    const avgScores = (list: ScoreRow[]) => {
+      const m: Record<string, { sum: number; n: number; max: number }> = {}
+      for (const s of list) {
+        if (s.total == null) continue
+        if (!m[s.edition]) m[s.edition] = { sum: 0, n: 0, max: s.max_score }
+        m[s.edition].sum += s.total; m[s.edition].n++
+      }
+      const out: Record<string, { avg: number; max: number; n: number }> = {}
+      for (const k of Object.keys(m)) out[k] = { avg: Number((m[k].sum / m[k].n).toFixed(1)), max: m[k].max, n: m[k].n }
+      return out
+    }
+
+    // Top publishers across today's briefs — same computation as the panel.
+    const pubCounts = new Map<string, number>()
+    for (const r of rows) {
+      for (const u of collectSourceUrls(r.content)) {
+        const h = extractHost(u)
+        if (h) pubCounts.set(h, (pubCounts.get(h) || 0) + 1)
+      }
+    }
+    const topPublishers = Array.from(pubCounts.entries())
+      .sort((a, b) => b[1] - a[1]).slice(0, 12)
+      .map(([host, count]) => ({ host, count }))
+
+    const desks = deskRows.map(d => {
+      const ed = deskEditions[d.slug]
+      const sectionCounts: Record<string, number> = {}
+      if (ed && ed.content && typeof ed.content === 'object') {
+        for (const k of Object.keys(ed.content)) {
+          const v = (ed.content as any)[k]
+          if (Array.isArray(v)) sectionCounts[k] = v.length
+        }
+      }
+      return {
+        slug: d.slug, name: d.name,
+        catalog_status: d.status,
+        edition_status: ed?.status ?? 'missing',
+        subscribers: deskSubCounts[d.slug] ?? 0,
+        section_counts: sectionCounts,
+      }
+    })
+
+    const snapshot = {
+      selected_date: selectedDate,
+      briefs: rows.map(r => ({ date: r.date, edition: r.edition, status: r.status, generated_at: r.generated_at })),
+      personalisation: personalisedToday,
+      desks,
+      scores_today: scoresToday,
+      scores_7d_avg: avgScores(scores7d),
+      cost_today: rollCost(costsToday),
+      cost_8d: rollCost(costs7d),
+      top_publishers: topPublishers,
+      storylines: { count: storylineRows.length, follows: storylineCounts.follows, events: storylineCounts.events },
+      tails: tailBriefRows.map(t => ({ type: t.tail_type, key: t.tail_key, name: t.display_name, status: t.status, story_count: t.story_count, used_regional: t.used_regional, reason: t.reason })),
+      tail_empty_count: tailBriefRows.filter(t => t.status === 'empty' || (t.story_count ?? 0) === 0).length,
+      history,
+    }
+
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
     downloadJSON(`morning-brief-admin-log-${stamp}.json`, {
       exported_at: new Date().toISOString(),
       date_selected: selectedDate,
       line_count: adminLog.length,
-      entries: adminLog,
+      run_log: adminLog,
+      page_snapshot: snapshot,
     })
-    setExportResult(`Log downloaded · ${adminLog.length} line${adminLog.length === 1 ? '' : 's'}`)
+    setExportResult(`Log + snapshot downloaded · ${adminLog.length} log line${adminLog.length === 1 ? '' : 's'}`)
+    console.info(`[admin] Downloaded run log (${adminLog.length} lines) + page snapshot.`)
   }
 
   async function triggerScoring() {
@@ -921,6 +1033,19 @@ export default function AdminPage() {
     const setStage = (id: StageId, patch: Partial<StageState>) => {
       stages = stages.map(s => s.id === id ? { ...s, ...patch } : s)
       setMasterStages(stages)
+      // Sprint 14.4: tee stage transitions into the run log. Previously the
+      // pipeline reported progress ONLY through UI state (these stage cards),
+      // so the downloadable log captured just the final "finished" line. Now
+      // every status change — with its detail string, which already carries
+      // counts/sources/warnings — is mirrored to the console and thus into
+      // adminLog. (Server-side per-story/per-desk lines still live in Vercel
+      // logs until the /api routes return their own `logs` array.)
+      if (patch.status) {
+        const detail = patch.detail ? ` — ${patch.detail}` : ''
+        const line = `[stage:${id}] ${patch.status}${detail}`
+        if (patch.status === 'failed') console.error(line)
+        else console.info(line)
+      }
     }
 
     const skipRemaining = (afterId: StageId) => {
@@ -932,6 +1057,7 @@ export default function AdminPage() {
     }
 
     const pipelineStart = Date.now()
+    console.info(`[admin] Full pipeline started for ${selectedDate}.`)
 
     try {
       // ─── Stage 1: fetch ──────────────────────────────────────────────
@@ -1299,12 +1425,12 @@ export default function AdminPage() {
             letterSpacing: '1.5px', cursor: exporting ? 'not-allowed' : 'pointer',
             opacity: exporting ? 0.5 : 1, minHeight: '44px',
           }}>ALL-TIME</button>
-          <button onClick={downloadAdminLog} disabled={adminLog.length === 0} style={{
+          <button onClick={downloadAdminLog} style={{
             background: 'none', border: `1px solid ${C.border}`, color: C.textSoft,
             padding: '10px 14px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
-            letterSpacing: '1.5px', cursor: adminLog.length === 0 ? 'not-allowed' : 'pointer',
-            opacity: adminLog.length === 0 ? 0.4 : 1, minHeight: '44px',
-          }}>↓ DOWNLOAD LOG</button>
+            letterSpacing: '1.5px', cursor: 'pointer',
+            minHeight: '44px',
+          }}>↓ DOWNLOAD LOG + SNAPSHOT</button>
           <button onClick={() => setShowLog(v => !v)} style={{
             background: 'none', border: `1px solid ${C.border}`, color: C.textMute,
             padding: '10px 14px', fontFamily: "'DM Mono', monospace", fontSize: '11px',

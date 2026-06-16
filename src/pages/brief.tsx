@@ -8,10 +8,11 @@
 // The Daily and The Editorial.
 // Backward compatible: legacy briefs without new fields fall back gracefully.
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, createContext, useContext } from 'react'
 import { useRouter } from 'next/router'
 import Link from 'next/link'
 import { supabase, Profile } from '@/lib/supabase'
+import { listSavedUrls, saveStory, unsaveStory } from '@/lib/saved'
 
 const C = {
   bg: '#0E0E0E', surface: '#161616', surface2: '#1E1E1E',
@@ -103,6 +104,23 @@ function editionDisplay(edition: string) {
   if (edition === '10min') return 'The Daily'
   if (edition === 'deep') return 'The Editorial'
   return edition
+}
+
+// Sprint 14.5: IST-anchored date helper. Briefs are dated by IST (the backend
+// uses getISTDate), so the reader must resolve dates in IST too — otherwise a
+// user opening late at night could query the wrong calendar day. offsetDays=0
+// is today, 1 is yesterday, 2 is the day before.
+function istDateISO(offsetDays = 0): string {
+  const istMs = Date.now() + 5.5 * 60 * 60 * 1000 - offsetDays * 86400000
+  return new Date(istMs).toISOString().slice(0, 10)
+}
+
+// Relative label for a brief date, for the header ("" when it's today).
+function relativeDateTag(iso: string): string {
+  if (iso === istDateISO(0)) return ''
+  if (iso === istDateISO(1)) return 'YESTERDAY'
+  if (iso === istDateISO(2)) return '2 DAYS AGO'
+  return ''
 }
 
 function marketColor(change: string) {
@@ -232,6 +250,38 @@ function FollowButton({ state, nudge, onToggle }: {
 }
 
 // The follow API handed down from BriefPage to renderers and cards.
+// Sprint 14.6: save-a-story. Provided once at the top of the reader so the
+// per-story button reads/writes shared state without prop-threading through
+// every section/card layer.
+type SaveApi = { isSaved: (story: any) => boolean; toggle: (story: any) => void }
+const SavedContext = createContext<SaveApi | null>(null)
+
+function SaveButton({ story }: { story: any }) {
+  const api = useContext(SavedContext)
+  const url = story?.source_url || ''
+  if (!api || !url) return null
+  const saved = api.isSaved(story)
+  return (
+    <button
+      onClick={(e) => { e.preventDefault(); e.stopPropagation(); api.toggle(story) }}
+      aria-label={saved ? 'Saved — tap to remove' : 'Save story'}
+      style={{
+        background: 'none',
+        border: `1px solid ${saved ? C.goldBorder : C.border}`,
+        color: saved ? C.gold : C.textMute,
+        borderRadius: '2px',
+        padding: '6px 10px',
+        cursor: 'pointer',
+        fontFamily: "'DM Mono', monospace",
+        fontSize: '10px',
+        letterSpacing: '1px',
+        minHeight: '36px',
+        whiteSpace: 'nowrap',
+      }}
+    >{saved ? '★ SAVED' : '☆ SAVE'}</button>
+  )
+}
+
 interface FollowApi {
   stateFor: (story: any) => FollowState
   nudgeFor: (story: any) => boolean
@@ -272,7 +322,10 @@ function MicroCard({ story, follow }: {
       )}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <SourceLine source={story.source} sourceUrl={story.source_url} />
-        <FollowButton state={follow.stateFor(story)} nudge={follow.nudgeFor(story)} onToggle={() => follow.toggle(story)} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <SaveButton story={story} />
+          <FollowButton state={follow.stateFor(story)} nudge={follow.nudgeFor(story)} onToggle={() => follow.toggle(story)} />
+        </div>
       </div>
     </div>
   )
@@ -323,7 +376,10 @@ function FullCard({ story, follow }: {
 
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <SourceLine source={story.source} sourceUrl={story.source_url} />
-        <FollowButton state={follow.stateFor(story)} nudge={follow.nudgeFor(story)} onToggle={() => follow.toggle(story)} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <SaveButton story={story} />
+          <FollowButton state={follow.stateFor(story)} nudge={follow.nudgeFor(story)} onToggle={() => follow.toggle(story)} />
+        </div>
       </div>
     </div>
   )
@@ -1052,6 +1108,7 @@ export default function BriefPage() {
   const [storylineByUrl, setStorylineByUrl] = useState<Map<string, { id: string; title: string; confidence: string }>>(new Map())
   const [followedIds, setFollowedIds] = useState<Set<string>>(new Set())
   const [busyUrls, setBusyUrls] = useState<Set<string>>(new Set())
+  const [savedUrls, setSavedUrls] = useState<Set<string>>(new Set()) // Sprint 14.6
   const [declinedUrls, setDeclinedUrls] = useState<Set<string>>(new Set())
   const [accessToken, setAccessToken] = useState<string>('')
   const [isPersonalised, setIsPersonalised] = useState(false)
@@ -1059,11 +1116,18 @@ export default function BriefPage() {
   // matched to the reader's interests (read-time, since desks generate after
   // the personalise stage).
   const [deskFeature, setDeskFeature] = useState<{ deskSlug: string; deskName: string; feature: any } | null>(null)
+  // Sprint 14.5: which day's brief is being shown (today / yesterday / 2 days
+  // ago), driven by the ?date= param the home toggle passes. Defaults to today.
+  const [briefDateISO, setBriefDateISO] = useState<string>(istDateISO(0))
 
   const today = new Date().toLocaleDateString('en-IN', {
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
   })
-  const todayISO = new Date().toISOString().split('T')[0]
+  // Display label for whichever day is being shown, plus its relative tag.
+  const briefDateLabel = new Date(`${briefDateISO}T00:00:00`).toLocaleDateString('en-IN', {
+    weekday: 'short', day: 'numeric', month: 'short',
+  })
+  const briefDateTag = relativeDateTag(briefDateISO)
 
   // Optional edition override from URL — used by home flash card buttons:
   // /brief?edition=5min  /brief?edition=10min  /brief?edition=deep
@@ -1076,10 +1140,19 @@ export default function BriefPage() {
   }, [router.isReady, router.query.edition])
 
   useEffect(() => {
+    if (!router.isReady) return
+    // Sprint 14.5: resolve which day's brief to load. Only today / yesterday /
+    // 2-days-ago are allowed; anything else falls back to today.
+    const allowed = [istDateISO(0), istDateISO(1), istDateISO(2)]
+    const qDate = typeof router.query.date === 'string' ? router.query.date : ''
+    const briefDate = allowed.includes(qDate) ? qDate : istDateISO(0)
+    setBriefDateISO(briefDate)
     const load = async () => {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) { window.location.href = '/login'; return }
       setUserId(user.id)
+      // Sprint 14.6: load which stories this user has already saved.
+      listSavedUrls(user.id).then((urls) => setSavedUrls(new Set(urls))).catch(() => {})
 
       const { data: profileData } = await supabase
         .from('profiles').select('*').eq('id', user.id).single()
@@ -1102,7 +1175,7 @@ export default function BriefPage() {
           .from('personalised_briefs')
           .select('edition, content')
           .eq('user_id', user.id)
-          .eq('date', todayISO)
+          .eq('date', briefDate)
           .in('status', ['ready', 'fallback'])
         if (personalised && personalised.length > 0) {
           personalised.forEach((row: any) => { loadedBriefs[row.edition] = row.content })
@@ -1113,7 +1186,7 @@ export default function BriefPage() {
         const { data: standard } = await supabase
           .from('briefs')
           .select('edition, content')
-          .eq('date', todayISO)
+          .eq('date', briefDate)
           .in('status', ['ready', 'fallback'])
         if (standard && standard.length > 0) {
           standard.forEach((row: any) => { loadedBriefs[row.edition] = row.content })
@@ -1144,7 +1217,7 @@ export default function BriefPage() {
                 .select('desk_slug, content, status, date')
                 .in('desk_slug', wantedSlugs)
                 .in('status', ['ready', 'thin'])
-                .eq('date', todayISO),
+                .eq('date', briefDate),
               supabase.from('desks').select('slug, name').in('slug', wantedSlugs),
             ])
             const nameBySlug: Record<string, string> = {}
@@ -1185,7 +1258,7 @@ export default function BriefPage() {
     }
     load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [router.isReady, router.query.date])
 
   // Sprint 13: follow/unfollow. Stories already mapped to a storyline toggle
   // directly via RLS. Unmapped stories ask /api/storylines to qualify +
@@ -1290,10 +1363,30 @@ export default function BriefPage() {
     toggle: toggleFollow,
   }
 
+  // Sprint 14.6: optimistic save/unsave with revert on failure.
+  const toggleSave = async (story: any) => {
+    const url = story?.source_url || ''
+    if (!url || !userId) return
+    const wasSaved = savedUrls.has(url)
+    setSavedUrls((prev) => { const n = new Set(prev); if (wasSaved) n.delete(url); else n.add(url); return n })
+    const res = wasSaved
+      ? await unsaveStory(userId, url)
+      : await saveStory(userId, { source_url: url, headline: story.headline, source: story.source })
+    if (res.error) {
+      setSavedUrls((prev) => { const n = new Set(prev); if (wasSaved) n.add(url); else n.delete(url); return n })
+      console.warn('[saved] toggle failed:', res.error)
+    }
+  }
+  const saveApi: SaveApi = {
+    isSaved: (s: any) => !!s?.source_url && savedUrls.has(s.source_url),
+    toggle: toggleSave,
+  }
+
   const activeBrief = briefs[activeEdition]
   const hasBriefs = Object.keys(briefs).length > 0
 
   return (
+    <SavedContext.Provider value={saveApi}>
     <div style={{ minHeight: '100vh', background: C.bg }}>
       {/* Header */}
       <div style={{
@@ -1317,10 +1410,16 @@ export default function BriefPage() {
             }}>Brief</div>
           </div>
           <div style={{ marginLeft: 'auto', textAlign: 'right' }}>
+            {briefDateTag && (
+              <div style={{
+                fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                letterSpacing: '1.5px', color: C.gold, lineHeight: 1.7,
+              }}>{briefDateTag}</div>
+            )}
             <div style={{
               fontFamily: "'DM Mono', monospace", fontSize: '10px',
               letterSpacing: '1.5px', color: C.textMute, lineHeight: 1.7,
-            }}>{today.toUpperCase()}</div>
+            }}>{(briefDateTag ? briefDateLabel : today).toUpperCase()}</div>
             <div style={{
               fontFamily: "'DM Mono', monospace", fontSize: '10px',
               letterSpacing: '1.5px', color: C.gold,
@@ -1405,5 +1504,6 @@ export default function BriefPage() {
         ))}
       </div>
     </div>
+    </SavedContext.Provider>
   )
 }

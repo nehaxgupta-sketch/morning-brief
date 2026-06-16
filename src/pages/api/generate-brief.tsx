@@ -44,6 +44,8 @@ import {
   extractUsageFromChatCompletion,
   extractUsageFromResponses,
 } from '@/lib/cost-log';
+import { attachLogCapture } from '@/lib/log-capture';
+import { applyCitySafety } from '@/lib/editorial-safety';
 
 // 300s = 5min. Vercel Pro caps at 300; Hobby with Fluid Compute enabled also
 // reaches 300. gpt-5 with reasoning web_search at 'low' effort runs ~150-200s.
@@ -2405,7 +2407,13 @@ IMPORTANT FOR SPORT AND CULTURE: the output shape above shows 4 slots for clarit
 Raw stories:
 ${JSON.stringify(rawStoriesForWriter(raw))}`;
 
-  return callOpenAIChat('gpt-4o-mini', prompt, 14000, 'The Daily (10min)', '10min');
+  // Sprint 14.5: upgraded gpt-4o-mini → gpt-4o. On 06-14 the mini writer was
+  // handed a healthy, well-distributed subset (india 5, tech 2, sport 1,
+  // culture 1, climate 1) and collapsed it to 7 stories, zeroing five sections
+  // — scoring 37/70 with a -25 empty-section penalty. The 5min and deep
+  // editions already run on gpt-4o and scored 52 and 59. gpt-4o follows the
+  // "include EVERY story / no empty sections" instruction far more reliably.
+  return callOpenAIChat('gpt-4o', prompt, 14000, 'The Daily (10min)', '10min');
 }
 
 async function writeEditorialEdition(raw: RawStories): Promise<BriefEditorial> {
@@ -2532,6 +2540,115 @@ async function callOpenAIChat(
 // Without this, the brief fails validation and the whole 10min edition is
 // lost, cascading to all personalised 10min editions being skipped.
 
+// ─── Sprint 14.5: deterministic section backfill (safety net for #1) ─────────
+// Even on gpt-4o the writer can occasionally drop a whole section. Rather than
+// trust the model, we guarantee section presence: if the writer emitted ZERO
+// stories for a topical section the subset actually supplied, we backfill that
+// section from the raw subset. Backfilled stories are honest but lighter — the
+// model upgrade should make this fire rarely; it exists so a section is never
+// silently lost. Runs inside repairCommonOmissions (before validation+strip),
+// so backfilled stories are schema-checked and whitelist-checked like any
+// other (subset stories already passed the fetch-time quality gate).
+function rawToFullStory(s: any): any {
+  const body = String(s?.body || s?.facts || '').trim();
+  const sentences = body.split(/(?<=[.!?])\s+/).filter(Boolean);
+  const facts = sentences.slice(0, 2).join(' ').trim();
+  const why = sentences.slice(2).join(' ').trim();
+  return {
+    headline: String(s?.headline || '').trim() || 'Update',
+    facts: facts || body || String(s?.headline || 'See the linked source for details.'),
+    background: `Reported by ${s?.source || 'the source'}.`,
+    why_it_matters: why || 'Relevant context for Indian readers; see the linked report for detail.',
+    what_happens_next: 'Watch for follow-up coverage and official updates.',
+    analysis: 'Included for completeness; see the linked source for the full account.',
+    source: String(s?.source || '').trim(),
+    source_url: String(s?.source_url || '').trim(),
+    industries: Array.isArray(s?.industries) ? s.industries : [],
+    interests: Array.isArray(s?.interests) ? s.interests : [],
+    city_tags: Array.isArray(s?.city_tags) ? s.city_tags : [],
+    topic_tags: Array.isArray(s?.topic_tags) ? s.topic_tags : [],
+    must_include: !!s?.must_include,
+  };
+}
+
+const DAILY_BACKFILL_SECTIONS = ['major_events', 'india', 'world', 'business', 'technology', 'climate_health', 'sport', 'culture'];
+
+function backfillEmptyDailySections(content: any, subset: RawStories): number {
+  let added = 0;
+  for (const sec of DAILY_BACKFILL_SECTIONS) {
+    const out = Array.isArray(content[sec]) ? content[sec] : [];
+    const src = Array.isArray((subset as any)[sec]) ? (subset as any)[sec] : [];
+    if (out.length === 0 && src.length > 0) {
+      content[sec] = src.map(rawToFullStory);
+      added += content[sec].length;
+      console.warn(`[10min] Writer emitted 0 stories for "${sec}" though ${src.length} were supplied — backfilled ${content[sec].length} from raw.`);
+    }
+  }
+  return added;
+}
+
+// ─── Sprint 14.5: coherence / copy-desk QA pass (#3) ─────────────────────────
+// Non-blocking review of the assembled edition. Catches the trust-breaking
+// classes the 06-14 brief showed: same-day contradictions (Gulf "escalation"
+// vs "peace"), fabricated-looking numbers, unattributed quotes, stale items
+// written as today's news, and the same story repeated across sections. It
+// only LOGS issues (it never edits or blocks the brief) — so it is safe to run
+// on every write. Runs on 10min + deep, where synthesis/contradiction risk is
+// highest. Issues land in the server logs today; once the /api routes return
+// their logs (Layer 2) they'll show on the admin dashboard too.
+async function runCoherenceCheck(edition: Edition, content: any): Promise<void> {
+  if (!OPENAI_API_KEY) return;
+  const compact = JSON.stringify(content).slice(0, 24000);
+  const today = getISTDate();
+  const prompt = `You are a copy-desk QA reviewer for an Indian daily brief (edition: ${edition}, date ${today}). Review the assembled brief JSON below and flag ONLY real problems a careful reader would catch. Be terse.
+Check for:
+1) internal contradictions — e.g. one part says a conflict is escalating while another says peace was reached the same day, or oil up in one place and down in another.
+2) numbers or charts that look fabricated or internally inconsistent (e.g. a too-perfect sequence, or values that contradict the prose).
+3) quotes with no named, real attribution.
+4) stale items written as if they are today's development.
+5) the same story repeated across multiple sections.
+Return ONLY JSON: {"issues":[{"type":"contradiction|fabrication|attribution|stale|duplication","where":"section/field","detail":"one sentence"}],"summary":"one sentence overall"}. If nothing is wrong, return {"issues":[],"summary":"clean"}.
+
+BRIEF JSON:
+${compact}`;
+  try {
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENAI_API_KEY}` },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 900,
+        response_format: { type: 'json_object' },
+      }),
+    });
+    const data = await response.json();
+    const usage = extractUsageFromChatCompletion(data);
+    void logOpenAICost({
+      phase: 'score',
+      model: 'gpt-4o-mini',
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      reasoningTokens: usage.reasoningTokens,
+      detail: `coherence:${edition}`,
+    });
+    const txt = data?.choices?.[0]?.message?.content;
+    if (!txt) { console.warn(`[coherence:${edition}] empty response`); return; }
+    const parsed = extractJsonObject(txt);
+    const issues = Array.isArray(parsed?.issues) ? parsed.issues : [];
+    if (issues.length === 0) {
+      console.info(`[coherence:${edition}] clean — ${parsed?.summary || 'no issues'}`);
+      return;
+    }
+    console.warn(`[coherence:${edition}] ${issues.length} issue(s) — ${parsed?.summary || ''}`);
+    for (const it of issues.slice(0, 12)) {
+      console.warn(`[coherence:${edition}]  - ${it?.type || 'issue'} @ ${it?.where || '?'}: ${it?.detail || ''}`);
+    }
+  } catch (e: any) {
+    console.warn(`[coherence:${edition}] check failed: ${e?.message || e}`);
+  }
+}
+
 function repairCommonOmissions(content: any, edition: Edition, raw: RawStories): any {
   if (!content || typeof content !== 'object') return content;
 
@@ -2552,6 +2669,13 @@ function repairCommonOmissions(content: any, edition: Edition, raw: RawStories):
       // Writer kept the object but may have mutated indices. Force indices
       // back to raw (prompt requires this anyway) to prevent drift.
       content.markets.indices = raw.markets?.indices || content.markets.indices;
+    }
+
+    // Sprint 14.5: guarantee section presence — backfill any topical section
+    // the writer dropped to zero despite raw supplying stories.
+    const backfilled = backfillEmptyDailySections(content, raw);
+    if (backfilled > 0) {
+      console.warn(`[10min] repair backfilled ${backfilled} stor${backfilled === 1 ? 'y' : 'ies'} into empty sections.`);
     }
   }
 
@@ -2840,6 +2964,140 @@ async function dropDeadLinkStories(
   return { content: out, dropped };
 }
 
+// ─── Sprint 14.4: deterministic editorial guardrails ────────────────────────
+// These run AFTER the writer, BEFORE save. The writer prompts already ask for
+// the right behaviour, but gpt-4o / gpt-4o-mini occasionally ignore it — the
+// 06-14 deep brief shipped a fabricated chart (values 150/200/250/300/350,
+// labelled into 2027-2028) and a quote attributed to "Independent Commentary",
+// and the 10min ran the same Anthropic story in three sections. We enforce the
+// trust-critical rules in code rather than hope the model complies.
+
+// Compare-only URL normalisation. We do NOT mutate the stored source_url
+// (other stages match it verbatim) — this is purely for duplicate detection.
+function normaliseUrlForCompare(url: string | undefined | null): string {
+  let u = String(url || '').trim().toLowerCase();
+  if (!u) return '';
+  u = u.replace(/^https?:\/\//, '').replace(/^www\./, '');
+  u = u.split(/[?#]/)[0];
+  u = u.replace(/\/(amp|lite)\/?$/i, '/');
+  u = u.replace(/\/+$/g, '');
+  return u;
+}
+
+const DAILY_SECTION_PRIORITY = [
+  'major_events', 'india', 'world', 'business', 'politics',
+  'markets_news', 'technology', 'climate_health', 'sport', 'culture',
+];
+
+// Remove the same story (by URL) appearing in multiple sections. CONSERVATIVE:
+// a duplicate is only dropped from a lower-priority section when that section
+// keeps at least one story afterwards. We never blank a section — that would
+// both hide content and (perversely) trigger the scorer's empty-section
+// penalty. On thin days this is a no-op; on rich days it kills the triple-list.
+function dedupeDailyAcrossSections(content: any): { content: any; dropped: number } {
+  if (!content || typeof content !== 'object') return { content, dropped: 0 };
+  const seen = new Set<string>();
+  let dropped = 0;
+  for (const sec of DAILY_SECTION_PRIORITY) {
+    const arr = content[sec];
+    if (!Array.isArray(arr) || arr.length === 0) continue;
+    const uniques: any[] = [];
+    const dups: any[] = [];
+    for (const story of arr) {
+      const key = normaliseUrlForCompare(story?.source_url);
+      if (key && seen.has(key)) dups.push(story);
+      else uniques.push(story);
+    }
+    let kept: any[];
+    if (uniques.length > 0) {
+      kept = uniques;
+      dropped += dups.length;
+    } else {
+      // Every story here duplicates a higher-priority section. Keep one so the
+      // section isn't blanked; drop the rest.
+      kept = arr.slice(0, 1);
+      dropped += arr.length - 1;
+    }
+    for (const story of kept) {
+      const key = normaliseUrlForCompare(story?.source_url);
+      if (key) seen.add(key);
+    }
+    content[sec] = kept;
+  }
+  return { content, dropped };
+}
+
+// Attribution strings that aren't real attributions. A quote pinned to any of
+// these (or to nothing) is dropped — better no quote than a fabricated one.
+const GENERIC_ATTRIBUTIONS = new Set([
+  'independent commentary', 'commentary', 'analyst', 'analysts', 'an analyst',
+  'expert', 'experts', 'an expert', 'observer', 'observers', 'industry observer',
+  'industry observers', 'industry sources', 'sources', 'a source', 'spokesperson',
+  'a spokesperson', 'editorial', 'staff', 'correspondent', 'our correspondent',
+  'unknown', 'n/a', 'na', 'anonymous', 'official', 'officials',
+]);
+
+// A chart's data is treated as synthetic (and dropped) when it can't be drawn
+// from real numbers: too few points, any label projecting a future year, or a
+// suspiciously perfect arithmetic sequence (the textbook hallucination shape,
+// e.g. 150/200/250/300/350).
+function looksSyntheticChart(dp: any[]): boolean {
+  const pts = (dp || []).filter((p) => p && typeof p.value === 'number' && isFinite(p.value));
+  if (pts.length < 2) return true;
+  const year = new Date().getFullYear();
+  for (const p of pts) {
+    const yr = parseInt(String(p.label ?? ''), 10);
+    if (!isNaN(yr) && yr > 1900 && yr > year) return true;
+  }
+  if (pts.length >= 4) {
+    const deltas: number[] = [];
+    for (let i = 1; i < pts.length; i++) deltas.push(pts[i].value - pts[i - 1].value);
+    const allEqual = deltas.every((d) => Math.abs(d - deltas[0]) < 1e-9);
+    if (allEqual && Math.abs(deltas[0]) > 0) return true;
+  }
+  return false;
+}
+
+function sanitizeSignature(sig: any): { sig: any; notes: string[] } {
+  const notes: string[] = [];
+  if (!sig || typeof sig !== 'object') return { sig, notes };
+  if (sig.one_chart) {
+    const dp = Array.isArray(sig.one_chart.data_points) ? sig.one_chart.data_points : [];
+    if (dp.length === 0 || looksSyntheticChart(dp)) {
+      sig.one_chart = null;
+      notes.push('dropped one_chart (no real/usable data points)');
+    }
+  }
+  if (sig.one_quote) {
+    const attr = String(sig.one_quote.attribution || '').trim();
+    const quote = String(sig.one_quote.quote || '').trim();
+    const generic = !attr || GENERIC_ATTRIBUTIONS.has(attr.toLowerCase()) || !/[a-z]/i.test(attr);
+    if (!quote || generic) {
+      sig.one_quote = null;
+      notes.push('dropped one_quote (missing or unattributed)');
+    }
+  }
+  return { sig, notes };
+}
+
+// Per-edition post-write cleanup. Dispatches the guardrails relevant to each
+// edition. Pure/deterministic — safe to run on every successful write.
+function sanitizeEditionContent(ed: Edition, content: any): any {
+  if (!content || typeof content !== 'object') return content;
+  if (ed === '10min') {
+    const { content: deduped, dropped } = dedupeDailyAcrossSections(content);
+    if (dropped > 0) console.log(`[10min] cross-section dedupe removed ${dropped} duplicate listing(s).`);
+    return deduped;
+  }
+  if (ed === 'deep') {
+    const { sig, notes } = sanitizeSignature(content.signature);
+    content.signature = sig;
+    if (notes.length) console.log(`[deep] signature guardrails: ${notes.join('; ')}.`);
+    return content;
+  }
+  return content;
+}
+
 async function runWriterForEdition(
   ed: Edition,
   rawStories: RawStories,
@@ -2880,10 +3138,21 @@ async function runWriterForEdition(
         if (live.dropped > 0) {
           console.log(`[${ed}] URL liveness dropped ${live.dropped} dead-linked stories.`);
         }
+        // Sprint 14.4: deterministic editorial guardrails (dedupe / signature)
+        // run here — after validation/strip/liveness, before save — so they
+        // apply to exactly the content the reader will see.
+        const finalContent = sanitizeEditionContent(ed, live.content);
+        // Sprint 14.5: non-blocking copy-desk QA on the editions where
+        // contradiction/synthesis risk is highest. Logs issues; never edits or
+        // blocks the brief.
+        if (ed === '10min' || ed === 'deep') {
+          try { await runCoherenceCheck(ed, finalContent); }
+          catch (e: any) { console.warn(`[${ed}] coherence check skipped: ${e?.message || e}`); }
+        }
         // Save the FULL rawStories (not the subset) into the brief row so
         // downstream consumers see the same raw for every edition.
-        await saveBriefToSupabase(ed, rawStories, live.content, lens, 'ready');
-        return { status: 'ready', content: live.content };
+        await saveBriefToSupabase(ed, rawStories, finalContent, lens, 'ready');
+        return { status: 'ready', content: finalContent };
       }
       // Narrowed: validation is the failure branch here.
       const errMsg = (validation as { ok: false; errors: string }).errors;
@@ -3381,6 +3650,7 @@ interface TailStory {
   source: string;
   source_url: string;
   published_at?: string;
+  why_it_matters?: string; // Sprint 14.5: real per-story relevance, not a template
 }
 
 const TAIL_MODEL = 'gpt-4o-mini-search-preview';
@@ -3486,17 +3756,23 @@ async function callTailFetch(
   }
 
   const raw = Array.isArray(parsed?.stories) ? parsed.stories : [];
-  const kept: TailStory[] = [];
+  const candidates: TailStory[] = [];
   for (const s of raw) {
     if (!s || typeof s.headline !== 'string' || typeof s.body !== 'string' || typeof s.source !== 'string') continue;
     if (!isWhitelistedSource(s.source_url)) {
       console.warn(`[tail:${label}] dropping non-whitelisted source: ${s.source_url}`);
       continue;
     }
-    kept.push(s as TailStory);
-    if (kept.length >= 3) break;
+    candidates.push(s as TailStory);
   }
-  return kept;
+  // Sprint 14.5: editorial sensitivity for city tails — keep crime/tragedy out
+  // of the lead and cap it, so a "your city" section isn't dominated by a
+  // single murder/suicide item with light framing. (Reorder before the cap.)
+  const ordered = costPhase === 'city' ? applyCitySafety(candidates) : candidates;
+  if (costPhase === 'city' && ordered.length < candidates.length) {
+    console.log(`[tail:${label}] city-safety dropped ${candidates.length - ordered.length} sensitive item(s) from the top set.`);
+  }
+  return ordered.slice(0, 3);
 }
 
 // 7-day used-URL lookup for cross-day dedup.
@@ -3556,6 +3832,7 @@ Return ONLY a JSON object — no markdown, no commentary:
     {
       "headline": "clear factual headline (max 120 chars)",
       "body": "2-3 sentence factual summary — paraphrase, do not quote at length",
+      "why_it_matters": "ONE concrete sentence on why this matters to a resident of ${city} (commute, costs, safety, civic services, local economy). No filler.",
       "source": "publication name",
       "source_url": "https://... direct article link",
       "published_at": "${today}"
@@ -3595,7 +3872,7 @@ Specialist (where general sources don't cover): Nature, Science, STAT, TechCrunc
 Return ONLY a JSON object — no markdown:
 {
   "stories": [
-    { "headline": "your factual summary headline", "body": "2-3 sentence paraphrased summary", "source": "Publisher Name", "source_url": "https://...", "published_at": "${today}" }
+    { "headline": "your factual summary headline", "body": "2-3 sentence paraphrased summary", "why_it_matters": "ONE concrete sentence on why a reader who follows ${interest} should care — name the specific stake. No filler.", "source": "Publisher Name", "source_url": "https://...", "published_at": "${today}" }
   ]
 }`;
 
@@ -3633,7 +3910,7 @@ Specialist: TechCrunch, The Verge, Wired (tech), Nature/Science/STAT (health/pha
 Return ONLY a JSON object — no markdown:
 {
   "stories": [
-    { "headline": "your factual summary headline", "body": "2-3 sentence paraphrased summary", "source": "Publisher Name", "source_url": "https://...", "published_at": "${today}" }
+    { "headline": "your factual summary headline", "body": "2-3 sentence paraphrased summary", "why_it_matters": "ONE concrete sentence naming the transmission channel to the ${industry} sector (costs, demand, regulation, supply chain). No filler.", "source": "Publisher Name", "source_url": "https://...", "published_at": "${today}" }
   ]
 }`;
 
@@ -4325,6 +4602,7 @@ async function modeStorylines() {
 // ─── Handler ─────────────────────────────────────────────────────────────────
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  attachLogCapture(res); // Sprint 14.5: tee server logs into the JSON response
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   // Default mode is 'fetch'. This means a bare POST (e.g. legacy cron-job.org

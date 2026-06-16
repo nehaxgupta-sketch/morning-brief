@@ -43,6 +43,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { createClient } from '@supabase/supabase-js';
 import { isWhitelistedSource } from '@/lib/whitelist';
 import { logOpenAICost, extractUsageFromChatCompletion } from '@/lib/cost-log';
+import { attachLogCapture } from '@/lib/log-capture';
 
 export const config = { maxDuration: 300 };
 
@@ -846,6 +847,7 @@ async function runDesks(forceSlug?: string) {
 // ─── Handler ────────────────────────────────────────────────────────────────
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  attachLogCapture(res); // Sprint 14.5: tee server logs into the JSON response
   if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'Method not allowed' });
   if (!OPENAI_API_KEY) return res.status(500).json({ ok: false, error: 'Missing OPENAI_API_KEY' });
 

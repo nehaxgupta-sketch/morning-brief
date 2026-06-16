@@ -14,10 +14,17 @@
 // (RUN FULL PIPELINE includes it) and can be a cron.
 //
 // Body: {} = both; { "mode": "personalised" } or { "mode": "storylines" }.
+//
+// Sprint 14.5 — storyline scoring is gated. Scoring is internal QA only (it is
+// never shown to readers), so we no longer score every active storyline; we
+// score those a user FOLLOWS or that are new/updated today. Detection and the
+// story-so-far narrative (in generate-brief.tsx) stay broad so the Stories tab
+// is populated for new users — this change only trims wasted scorer calls.
 
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { createClient } from '@supabase/supabase-js';
 import { logOpenAICost, extractUsageFromChatCompletion } from '@/lib/cost-log';
+import { attachLogCapture } from '@/lib/log-capture';
 
 export const config = { maxDuration: 300 };
 
@@ -221,8 +228,26 @@ async function runStorylines() {
   if (error) return { ok: false, error: `storylines read failed: ${error.message}` };
   if (!lines || lines.length === 0) return { ok: true, results: {}, note: 'no active storylines' };
 
-  // Pull recent events for these storylines in one query.
-  const ids = lines.map((l: any) => l.id);
+  // Sprint 14.5: gate scoring to storylines a user FOLLOWS or that are
+  // new/updated today. Scoring is internal QA and never shown to readers, so
+  // there's no reader benefit to scoring stale, unfollowed narratives — this
+  // just trims wasted scorer calls. (Detection and story-so-far generation are
+  // unchanged and stay broad, so the Stories tab is still populated for new
+  // users to discover and follow.)
+  const { data: followRows } = await supabase
+    .from('storyline_follows')
+    .select('storyline_id');
+  const followed = new Set(((followRows || []) as any[]).map((r) => r.storyline_id));
+  const eligible = (lines as any[]).filter((l) =>
+    followed.has(l.id) || String(l.last_event_at || '').slice(0, 10) === today,
+  );
+  if (eligible.length === 0) {
+    return { ok: true, results: {}, note: 'no followed or fresh storylines to score today' };
+  }
+  console.log(`[score:storylines] ${eligible.length}/${lines.length} eligible (followed or fresh) — scoring those.`);
+
+  // Pull recent events for the eligible storylines in one query.
+  const ids = eligible.map((l: any) => l.id);
   const { data: evRows } = await supabase
     .from('storyline_events')
     .select('storyline_id, date, headline, source, source_url')
@@ -235,7 +260,7 @@ async function runStorylines() {
 
   const results: Record<string, any> = {};
   // Light concurrency to bound TPM.
-  const queue = [...lines];
+  const queue = [...eligible];
   async function worker() {
     while (queue.length) {
       const line = queue.shift();
@@ -259,6 +284,7 @@ async function runStorylines() {
 // ─── Handler ────────────────────────────────────────────────────────────────
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  attachLogCapture(res); // Sprint 14.5: tee server logs into the JSON response
   if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'Method not allowed' });
   if (!OPENAI_API_KEY) return res.status(500).json({ ok: false, error: 'Missing OPENAI_API_KEY' });
   if (!(await authorise(req))) return res.status(401).json({ ok: false, error: 'Unauthorised' });
