@@ -3641,6 +3641,7 @@ async function modeFull(skipPush: boolean | undefined) {
 import {
   isRegionalSource,
   REGIONAL_BY_CITY,
+  TOPIC_SOURCES,
   publisherLabel as wlPublisherLabel,
 } from '@/lib/whitelist';
 
@@ -3653,7 +3654,11 @@ interface TailStory {
   why_it_matters?: string; // Sprint 14.5: real per-story relevance, not a template
 }
 
-const TAIL_MODEL = 'gpt-4o-mini-search-preview';
+// Sprint 14.7b: tails moved to Perplexity sonar-pro (recency filter +
+// search_domain_filter) to escape gpt-4o-mini-search-preview's 6000 TPM wall,
+// which 429'd most tail jobs and left ~15/22 sections empty on 06-16. Override
+// via TAIL_FETCH_MODEL (e.g. 'gpt-4o' or 'gpt-4o-mini-search-preview').
+const TAIL_MODEL = 'sonar-pro';
 
 // Sprint 12 — exposed for admin override. Defaults to the cheap mini model;
 // flip via env var TAIL_FETCH_MODEL='gpt-4o' to test the quality/cost trade-off.
@@ -3670,13 +3675,58 @@ async function callTailFetch(
 ): Promise<TailStory[]> {
   const model = getTailModel();
 
+  // Sprint 14.7b: domain allowlist for this tail (city -> regional mastheads,
+  // interest/industry -> topical sources). <= 20 per Perplexity's cap.
+  const dKey = (costDetail || '').toLowerCase().trim();
+  const tailDomains = (costPhase === 'city'
+    ? (REGIONAL_BY_CITY[dKey] || [])
+    : (TOPIC_SOURCES[dKey] || [])).slice(0, 20);
+
   // gpt-4o-mini-search-preview uses /v1/chat/completions with web_search_options.
   // gpt-4o (fallback / override) uses /v1/responses with tools: [{type: 'web_search_preview'}].
   // We support both paths so TAIL_FETCH_MODEL can switch between them.
 
   let text = '';
   try {
-    if (model === 'gpt-4o-mini-search-preview') {
+    if (model.startsWith('sonar')) {
+      // Perplexity path — recency filter + optional domain allowlist. Escapes
+      // the search-preview TPM wall that caused the tail empties.
+      if (!PERPLEXITY_API_KEY) {
+        console.warn(`[tail:${label}] PERPLEXITY_API_KEY not set — cannot run Perplexity tail.`);
+        return [];
+      }
+      const pplxBody: any = {
+        model,
+        messages: [
+          { role: 'system', content: 'You are a news retrieval engine. Return ONLY valid JSON. No markdown, no preamble.' },
+          { role: 'user', content: prompt },
+        ],
+        search_recency_filter: (costPhase === 'interest' || costPhase === 'industry') ? 'week' : 'day',
+        return_citations: true,
+        temperature: 0.2,
+        max_tokens: 2500,
+      };
+      if (tailDomains.length) pplxBody.search_domain_filter = tailDomains;
+      const response = await fetch('https://api.perplexity.ai/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${PERPLEXITY_API_KEY}` },
+        body: JSON.stringify(pplxBody),
+      });
+      const data = await response.json();
+      if (response.status !== 200) {
+        console.warn(`[tail:${label}] ${model} returned ${response.status}: ${JSON.stringify(data).slice(0, 400)}`);
+        return [];
+      }
+      const usage = data?.usage || {};
+      void logOpenAICost({
+        phase: costPhase,
+        model,
+        inputTokens: usage.prompt_tokens || 0,
+        outputTokens: usage.completion_tokens || 0,
+        detail: costDetail,
+      });
+      text = data?.choices?.[0]?.message?.content || '';
+    } else if (model === 'gpt-4o-mini-search-preview') {
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {

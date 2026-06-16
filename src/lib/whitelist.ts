@@ -4,6 +4,14 @@
 // Sprint 12 — added regional sources for city-tail fetches.
 // Sprint 12.5.1 — added Beatroot News (credible curated journalism brand,
 //                 founder Faye D'Souza, Mumbai, fact-checked / non-partisan).
+// Sprint 14.7 — added each major metro's LOCAL + VERNACULAR mastheads and
+//                 rewrote REGIONAL_BY_CITY so the city fetch reaches the civic
+//                 front page (water/transport/governance), not just the
+//                 national outlets' tragedy-skewed city coverage. National
+//                 papers only cover a city when something dramatic happens, so
+//                 a national-only source list structurally biases city sections
+//                 toward crime/accidents. The real civic news lives on local
+//                 (often Marathi/Bengali/Kannada/Hindi) mastheads.
 //
 // Previously this list was duplicated inline in both generate-brief.tsx and
 // personalise-briefs.tsx. The two copies drifted: the personalise-briefs copy
@@ -14,11 +22,6 @@
 //
 // Both files now import from here. Do NOT inline-copy these domains anywhere
 // else — drift is what created the original bug.
-//
-// Sprint 12: added regional sources for city tail coverage. These pass the
-// whitelist check the same way as national sources. They are tracked
-// separately so the city-tail fetcher can prompt the model to PRIORITISE
-// regional outlets for city-specific stories.
 
 // ─── National / global Tier-1 ───────────────────────────────────────────────
 export const TIER_1_DOMAINS = new Set<string>([
@@ -108,12 +111,13 @@ export const TIER_1_DOMAINS = new Set<string>([
   'wired.com',
 ]);
 
-// ─── Regional sources (Sprint 12) ───────────────────────────────────────────
-// These pass the whitelist check (added to TIER_1_DOMAINS below) AND are
-// tracked here separately so the city-tail prompt can name them explicitly.
-// City → preferred regional sources mapping lives in REGIONAL_BY_CITY.
+// ─── Regional sources ───────────────────────────────────────────────────────
+// These pass the whitelist check (merged into TIER_1_DOMAINS below) AND are
+// tracked here separately so the city fetcher can name them explicitly and so
+// isRegionalSource() can flag used_regional=true.
 
 export const REGIONAL_DOMAINS = new Set<string>([
+  // ─── Sprint 12 set ─────────────────────────────────────────────────────────
   // Mumbai / Pune / Western Maharashtra
   'mid-day.com',
   'freepressjournal.in',
@@ -130,6 +134,35 @@ export const REGIONAL_DOMAINS = new Set<string>([
   // Note: Telegraph India (East), Tribune India (North), News Minute (South),
   // Deccan Herald (Bengaluru) are already in TIER_1_DOMAINS above. They will
   // ALSO appear in REGIONAL_BY_CITY mappings.
+
+  // ─── Sprint 14.7 — local + vernacular mastheads (the civic front page) ─────
+  // Quality note: these are the established mastheads that actually run each
+  // city's civic news. Smaller local-digital sites (e.g. punenow.com) are
+  // deliberately NOT added yet — hold them for the numeric per-domain trust
+  // score so the trust surface stays clean.
+  //
+  // Pune / Maharashtra (Marathi owns civic coverage here)
+  'esakal.com',                        // Sakal
+  'maharashtratimes.com',              // Maharashtra Times (TOI group, Marathi)
+  'lokmat.com',                        // Lokmat
+  'loksatta.com',                      // Loksatta (Indian Express group, Marathi)
+  'punemirror.in',                     // Pune Mirror — verify domain resolves; drop if it 404s
+  // Kolkata / West Bengal (Bengali)
+  'thestatesman.com',                  // The Statesman (Kolkata broadsheet)
+  'anandabazar.com',                   // Anandabazar Patrika
+  'bartamanpatrika.com',               // Bartaman
+  'eisamay.com',                       // Ei Samay (TOI group, Bengali)
+  // Bengaluru / Karnataka (Kannada)
+  'prajavani.net',                     // Prajavani
+  'vijaykarnataka.com',                // Vijaya Karnataka (TOI group, Kannada)
+  'udayavani.com',                     // Udayavani
+  // Delhi / NCR (Hindi)
+  'jagran.com',                        // Dainik Jagran
+  'bhaskar.com',                       // Dainik Bhaskar
+  'amarujala.com',                     // Amar Ujala
+  'navbharattimes.indiatimes.com',     // Navbharat Times (TOI group, Hindi)
+  'livehindustan.com',                 // Hindustan (HT group, Hindi)
+  'millenniumpost.in',                 // Millennium Post (Delhi / East)
 ]);
 
 // Merge regional domains into TIER_1_DOMAINS so existing whitelist checks
@@ -138,35 +171,91 @@ for (const d of Array.from(REGIONAL_DOMAINS)) {
   TIER_1_DOMAINS.add(d);
 }
 
+// ─── Sprint 14.7b — quality topical sources for INTEREST sections ───────────
+// Interests are topical, not local: the right sources are often international
+// or specialist outlets an India-news Tier-1 list omits. The earlier interest
+// empties (Food & Travel, Personal Finance, Psychology, Parenting) came from
+// dropping legitimate outlets like Condé Nast Traveller, National Geographic,
+// Forbes India and The Conversation. Added as a curated topical floor; pair
+// with TOPIC_SOURCES (below) for targeting.
+export const TOPICAL_DOMAINS = new Set<string>([
+  // Food & travel
+  'cntraveller.in',
+  'nationalgeographic.com',
+  'travelandleisure.com',
+  // Personal finance (India)
+  'forbesindia.com',
+  // Science / psychology / ideas
+  'scientificamerican.com',
+  'theconversation.com',
+  'sciencedaily.com',
+  'aeon.co',
+  'theatlantic.com',
+  // Startups / entrepreneurship (India ecosystem)
+  'yourstory.com',
+  'inc42.com',
+  'entrackr.com',
+]);
+
+for (const d of Array.from(TOPICAL_DOMAINS)) {
+  TIER_1_DOMAINS.add(d);
+}
+
 // ─── City → preferred regional sources mapping ──────────────────────────────
-// Used by the city-tail prompt to direct gpt-4o-mini-search-preview to the
-// right local outlets. Values reference both TIER_1 and REGIONAL_DOMAINS keys.
-//
-// Keys are lowercased. The matcher in generate-brief uses .toLowerCase().trim()
+// Used by the city fetcher (Perplexity search_domain_filter + prompt steering)
+// to target the right LOCAL outlets first. Keep each list <= 20 (Perplexity's
+// domain-filter cap). Keys are lowercased; the matcher uses .toLowerCase().trim()
 // — "Delhi / NCR" → "delhi / ncr".
+//
+// THE RULE (apply to every city): top local English daily + the 2-3 dominant
+// state-language dailies + the relevant national city editions. Cities not yet
+// expanded below fall back to nationals; extend them the same way as needed.
 
 export const REGIONAL_BY_CITY: Record<string, string[]> = {
-  'mumbai':         ['mid-day.com', 'freepressjournal.in', 'hindustantimes.com', 'indianexpress.com'],
-  'pune':           ['mid-day.com', 'freepressjournal.in', 'hindustantimes.com', 'indianexpress.com'],
-  'bengaluru':      ['deccanherald.com', 'bangaloremirror.indiatimes.com', 'thenewsminute.com', 'thehindu.com'],
-  'bangalore':      ['deccanherald.com', 'bangaloremirror.indiatimes.com', 'thenewsminute.com', 'thehindu.com'],
+  // ── Expanded in Sprint 14.7 (live cities) ──
+  'pune':           ['esakal.com', 'maharashtratimes.com', 'lokmat.com', 'loksatta.com', 'punemirror.in', 'hindustantimes.com', 'indianexpress.com', 'timesofindia.indiatimes.com'],
+  'kolkata':        ['telegraphindia.com', 'thestatesman.com', 'anandabazar.com', 'bartamanpatrika.com', 'eisamay.com', 'hindustantimes.com', 'timesofindia.indiatimes.com', 'indianexpress.com'],
+  'bengaluru':      ['deccanherald.com', 'bangaloremirror.indiatimes.com', 'thehindu.com', 'prajavani.net', 'vijaykarnataka.com', 'udayavani.com', 'thenewsminute.com', 'timesofindia.indiatimes.com'],
+  'bangalore':      ['deccanherald.com', 'bangaloremirror.indiatimes.com', 'thehindu.com', 'prajavani.net', 'vijaykarnataka.com', 'udayavani.com', 'thenewsminute.com', 'timesofindia.indiatimes.com'],
+  'delhi / ncr':    ['hindustantimes.com', 'timesofindia.indiatimes.com', 'indianexpress.com', 'thehindu.com', 'theprint.in', 'jagran.com', 'bhaskar.com', 'amarujala.com', 'navbharattimes.indiatimes.com', 'livehindustan.com', 'millenniumpost.in'],
+  'delhi':          ['hindustantimes.com', 'timesofindia.indiatimes.com', 'indianexpress.com', 'thehindu.com', 'theprint.in', 'jagran.com', 'bhaskar.com', 'amarujala.com', 'navbharattimes.indiatimes.com', 'livehindustan.com', 'millenniumpost.in'],
+  'mumbai':         ['mid-day.com', 'freepressjournal.in', 'maharashtratimes.com', 'loksatta.com', 'lokmat.com', 'hindustantimes.com', 'indianexpress.com', 'timesofindia.indiatimes.com'],
+
+  // ── Sprint 12 entries (nationals; expand per THE RULE above when a user signs up) ──
   'chennai':        ['thehindu.com', 'dtnext.in', 'newindianexpress.com', 'thenewsminute.com'],
   'hyderabad':      ['telanganatoday.com', 'thehindu.com', 'newindianexpress.com', 'deccanherald.com'],
-  'delhi / ncr':    ['hindustantimes.com', 'indianexpress.com', 'thehindu.com', 'theprint.in'],
-  'delhi':          ['hindustantimes.com', 'indianexpress.com', 'thehindu.com', 'theprint.in'],
-  'kolkata':        ['telegraphindia.com', 'hindustantimes.com', 'indianexpress.com', 'thehindu.com'],
   'ahmedabad':      ['ahmedabadmirror.com', 'indianexpress.com', 'timesofindia.indiatimes.com'],
   'jaipur':         ['hindustantimes.com', 'indianexpress.com', 'tribuneindia.com'],
-  'lucknow':        ['hindustantimes.com', 'indianexpress.com', 'thehindu.com'],
+  'lucknow':        ['hindustantimes.com', 'indianexpress.com', 'thehindu.com', 'amarujala.com', 'jagran.com'],
   'chandigarh':     ['tribuneindia.com', 'hindustantimes.com', 'indianexpress.com'],
   'kochi':          ['onmanorama.com', 'thehindu.com', 'newindianexpress.com', 'thenewsminute.com'],
-  'indore':         ['freepressjournal.in', 'hindustantimes.com', 'indianexpress.com'],
-  'bhopal':         ['freepressjournal.in', 'hindustantimes.com', 'indianexpress.com'],
-  'nagpur':         ['hindustantimes.com', 'indianexpress.com', 'freepressjournal.in'],
+  'indore':         ['freepressjournal.in', 'bhaskar.com', 'hindustantimes.com', 'indianexpress.com'],
+  'bhopal':         ['freepressjournal.in', 'bhaskar.com', 'hindustantimes.com', 'indianexpress.com'],
+  'nagpur':         ['hindustantimes.com', 'indianexpress.com', 'lokmat.com', 'freepressjournal.in'],
   'surat':          ['ahmedabadmirror.com', 'indianexpress.com', 'timesofindia.indiatimes.com'],
   'visakhapatnam':  ['thehindu.com', 'newindianexpress.com', 'deccanherald.com'],
   'coimbatore':     ['thehindu.com', 'dtnext.in', 'newindianexpress.com'],
   'vadodara':       ['ahmedabadmirror.com', 'indianexpress.com', 'timesofindia.indiatimes.com'],
+};
+
+// ─── Interest / industry → preferred sources (Sprint 14.7b) ─────────────────
+// Topical analogue of REGIONAL_BY_CITY. Used by the interest fetch (Perplexity
+// search_domain_filter + prompt) and the interest/industry tail fetch. Keep
+// each list <= 20. Topics not listed fall back to broad search + the whitelist
+// floor. Keys are lowercased.
+export const TOPIC_SOURCES: Record<string, string[]> = {
+  // Interests
+  'food & travel':               ['cntraveller.in', 'nationalgeographic.com', 'travelandleisure.com', 'livemint.com', 'thehindu.com', 'indianexpress.com'],
+  'personal finance':            ['livemint.com', 'moneycontrol.com', 'economictimes.indiatimes.com', 'financialexpress.com', 'business-standard.com', 'forbesindia.com'],
+  'psychology':                  ['scientificamerican.com', 'theconversation.com', 'sciencedaily.com', 'nature.com', 'thehindu.com'],
+  'philosophy':                  ['aeon.co', 'theconversation.com', 'caravanmagazine.in', 'thehindu.com'],
+  'education':                   ['thehindu.com', 'indianexpress.com', 'hindustantimes.com', 'theprint.in', 'scroll.in', 'theconversation.com'],
+  'parenting':                   ['theconversation.com', 'theatlantic.com', 'thehindu.com', 'indianexpress.com', 'hindustantimes.com'],
+  'startups & entrepreneurship': ['yourstory.com', 'inc42.com', 'entrackr.com', 'economictimes.indiatimes.com', 'livemint.com', 'moneycontrol.com', 'techcrunch.com'],
+  'law & policy':                ['livelaw.in', 'barandbench.com', 'thehindu.com', 'indianexpress.com', 'thewire.in', 'caravanmagazine.in'],
+  // Industries (used by the industry tail)
+  'technology':                  ['techcrunch.com', 'theverge.com', 'wired.com', 'arstechnica.com', 'economictimes.indiatimes.com', 'livemint.com', 'moneycontrol.com'],
+  'energy':                      ['downtoearth.org.in', 'reuters.com', 'bloomberg.com', 'economictimes.indiatimes.com', 'livemint.com', 'business-standard.com', 'moneycontrol.com'],
 };
 
 // Extract a normalised hostname from a URL. Strips www./m./amp. prefixes so
@@ -195,8 +284,8 @@ export function isWhitelistedSource(url: string | undefined | null): boolean {
 }
 
 // Sprint 12: detect whether a URL is from a regional source. Used by the
-// city-tail fetcher to log used_regional=true so admin can see whether
-// city stories are coming from regional vs national outlets.
+// city fetcher to log used_regional=true so admin can see whether city
+// stories are coming from regional vs national outlets.
 export function isRegionalSource(url: string | undefined | null): boolean {
   const host = extractHostname(url);
   if (!host) return false;
@@ -270,6 +359,38 @@ const PUBLISHER_LABELS: Record<string, string> = {
   'telanganatoday.com': 'Telangana Today',
   'ahmedabadmirror.com': 'Ahmedabad Mirror',
   'onmanorama.com': 'Onmanorama',
+  // Sprint 14.7 local + vernacular additions:
+  'esakal.com': 'Sakal',
+  'maharashtratimes.com': 'Maharashtra Times',
+  'lokmat.com': 'Lokmat',
+  'loksatta.com': 'Loksatta',
+  'punemirror.in': 'Pune Mirror',
+  'thestatesman.com': 'The Statesman',
+  'anandabazar.com': 'Anandabazar Patrika',
+  'bartamanpatrika.com': 'Bartaman',
+  'eisamay.com': 'Ei Samay',
+  'prajavani.net': 'Prajavani',
+  'vijaykarnataka.com': 'Vijaya Karnataka',
+  'udayavani.com': 'Udayavani',
+  'jagran.com': 'Dainik Jagran',
+  'bhaskar.com': 'Dainik Bhaskar',
+  'amarujala.com': 'Amar Ujala',
+  'navbharattimes.indiatimes.com': 'Navbharat Times',
+  'livehindustan.com': 'Hindustan',
+  'millenniumpost.in': 'Millennium Post',
+  // Sprint 14.7b topical additions:
+  'cntraveller.in': 'Condé Nast Traveller',
+  'nationalgeographic.com': 'National Geographic',
+  'travelandleisure.com': 'Travel + Leisure',
+  'forbesindia.com': 'Forbes India',
+  'scientificamerican.com': 'Scientific American',
+  'theconversation.com': 'The Conversation',
+  'sciencedaily.com': 'ScienceDaily',
+  'aeon.co': 'Aeon',
+  'theatlantic.com': 'The Atlantic',
+  'yourstory.com': 'YourStory',
+  'inc42.com': 'Inc42',
+  'entrackr.com': 'Entrackr',
 };
 
 export function publisherLabel(url: string | undefined | null): string | null {

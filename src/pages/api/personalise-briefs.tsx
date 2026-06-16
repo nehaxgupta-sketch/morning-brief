@@ -28,7 +28,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { createClient } from '@supabase/supabase-js';
 // Sprint 11: shared whitelist module — fixes the Sprint 10 Law & Policy gap
 // caused by a smaller, drifted whitelist copy. Single source of truth now.
-import { isWhitelistedSource } from '@/lib/whitelist';
+import { isWhitelistedSource, REGIONAL_BY_CITY, publisherLabel, TOPIC_SOURCES } from '@/lib/whitelist';
 // Sprint 11: per-call cost capture.
 import { logOpenAICost, extractUsageFromResponses } from '@/lib/cost-log';
 import { attachLogCapture } from '@/lib/log-capture';
@@ -37,6 +37,15 @@ import { applyCitySafety } from '@/lib/editorial-safety';
 export const config = { maxDuration: 60 };
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+// Sprint 14.7: city sections now use a Perplexity (retrieve) -> Claude
+// (select / write / sensitivity) hybrid. PERPLEXITY_API_KEY already exists in
+// this project (used by generate-brief). ANTHROPIC_API_KEY must be set in
+// Vercel env for the editorial pass; without it, the retrieved candidates are
+// used directly as a graceful fallback.
+const PERPLEXITY_API_KEY = process.env.PERPLEXITY_API_KEY;
+const PERPLEXITY_MODEL = process.env.PERPLEXITY_MODEL || 'sonar-pro';
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const ANTHROPIC_CITY_MODEL = process.env.ANTHROPIC_CITY_MODEL || 'claude-sonnet-4-6';
 const EDITIONS = ['5min', '10min', 'deep'] as const;
 type Edition = (typeof EDITIONS)[number];
 
@@ -94,6 +103,16 @@ function cityKey(s: string): string {
   return s.toLowerCase().trim();
 }
 
+// Sprint 14.7: tolerant JSON-object extractor for model responses.
+function extractJsonObject(text: string): any | null {
+  if (!text || typeof text !== 'string') return null;
+  const cleaned = text.replace(/```json|```/g, '').trim();
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  if (start === -1 || end === -1) return null;
+  try { return JSON.parse(cleaned.slice(start, end + 1)); } catch { return null; }
+}
+
 // ─── Interest → standard-section mapping ────────────────────────────────────
 //
 // Some interests already have a counterpart section in the shared brief.
@@ -147,90 +166,216 @@ interface CityStory {
   why_it_matters?: string; // Sprint 14.5: real relevance line, replaces template filler
 }
 
-async function fetchCityStories(city: string): Promise<CityStory[]> {
+// ─── Phase 2.5: City news (Sprint 14.7 — Perplexity retrieve → Claude edit) ──
+//
+// City sections used to be a single gpt-4o + web_search_preview call whose
+// prompt hard-coded a NATIONAL source list and never consulted REGIONAL_BY_CITY.
+// National outlets cover a city mainly when something dramatic happens, so the
+// section kept LEADING with crime/accidents while the real civic front page
+// (often a local or vernacular masthead) was dropped by the whitelist. The
+// editorial-safety regex also missed plain phrasings like "dies in accident".
+//
+// Sprint 14.7 replaces the single call with a two-stage hybrid:
+//   1. Perplexity sonar-pro RETRIEVES candidates, domain-filtered to that
+//      city's local + vernacular mastheads (REGIONAL_BY_CITY), recency=day.
+//   2. Claude (Sonnet) SELECTS the 1-3 most consequential CIVIC stories, writes
+//      them, and orders them as editorial judgment: crime/tragedy never leads
+//      when civic news exists; a child death / suicide / sexual violence never
+//      leads. It uses ONLY the retrieved candidates and never invents a URL.
+// applyCitySafety() from editorial-safety.ts stays as a deterministic backstop.
+
+// Stage 1 — Perplexity sonar-pro: retrieve candidate local stories, domain-
+// filtered to the city's local/vernacular mastheads, last 24-36h.
+async function perplexityCityCandidates(city: string): Promise<any[]> {
+  if (!PERPLEXITY_API_KEY) {
+    console.warn(`[city:${city}] PERPLEXITY_API_KEY not set — skipping city retrieval.`);
+    return [];
+  }
   const today = getISTDate();
-  const prompt = `You are sourcing local news for ${city}, India. Search the web for the 1-3 most consequential stories from ${city} in the last 24-36 hours.
+  const domains = (REGIONAL_BY_CITY[cityKey(city)] || []).slice(0, 20);
+  const sourceLine = domains.length
+    ? `Prioritise these LOCAL outlets for ${city} (search them first; they carry civic stories national papers miss): ${domains.map((d) => publisherLabel(`https://${d}/`) || d).join(', ')}. Vernacular-language outlets are welcome — summarise in English.`
+    : `Use established local and national Indian outlets covering ${city}.`;
 
-Look for: civic and municipal news, major events in the city, notable incidents, local policy changes, transport, business openings/closures, urban issues, weather.
+  const prompt = `You are retrieving local news for ${city}, India. Today is ${today}.
+Find up to 8 candidate stories from ${city} in the last 24-36 hours. Favour civic and everyday-life news (water, power, transport, civic governance, infrastructure, housing, local economy, weather, major local events) — the kind of thing on a ${city} newspaper's front page — not only dramatic incidents.
+${sourceLine}
+Return ONLY this JSON, no markdown, no commentary:
+{"candidates":[{"headline":"...","summary":"1-2 sentences","source":"publication name","source_url":"https://direct-article-link","published_at":"${today}"}]}`;
 
-If nothing genuinely newsworthy happened, return an empty array. Do not pad with national stories.
-
-SOURCE RULES — use ONLY direct article links from these whitelisted Tier-1 publishers:
-National papers: The Hindu, Indian Express, Hindustan Times, Mint, Business Standard, The Print, Scroll, Times of India, Deccan Herald, The Wire, NDTV, Moneycontrol, India Today, The Quint, Outlook India.
-Regional: Telegraph India (East), Tribune India (North), The News Minute (South), New Indian Express.
-Wires: PTI, ANI.
-No aggregators, no social media, no Google News redirects.
-
-Return ONLY a JSON object — no markdown, no commentary:
-{
-  "stories": [
-    {
-      "headline": "clear factual headline (max 120 chars)",
-      "body": "2-3 sentence factual summary",
-      "why_it_matters": "ONE concrete sentence on why this matters to a resident of ${city} (commute, costs, safety, civic services, local economy). No filler.",
-      "source": "publication name",
-      "source_url": "https://... real direct link",
-      "published_at": "${today}"
-    }
-  ]
-}`;
-
-  const response = await fetch('https://api.openai.com/v1/responses', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: 'gpt-4o',
-      tools: [{ type: 'web_search_preview' }],
-      tool_choice: { type: 'web_search_preview' },
-      input: prompt,
-      max_output_tokens: 3000,
-    }),
-  });
-
-  if (!response.ok) {
-    console.warn(`City fetch failed for ${city}: HTTP ${response.status}`);
-    return [];
-  }
-  const data = await response.json();
-
-  // Sprint 11: cost capture.
-  const usage = extractUsageFromResponses(data);
-  void logOpenAICost({
-    phase: 'city',
-    model: 'gpt-4o',
-    inputTokens: usage.inputTokens,
-    outputTokens: usage.outputTokens,
-    reasoningTokens: usage.reasoningTokens,
-    detail: city,
-  });
-
-  const text = data.output?.find((o: any) => o.type === 'message')?.content?.[0]?.text;
-  if (!text) return [];
-
-  const cleaned = text.replace(/```json|```/g, '').trim();
-  const start = cleaned.indexOf('{');
-  const end = cleaned.lastIndexOf('}');
-  if (start === -1 || end === -1) return [];
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 45_000);
   try {
-    const parsed = JSON.parse(cleaned.slice(start, end + 1));
-    const raw = Array.isArray(parsed?.stories) ? parsed.stories : [];
-    const candidates: CityStory[] = [];
-    for (const s of raw) {
-      if (!s || typeof s.headline !== 'string' || typeof s.body !== 'string' || typeof s.source !== 'string') continue;
-      if (!isWhitelistedSource(s.source_url)) {
-        console.warn(`City story dropped (source not whitelisted) — ${city}: ${s.source_url}`);
-        continue;
-      }
-      candidates.push(s as CityStory);
+    const body: any = {
+      model: PERPLEXITY_MODEL,
+      messages: [
+        { role: 'system', content: 'You are a local-news retrieval engine. Return ONLY valid JSON. No markdown, no preamble.' },
+        { role: 'user', content: prompt },
+      ],
+      search_recency_filter: 'day',
+      return_citations: true,
+      temperature: 0.2,
+      max_tokens: 2500,
+    };
+    // search_domain_filter is an allowlist (max 20 domains). It is gated to
+    // higher Perplexity usage tiers; if the account tier does not support it the
+    // API ignores the field and the prompt's source steering still applies.
+    if (domains.length) body.search_domain_filter = domains;
+
+    const response = await fetch('https://api.perplexity.ai/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${PERPLEXITY_API_KEY}` },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!response.ok) {
+      const b = await response.text().catch(() => '');
+      console.warn(`[city:${city}] Perplexity retrieve HTTP ${response.status}: ${b.slice(0, 200)}`);
+      return [];
     }
-    // Sprint 14.5: keep crime/tragedy out of the lead of a "your city" section.
-    return applyCitySafety(candidates).slice(0, 3);
-  } catch {
+    const data: any = await response.json();
+    const usage = data?.usage || {};
+    void logOpenAICost({
+      phase: 'city',
+      model: PERPLEXITY_MODEL,
+      inputTokens: usage.prompt_tokens || 0,
+      outputTokens: usage.completion_tokens || 0,
+      detail: `${city} (retrieve)`,
+    });
+    const text = data?.choices?.[0]?.message?.content || '';
+    const parsed = extractJsonObject(text);
+    const arr = Array.isArray(parsed?.candidates)
+      ? parsed.candidates
+      : (Array.isArray(parsed?.stories) ? parsed.stories : []);
+    console.log(`[city:${city}] retrieved ${Array.isArray(arr) ? arr.length : 0} candidate(s) via ${PERPLEXITY_MODEL}${domains.length ? ` (domain-filtered: ${domains.length})` : ''}.`);
+    return Array.isArray(arr) ? arr : [];
+  } catch (e: any) {
+    clearTimeout(timer);
+    console.warn(`[city:${city}] Perplexity retrieve error: ${e?.message || e}`);
     return [];
   }
+}
+
+// Stage 2 — Claude (Sonnet): select the 1-3 most consequential civic stories,
+// write them, and order them so crime/tragedy never leads when civic news
+// exists. Operates ONLY on the retrieved candidates (never invents URLs).
+async function claudeSelectCityStories(city: string, candidates: any[]): Promise<CityStory[]> {
+  if (candidates.length === 0) return [];
+  if (!ANTHROPIC_API_KEY) {
+    console.warn(`[city:${city}] ANTHROPIC_API_KEY not set — using retrieved candidates directly (no editorial pass).`);
+    return coerceCandidates(city, candidates);
+  }
+  const today = getISTDate();
+  const prompt = `You are the city editor for a calm, premium Indian morning brief. City: ${city}. Date: ${today}.
+
+Below are candidate local stories retrieved from ${city}'s news sources (JSON). Choose the 1-3 MOST CONSEQUENTIAL stories for a resident of ${city} and write them for the brief.
+
+SELECTION
+- Prioritise civic and everyday-life impact: water, power, transport, civic governance, infrastructure, housing, local economy, weather, major local events.
+- A single crime or accident is rarely the most consequential thing in a city of millions. Include such a story only if it is genuinely among the biggest local developments of the day.
+
+SENSITIVITY (editorial judgment, not a word filter)
+- A city section must NOT lead with crime, an accident, a death, or any tragedy when a civic/everyday story is available. Put civic news first; a tragedy, if included, comes last and is capped to one.
+- Write any tragedy plainly and with restraint — never sensational, never graphic.
+- A story about a child's death, a suicide, or sexual violence must NEVER lead, and belongs only if it is genuinely one of the day's most consequential local stories.
+
+RULES
+- Use ONLY the candidates below. Copy "source" and "source_url" VERBATIM from the candidate you choose. NEVER invent a URL or a source name.
+- Headline: describes today's development, max 120 chars. Body: 2-3 plain sentences, paraphrased (no long quotes). why_it_matters: ONE concrete sentence on the impact to a ${city} resident (commute, costs, safety, civic services, local economy).
+- If none of the candidates is genuinely newsworthy for ${city}, return an empty "stories" array. Do not pad with national stories.
+
+CANDIDATES
+${JSON.stringify(candidates).slice(0, 12000)}
+
+Return ONLY this JSON, ordered most-consequential first (civic before any tragedy), no markdown, no commentary:
+{"stories":[{"headline":"...","body":"...","why_it_matters":"...","source":"...","source_url":"https://...","published_at":"${today}"}]}`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 45_000);
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: ANTHROPIC_CITY_MODEL,
+        max_tokens: 1500,
+        temperature: 0.3,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!response.ok) {
+      const b = await response.text().catch(() => '');
+      console.warn(`[city:${city}] Claude select HTTP ${response.status}: ${b.slice(0, 200)} — using candidates directly.`);
+      return coerceCandidates(city, candidates);
+    }
+    const data: any = await response.json();
+    const usage = data?.usage || {};
+    void logOpenAICost({
+      phase: 'city',
+      model: ANTHROPIC_CITY_MODEL,
+      inputTokens: usage.input_tokens || 0,
+      outputTokens: usage.output_tokens || 0,
+      detail: `${city} (select)`,
+    });
+    const text = Array.isArray(data?.content)
+      ? data.content.filter((b: any) => b?.type === 'text').map((b: any) => b.text).join('\n')
+      : '';
+    const parsed = extractJsonObject(text);
+    const raw = Array.isArray(parsed?.stories) ? parsed.stories : [];
+    const finals = finaliseCityStories(city, raw);
+    console.log(`[city:${city}] editor kept ${finals.length} story(ies) via ${ANTHROPIC_CITY_MODEL}.`);
+    return finals;
+  } catch (e: any) {
+    clearTimeout(timer);
+    console.warn(`[city:${city}] Claude select error: ${e?.message || e} — using candidates directly.`);
+    return coerceCandidates(city, candidates);
+  }
+}
+
+// Validate, whitelist-recheck, apply the deterministic safety backstop, cap to 3.
+function finaliseCityStories(city: string, raw: any[]): CityStory[] {
+  const out: CityStory[] = [];
+  for (const s of Array.isArray(raw) ? raw : []) {
+    if (!s || typeof s.headline !== 'string' || typeof s.source !== 'string') continue;
+    const body = typeof s.body === 'string' && s.body.trim()
+      ? s.body
+      : (typeof s.summary === 'string' ? s.summary : '');
+    if (!body) continue;
+    if (!isWhitelistedSource(s.source_url)) {
+      console.warn(`City story dropped (source not whitelisted) — ${city}: ${s.source_url}`);
+      continue;
+    }
+    out.push({
+      headline: s.headline,
+      body,
+      source: s.source,
+      source_url: s.source_url,
+      published_at: typeof s.published_at === 'string' ? s.published_at : getISTDate(),
+      why_it_matters: typeof s.why_it_matters === 'string' && s.why_it_matters.trim()
+        ? s.why_it_matters
+        : `A local development relevant to ${city} residents.`,
+    });
+  }
+  // Deterministic backstop on top of Claude's judgment: crime/tragedy never leads.
+  return applyCitySafety(out).slice(0, 3);
+}
+
+// Fallback when Claude is unavailable: use the retrieved candidates directly.
+function coerceCandidates(city: string, candidates: any[]): CityStory[] {
+  return finaliseCityStories(city, candidates);
+}
+
+async function fetchCityStories(city: string): Promise<CityStory[]> {
+  const candidates = await perplexityCityCandidates(city);
+  if (candidates.length === 0) return [];
+  return claudeSelectCityStories(city, candidates);
 }
 
 // Sprint 11: track which city/interest fetches errored vs returned empty.
@@ -271,110 +416,198 @@ async function buildCityCache(
 
 interface InterestStory extends CityStory {}
 
-async function fetchInterestStories(interest: string): Promise<InterestStory[]> {
+// ─── Phase 2.6: Interest topics (Sprint 14.7b — Perplexity retrieve → Claude) ─
+//
+// Interests are TOPICAL, not local. The old gpt-4o + web_search_preview fetch
+// returned legitimate topical outlets (Condé Nast Traveller, National
+// Geographic, Forbes India, The Conversation, ScienceDaily) that the
+// India-news whitelist then dropped, leaving several interests empty. Sprint
+// 14.7b uses the same hybrid as cities: Perplexity retrieves (recency-aware,
+// domain-filtered to TOPIC_SOURCES[interest] where defined), Claude selects the
+// 1-3 most consequential + credible stories (India-relevant where it matters)
+// and writes them. Genuinely quiet niches still return empty — that is fine.
+
+async function perplexityInterestCandidates(interest: string): Promise<any[]> {
+  if (!PERPLEXITY_API_KEY) {
+    console.warn(`[interest:${interest}] PERPLEXITY_API_KEY not set — skipping retrieval.`);
+    return [];
+  }
   const today = getISTDate();
+  const domains = (TOPIC_SOURCES[interest.toLowerCase().trim()] || []).slice(0, 20);
+  const sourceLine = domains.length
+    ? `Prefer these quality outlets for ${interest} (search them first): ${domains.map((d) => publisherLabel(`https://${d}/`) || d).join(', ')}.`
+    : `Use established, credible outlets covering ${interest}.`;
 
-  // Sprint 11: topic-specific source hints. Some interests benefit from
-  // specialist publishers. Law & Policy is the canonical example — without
-  // naming Live Law and Bar & Bench explicitly, gpt-4o tends to look only at
-  // mainstream papers and miss the actual legal news. This was the root of
-  // Sprint 10's "Law & Policy returned 0 hits" issue, alongside the
-  // (separate) whitelist drift that also dropped these sources.
-  const interestLower = interest.toLowerCase();
-  let specialistHint = '';
-  if (interestLower.includes('law') || interestLower.includes('policy') || interestLower.includes('legal')) {
-    specialistHint = `\nSPECIALIST PRIORITY for this topic: Live Law (livelaw.in) and Bar & Bench (barandbench.com) are THE primary sources for Indian court rulings, legal news, and law-and-policy developments. Search there FIRST. Also check The Hindu Legal, Indian Express, The Wire, and Caravan for policy analysis. PIB (pib.gov.in) for official government notifications.`;
-  } else if (interestLower.includes('parenting') || interestLower.includes('education')) {
-    specialistHint = `\nSPECIALIST PRIORITY for this topic: The Hindu, Indian Express, and Hindustan Times education desks. Scroll and The Wire for analytical takes. Down To Earth for child-health stories.`;
-  } else if (interestLower.includes('environment') || interestLower.includes('climate') || interestLower.includes('sustain')) {
-    specialistHint = `\nSPECIALIST PRIORITY for this topic: Down To Earth (downtoearth.org.in), Reuters Climate, Nature, BBC environment desk, plus The Hindu, Mint, and Scroll for India-specific environmental policy and pollution stories.`;
-  } else if (interestLower.includes('health') || interestLower.includes('medic') || interestLower.includes('wellness')) {
-    specialistHint = `\nSPECIALIST PRIORITY for this topic: STAT News, Nature, Science.org for research and drug approvals. The Hindu, Indian Express, NDTV health desks for India angles. WHO for outbreak updates.`;
-  } else if (interestLower.includes('startup') || interestLower.includes('entrepren')) {
-    specialistHint = `\nSPECIALIST PRIORITY for this topic: TechCrunch, The Verge, Wired for global. Moneycontrol, Mint, Economic Times, Business Standard, Inc42-adjacent reporting from mainstream papers for Indian startups.`;
-  } else if (interestLower.includes('film') || interestLower.includes('ott') || interestLower.includes('music') || interestLower.includes('book') || interestLower.includes('art') || interestLower.includes('cultur')) {
-    specialistHint = `\nSPECIALIST PRIORITY for this topic: Variety, Hollywood Reporter for global film/TV. The Hindu, Indian Express, Mint Lounge, Caravan, Outlook India, The Quint, India Today, Scroll for Indian cultural reporting.`;
-  } else if (interestLower.includes('sport') || interestLower.includes('cricket') || interestLower.includes('football') || interestLower.includes('formula')) {
-    specialistHint = `\nSPECIALIST PRIORITY for this topic: ESPNCricinfo, ESPN.com, plus the sports desks of The Hindu, Times of India, NDTV, Indian Express.`;
-  }
+  const prompt = `You are retrieving news about "${interest}" for an India-focused daily brief. Today is ${today}.
+Find up to 8 candidate stories on ${interest} from roughly the last 24-72 hours. Prefer concrete developments (announcements, policy, milestones, notable analysis). An India angle is preferred where one exists; include globally significant items too.
+${sourceLine}
+Return ONLY this JSON, no markdown, no commentary:
+{"candidates":[{"headline":"...","summary":"1-2 sentences","source":"publication name","source_url":"https://direct-article-link","published_at":"${today}"}]}`;
 
-  const prompt = `You are sourcing news stories specifically about "${interest}". Search the web for the 1-3 most consequential stories on this topic from the last 24-72 hours. Include both India-focused and global stories where relevant.
-
-If nothing genuinely newsworthy happened in this niche, return an empty array. Do not pad.
-${specialistHint}
-
-SOURCE RULES — only direct article links from Tier-1 publishers:
-Global: Reuters, AP, Bloomberg, FT, WSJ, NYT, WaPo, BBC, The Guardian, The Economist, Al Jazeera, ABC News Australia.
-India national: The Hindu, Indian Express, Hindustan Times, Mint, Business Standard, The Print, Scroll, Deccan Herald, The Wire, NDTV, India Today, The Quint, Outlook India, Caravan, Moneycontrol, Financial Express, Business Today, Economic Times, New Indian Express, Telegraph India, Tribune India, The News Minute.
-India wires: PTI, ANI.
-India legal: Live Law, Bar & Bench.
-India environment/health: Down To Earth.
-Government primary: PIB, RBI, SEBI, MOSPI.
-Specialist (only where general sources don't cover): Nature, Science, STAT, TechCrunch, The Verge, Wired, Variety, Hollywood Reporter, ESPNCricinfo, ESPN.
-
-Return ONLY a JSON object — no markdown:
-{
-  "stories": [
-    { "headline": "...", "body": "2-3 sentences", "why_it_matters": "ONE concrete sentence on why a reader who follows this should care — name the stake. No filler.", "source": "Publisher Name", "source_url": "https://...", "published_at": "${today}" }
-  ]
-}`;
-
-  const response = await fetch('https://api.openai.com/v1/responses', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: 'gpt-4o',
-      tools: [{ type: 'web_search_preview' }],
-      tool_choice: { type: 'web_search_preview' },
-      input: prompt,
-      max_output_tokens: 3000,
-    }),
-  });
-
-  if (!response.ok) {
-    console.warn(`Interest fetch failed for "${interest}": HTTP ${response.status}`);
-    return [];
-  }
-  const data = await response.json();
-
-  // Sprint 11: cost capture.
-  const usage = extractUsageFromResponses(data);
-  void logOpenAICost({
-    phase: 'interest',
-    model: 'gpt-4o',
-    inputTokens: usage.inputTokens,
-    outputTokens: usage.outputTokens,
-    reasoningTokens: usage.reasoningTokens,
-    detail: interest,
-  });
-
-  const text = data.output?.find((o: any) => o.type === 'message')?.content?.[0]?.text;
-  if (!text) return [];
-
-  const cleaned = text.replace(/```json|```/g, '').trim();
-  const start = cleaned.indexOf('{');
-  const end = cleaned.lastIndexOf('}');
-  if (start === -1 || end === -1) return [];
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 45_000);
   try {
-    const parsed = JSON.parse(cleaned.slice(start, end + 1));
-    const raw = Array.isArray(parsed?.stories) ? parsed.stories : [];
-    const kept: InterestStory[] = [];
-    for (const s of raw) {
-      if (!s || typeof s.headline !== 'string' || typeof s.body !== 'string' || typeof s.source !== 'string') continue;
-      if (!isWhitelistedSource(s.source_url)) {
-        console.warn(`Interest story dropped (source not whitelisted) — "${interest}": ${s.source_url}`);
-        continue;
-      }
-      kept.push(s as InterestStory);
-      if (kept.length >= 3) break;
+    const body: any = {
+      model: PERPLEXITY_MODEL,
+      messages: [
+        { role: 'system', content: 'You are a topical-news retrieval engine. Return ONLY valid JSON. No markdown, no preamble.' },
+        { role: 'user', content: prompt },
+      ],
+      search_recency_filter: 'week',
+      return_citations: true,
+      temperature: 0.2,
+      max_tokens: 2500,
+    };
+    if (domains.length) body.search_domain_filter = domains;
+
+    const response = await fetch('https://api.perplexity.ai/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${PERPLEXITY_API_KEY}` },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!response.ok) {
+      const b = await response.text().catch(() => '');
+      console.warn(`[interest:${interest}] Perplexity retrieve HTTP ${response.status}: ${b.slice(0, 200)}`);
+      return [];
     }
-    return kept;
-  } catch {
+    const data: any = await response.json();
+    const usage = data?.usage || {};
+    void logOpenAICost({
+      phase: 'interest',
+      model: PERPLEXITY_MODEL,
+      inputTokens: usage.prompt_tokens || 0,
+      outputTokens: usage.completion_tokens || 0,
+      detail: `${interest} (retrieve)`,
+    });
+    const text = data?.choices?.[0]?.message?.content || '';
+    const parsed = extractJsonObject(text);
+    const arr = Array.isArray(parsed?.candidates)
+      ? parsed.candidates
+      : (Array.isArray(parsed?.stories) ? parsed.stories : []);
+    console.log(`[interest:${interest}] retrieved ${Array.isArray(arr) ? arr.length : 0} candidate(s)${domains.length ? ` (domain-filtered: ${domains.length})` : ''}.`);
+    return Array.isArray(arr) ? arr : [];
+  } catch (e: any) {
+    clearTimeout(timer);
+    console.warn(`[interest:${interest}] Perplexity retrieve error: ${e?.message || e}`);
     return [];
   }
+}
+
+async function claudeSelectInterestStories(interest: string, candidates: any[]): Promise<InterestStory[]> {
+  if (candidates.length === 0) return [];
+  if (!ANTHROPIC_API_KEY) {
+    console.warn(`[interest:${interest}] ANTHROPIC_API_KEY not set — using retrieved candidates directly.`);
+    return coerceInterestCandidates(interest, candidates);
+  }
+  const today = getISTDate();
+  const prompt = `You are an editor for a calm, premium India-focused morning brief. Topic: ${interest}. Date: ${today}.
+
+Below are candidate stories about ${interest} (JSON). Choose the 1-3 MOST CONSEQUENTIAL and CREDIBLE for a reader who follows ${interest}, and write them for the brief.
+
+SELECTION
+- Prefer concrete, recent developments and genuinely insightful analysis over thin or promotional pieces.
+- Favour an India angle where a meaningful one exists; keep globally significant items too.
+- Drop tabloid, celebrity-gossip, SEO-filler, or press-release content.
+
+RULES
+- Use ONLY the candidates below. Copy "source" and "source_url" VERBATIM from the candidate you choose. NEVER invent a URL or a source name.
+- Headline: your own factual summary (max 120 chars), not the original title verbatim. Body: 2-3 plain, paraphrased sentences (no long quotes). why_it_matters: ONE concrete sentence naming the specific stake for someone who follows ${interest}.
+- If none of the candidates is genuinely newsworthy for ${interest}, return an empty "stories" array. Do not pad.
+
+CANDIDATES
+${JSON.stringify(candidates).slice(0, 12000)}
+
+Return ONLY this JSON, most-consequential first, no markdown, no commentary:
+{"stories":[{"headline":"...","body":"...","why_it_matters":"...","source":"...","source_url":"https://...","published_at":"${today}"}]}`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 45_000);
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: ANTHROPIC_CITY_MODEL,
+        max_tokens: 1500,
+        temperature: 0.3,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!response.ok) {
+      const b = await response.text().catch(() => '');
+      console.warn(`[interest:${interest}] Claude select HTTP ${response.status}: ${b.slice(0, 200)} — using candidates directly.`);
+      return coerceInterestCandidates(interest, candidates);
+    }
+    const data: any = await response.json();
+    const usage = data?.usage || {};
+    void logOpenAICost({
+      phase: 'interest',
+      model: ANTHROPIC_CITY_MODEL,
+      inputTokens: usage.input_tokens || 0,
+      outputTokens: usage.output_tokens || 0,
+      detail: `${interest} (select)`,
+    });
+    const text = Array.isArray(data?.content)
+      ? data.content.filter((b: any) => b?.type === 'text').map((b: any) => b.text).join('\n')
+      : '';
+    const parsed = extractJsonObject(text);
+    const raw = Array.isArray(parsed?.stories) ? parsed.stories : [];
+    const finals = finaliseInterestStories(interest, raw);
+    console.log(`[interest:${interest}] editor kept ${finals.length} story(ies) via ${ANTHROPIC_CITY_MODEL}.`);
+    return finals;
+  } catch (e: any) {
+    clearTimeout(timer);
+    console.warn(`[interest:${interest}] Claude select error: ${e?.message || e} — using candidates directly.`);
+    return coerceInterestCandidates(interest, candidates);
+  }
+}
+
+// Validate, whitelist-recheck, cap to 3. (No city-safety reorder — interests
+// are topical, not a "your city" section.)
+function finaliseInterestStories(interest: string, raw: any[]): InterestStory[] {
+  const out: InterestStory[] = [];
+  for (const s of Array.isArray(raw) ? raw : []) {
+    if (!s || typeof s.headline !== 'string' || typeof s.source !== 'string') continue;
+    const body = typeof s.body === 'string' && s.body.trim()
+      ? s.body
+      : (typeof s.summary === 'string' ? s.summary : '');
+    if (!body) continue;
+    if (!isWhitelistedSource(s.source_url)) {
+      console.warn(`Interest story dropped (source not whitelisted) — "${interest}": ${s.source_url}`);
+      continue;
+    }
+    out.push({
+      headline: s.headline,
+      body,
+      source: s.source,
+      source_url: s.source_url,
+      published_at: typeof s.published_at === 'string' ? s.published_at : getISTDate(),
+      why_it_matters: typeof s.why_it_matters === 'string' && s.why_it_matters.trim()
+        ? s.why_it_matters
+        : `A development relevant to people who follow ${interest}.`,
+    });
+    if (out.length >= 3) break;
+  }
+  return out.slice(0, 3);
+}
+
+// Fallback when Claude is unavailable: use the retrieved candidates directly.
+function coerceInterestCandidates(interest: string, candidates: any[]): InterestStory[] {
+  return finaliseInterestStories(interest, candidates);
+}
+
+async function fetchInterestStories(interest: string): Promise<InterestStory[]> {
+  const candidates = await perplexityInterestCandidates(interest);
+  if (candidates.length === 0) return [];
+  return claudeSelectInterestStories(interest, candidates);
 }
 
 async function buildInterestCache(
@@ -1315,7 +1548,8 @@ async function fillEmptyFromTailBriefs(
       ? row.stories.filter((s: any) => s?.source_url && isWhitelistedSource(s.source_url))
       : [];
     if (row?.status !== 'failed' && stories.length > 0) {
-      cityCache.set(key, stories as CityStory[]);
+      // Sprint 14.7: same safety backstop for tail-sourced city fills.
+      cityCache.set(key, applyCitySafety(stories) as CityStory[]);
       failures.cityErrors.delete(key);
       citiesFilled.push(city);
       console.log(`[tail-fallback] city "${city}" filled from tail_briefs (${stories.length} stories).`);
