@@ -186,41 +186,38 @@ interface CityStory {
 
 // Stage 1 — Perplexity sonar-pro: retrieve candidate local stories, domain-
 // filtered to the city's local/vernacular mastheads, last 24-36h.
-async function perplexityCityCandidates(city: string): Promise<any[]> {
-  if (!PERPLEXITY_API_KEY) {
-    console.warn(`[city:${city}] PERPLEXITY_API_KEY not set — skipping city retrieval.`);
-    return [];
-  }
-  const today = getISTDate();
-  const domains = (REGIONAL_BY_CITY[cityKey(city)] || []).slice(0, 20);
-  const sourceLine = domains.length
-    ? `Prioritise these LOCAL outlets for ${city} (search them first; they carry civic stories national papers miss): ${domains.map((d) => publisherLabel(`https://${d}/`) || d).join(', ')}. Vernacular-language outlets are welcome — summarise in English.`
-    : `Use established local and national Indian outlets covering ${city}.`;
-
-  const prompt = `You are retrieving local news for ${city}, India. Today is ${today}.
-Find up to 8 candidate stories from ${city} in the last 24-36 hours. Favour civic and everyday-life news (water, power, transport, civic governance, infrastructure, housing, local economy, weather, major local events) — the kind of thing on a ${city} newspaper's front page — not only dramatic incidents.
-${sourceLine}
-Return ONLY this JSON, no markdown, no commentary:
-{"candidates":[{"headline":"...","summary":"1-2 sentences","source":"publication name","source_url":"https://direct-article-link","published_at":"${today}"}]}`;
-
+// ─── Sprint 14.7c: soft domain filter + broad fallback ──────────────────────
+// The first post-deploy run showed Perplexity returning 0 candidates for ALL
+// four cities when search_domain_filter was restricted to local/vernacular
+// mastheads at 24h recency — even Delhi with HT/TOI/IE in the list. The hard
+// filter is too restrictive against Perplexity's index. We now (a) widen to a
+// 1-week window and (b) treat the masthead list as a PREFERENCE: try it first,
+// and if it returns little, retry with a broad search. Claude + the expanded
+// whitelist keep quality and demote tragedy either way.
+async function pplxCandidates(
+  label: string,
+  costPhase: 'city' | 'interest',
+  costDetail: string,
+  prompt: string,
+  recency: 'day' | 'week',
+  domains: string[],
+): Promise<any[]> {
+  if (!PERPLEXITY_API_KEY) return [];
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 45_000);
   try {
     const body: any = {
       model: PERPLEXITY_MODEL,
       messages: [
-        { role: 'system', content: 'You are a local-news retrieval engine. Return ONLY valid JSON. No markdown, no preamble.' },
+        { role: 'system', content: 'You are a news retrieval engine. Return ONLY valid JSON. No markdown, no preamble.' },
         { role: 'user', content: prompt },
       ],
-      search_recency_filter: 'day',
+      search_recency_filter: recency,
       return_citations: true,
       temperature: 0.2,
       max_tokens: 2500,
     };
-    // search_domain_filter is an allowlist (max 20 domains). It is gated to
-    // higher Perplexity usage tiers; if the account tier does not support it the
-    // API ignores the field and the prompt's source steering still applies.
-    if (domains.length) body.search_domain_filter = domains;
+    if (domains.length) body.search_domain_filter = domains.slice(0, 20);
 
     const response = await fetch('https://api.perplexity.ai/chat/completions', {
       method: 'POST',
@@ -231,35 +228,60 @@ Return ONLY this JSON, no markdown, no commentary:
     clearTimeout(timer);
     if (!response.ok) {
       const b = await response.text().catch(() => '');
-      console.warn(`[city:${city}] Perplexity retrieve HTTP ${response.status}: ${b.slice(0, 200)}`);
+      console.warn(`[${label}] Perplexity HTTP ${response.status}: ${b.slice(0, 200)}`);
       return [];
     }
     const data: any = await response.json();
     const usage = data?.usage || {};
     void logOpenAICost({
-      phase: 'city',
+      phase: costPhase,
       model: PERPLEXITY_MODEL,
       inputTokens: usage.prompt_tokens || 0,
       outputTokens: usage.completion_tokens || 0,
-      detail: `${city} (retrieve)`,
+      detail: costDetail,
     });
     const text = data?.choices?.[0]?.message?.content || '';
     const parsed = extractJsonObject(text);
     const arr = Array.isArray(parsed?.candidates)
       ? parsed.candidates
       : (Array.isArray(parsed?.stories) ? parsed.stories : []);
-    console.log(`[city:${city}] retrieved ${Array.isArray(arr) ? arr.length : 0} candidate(s) via ${PERPLEXITY_MODEL}${domains.length ? ` (domain-filtered: ${domains.length})` : ''}.`);
     return Array.isArray(arr) ? arr : [];
   } catch (e: any) {
     clearTimeout(timer);
-    console.warn(`[city:${city}] Perplexity retrieve error: ${e?.message || e}`);
+    console.warn(`[${label}] Perplexity error: ${e?.message || e}`);
     return [];
   }
 }
 
-// Stage 2 — Claude (Sonnet): select the 1-3 most consequential civic stories,
-// write them, and order them so crime/tragedy never leads when civic news
-// exists. Operates ONLY on the retrieved candidates (never invents URLs).
+async function perplexityCityCandidates(city: string): Promise<any[]> {
+  if (!PERPLEXITY_API_KEY) {
+    console.warn(`[city:${city}] PERPLEXITY_API_KEY not set — skipping city retrieval.`);
+    return [];
+  }
+  const today = getISTDate();
+  const domains = (REGIONAL_BY_CITY[cityKey(city)] || []).slice(0, 20);
+  const sourceLine = domains.length
+    ? `Prioritise these LOCAL outlets for ${city} (they carry civic stories national papers miss): ${domains.map((d) => publisherLabel(`https://${d}/`) || d).join(', ')}. Vernacular-language outlets are welcome — summarise in English.`
+    : `Use established local and national Indian outlets covering ${city}.`;
+
+  const prompt = `You are retrieving local news for ${city}, India. Today is ${today}.
+Find up to 8 stories from ${city} in roughly the last week. Favour civic and everyday-life news (water, power, transport, civic governance, infrastructure, housing, local economy, weather, major local events) — the kind of thing on a ${city} newspaper's front page — not only dramatic incidents.
+${sourceLine}
+Return ONLY this JSON, no markdown, no commentary:
+{"candidates":[{"headline":"...","summary":"1-2 sentences","source":"publication name","source_url":"https://direct-article-link","published_at":"${today}"}]}`;
+
+  // Soft domain filter: try the local mastheads first, fall back to a broad
+  // search if Perplexity's index returns little for the restricted set.
+  let arr = await pplxCandidates(`city:${city}`, 'city', `${city} (retrieve)`, prompt, 'week', domains);
+  let mode = domains.length ? `domain-filtered: ${domains.length}` : 'broad';
+  if (arr.length < 2 && domains.length) {
+    const broad = await pplxCandidates(`city:${city}`, 'city', `${city} (retrieve-broad)`, prompt, 'week', []);
+    if (broad.length > arr.length) { arr = broad; mode = 'broad-fallback'; }
+  }
+  console.log(`[city:${city}] retrieved ${arr.length} candidate(s) via ${PERPLEXITY_MODEL} (${mode}).`);
+  return arr;
+}
+
 async function claudeSelectCityStories(city: string, candidates: any[]): Promise<CityStory[]> {
   if (candidates.length === 0) return [];
   if (!ANTHROPIC_API_KEY) {
@@ -435,64 +457,23 @@ async function perplexityInterestCandidates(interest: string): Promise<any[]> {
   const today = getISTDate();
   const domains = (TOPIC_SOURCES[interest.toLowerCase().trim()] || []).slice(0, 20);
   const sourceLine = domains.length
-    ? `Prefer these quality outlets for ${interest} (search them first): ${domains.map((d) => publisherLabel(`https://${d}/`) || d).join(', ')}.`
+    ? `Prefer these quality outlets for ${interest}: ${domains.map((d) => publisherLabel(`https://${d}/`) || d).join(', ')}.`
     : `Use established, credible outlets covering ${interest}.`;
 
   const prompt = `You are retrieving news about "${interest}" for an India-focused daily brief. Today is ${today}.
-Find up to 8 candidate stories on ${interest} from roughly the last 24-72 hours. Prefer concrete developments (announcements, policy, milestones, notable analysis). An India angle is preferred where one exists; include globally significant items too.
+Find up to 8 candidate stories on ${interest} from roughly the last week. Prefer concrete developments (announcements, policy, milestones, notable analysis). An India angle is preferred where one exists; include globally significant items too.
 ${sourceLine}
 Return ONLY this JSON, no markdown, no commentary:
 {"candidates":[{"headline":"...","summary":"1-2 sentences","source":"publication name","source_url":"https://direct-article-link","published_at":"${today}"}]}`;
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 45_000);
-  try {
-    const body: any = {
-      model: PERPLEXITY_MODEL,
-      messages: [
-        { role: 'system', content: 'You are a topical-news retrieval engine. Return ONLY valid JSON. No markdown, no preamble.' },
-        { role: 'user', content: prompt },
-      ],
-      search_recency_filter: 'week',
-      return_citations: true,
-      temperature: 0.2,
-      max_tokens: 2500,
-    };
-    if (domains.length) body.search_domain_filter = domains;
-
-    const response = await fetch('https://api.perplexity.ai/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${PERPLEXITY_API_KEY}` },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
-    if (!response.ok) {
-      const b = await response.text().catch(() => '');
-      console.warn(`[interest:${interest}] Perplexity retrieve HTTP ${response.status}: ${b.slice(0, 200)}`);
-      return [];
-    }
-    const data: any = await response.json();
-    const usage = data?.usage || {};
-    void logOpenAICost({
-      phase: 'interest',
-      model: PERPLEXITY_MODEL,
-      inputTokens: usage.prompt_tokens || 0,
-      outputTokens: usage.completion_tokens || 0,
-      detail: `${interest} (retrieve)`,
-    });
-    const text = data?.choices?.[0]?.message?.content || '';
-    const parsed = extractJsonObject(text);
-    const arr = Array.isArray(parsed?.candidates)
-      ? parsed.candidates
-      : (Array.isArray(parsed?.stories) ? parsed.stories : []);
-    console.log(`[interest:${interest}] retrieved ${Array.isArray(arr) ? arr.length : 0} candidate(s)${domains.length ? ` (domain-filtered: ${domains.length})` : ''}.`);
-    return Array.isArray(arr) ? arr : [];
-  } catch (e: any) {
-    clearTimeout(timer);
-    console.warn(`[interest:${interest}] Perplexity retrieve error: ${e?.message || e}`);
-    return [];
+  let arr = await pplxCandidates(`interest:${interest}`, 'interest', `${interest} (retrieve)`, prompt, 'week', domains);
+  let mode = domains.length ? `domain-filtered: ${domains.length}` : 'broad';
+  if (arr.length < 2 && domains.length) {
+    const broad = await pplxCandidates(`interest:${interest}`, 'interest', `${interest} (retrieve-broad)`, prompt, 'week', []);
+    if (broad.length > arr.length) { arr = broad; mode = 'broad-fallback'; }
   }
+  console.log(`[interest:${interest}] retrieved ${arr.length} candidate(s) (${mode}).`);
+  return arr;
 }
 
 async function claudeSelectInterestStories(interest: string, candidates: any[]): Promise<InterestStory[]> {

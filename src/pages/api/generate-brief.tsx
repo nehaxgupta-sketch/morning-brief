@@ -3672,13 +3672,17 @@ async function callTailFetch(
   label: string,
   costPhase: 'city' | 'interest' | 'industry' | 'storyline',
   costDetail: string,
+  skipDomainFilter: boolean = false,
 ): Promise<TailStory[]> {
   const model = getTailModel();
 
   // Sprint 14.7b: domain allowlist for this tail (city -> regional mastheads,
   // interest/industry -> topical sources). <= 20 per Perplexity's cap.
+  // Sprint 14.7c: skipDomainFilter forces a broad search — used as a fallback
+  // when the domain-restricted query returns nothing (Perplexity indexes some
+  // local / vernacular sites thinly).
   const dKey = (costDetail || '').toLowerCase().trim();
-  const tailDomains = (costPhase === 'city'
+  const tailDomains = skipDomainFilter ? [] : (costPhase === 'city'
     ? (REGIONAL_BY_CITY[dKey] || [])
     : (TOPIC_SOURCES[dKey] || [])).slice(0, 20);
 
@@ -3701,7 +3705,7 @@ async function callTailFetch(
           { role: 'system', content: 'You are a news retrieval engine. Return ONLY valid JSON. No markdown, no preamble.' },
           { role: 'user', content: prompt },
         ],
-        search_recency_filter: (costPhase === 'interest' || costPhase === 'industry') ? 'week' : 'day',
+        search_recency_filter: (costPhase === 'storyline') ? 'day' : 'week',
         return_citations: true,
         temperature: 0.2,
         max_tokens: 2500,
@@ -3890,7 +3894,11 @@ Return ONLY a JSON object — no markdown, no commentary:
   ]
 }`;
 
-  const stories = await callTailFetch(prompt, `city:${city}`, 'city', city);
+  let stories = await callTailFetch(prompt, `city:${city}`, 'city', city);
+  if (stories.length === 0) {
+    // Sprint 14.7c: broad fallback when the local-masthead filter returns nothing.
+    stories = await callTailFetch(prompt, `city:${city}`, 'city', city, true);
+  }
   const usedRegional = stories.some((s) => isRegionalSource(s.source_url));
   return { stories, usedRegional };
 }
@@ -3926,7 +3934,9 @@ Return ONLY a JSON object — no markdown:
   ]
 }`;
 
-  return callTailFetch(prompt, `interest:${interest}`, 'interest', interest);
+  let stories = await callTailFetch(prompt, `interest:${interest}`, 'interest', interest);
+  if (stories.length === 0) stories = await callTailFetch(prompt, `interest:${interest}`, 'interest', interest, true);
+  return stories;
 }
 
 async function fetchIndustryTail(industry: string): Promise<TailStory[]> {
@@ -3964,7 +3974,9 @@ Return ONLY a JSON object — no markdown:
   ]
 }`;
 
-  return callTailFetch(prompt, `industry:${industry}`, 'industry', industry);
+  let stories = await callTailFetch(prompt, `industry:${industry}`, 'industry', industry);
+  if (stories.length === 0) stories = await callTailFetch(prompt, `industry:${industry}`, 'industry', industry, true);
+  return stories;
 }
 
 interface TailFetchResult {

@@ -61,6 +61,7 @@ export const TIER_1_DOMAINS = new Set<string>([
   'financialexpress.com',
   'moneycontrol.com',
   'businesstoday.in',
+  'cnbctv18.com',                      // Sprint 14.7c — CNBC-TV18 (Network18 business)
 
   // ─── India — digital + magazine journalism ────────────────────────────────
   'theprint.in',
@@ -100,6 +101,8 @@ export const TIER_1_DOMAINS = new Set<string>([
   // ─── Specialist (allowed where general sources don't cover) ───────────────
   'espncricinfo.com',
   'espn.com',
+  'cricbuzz.com',                      // Sprint 14.7c — cricket (desk:sport was dropping it)
+  'filmcompanion.in',                  // Sprint 14.7c — Film Companion (Indian film journalism)
   'variety.com',
   'hollywoodreporter.com',
   'nature.com',
@@ -391,6 +394,10 @@ const PUBLISHER_LABELS: Record<string, string> = {
   'yourstory.com': 'YourStory',
   'inc42.com': 'Inc42',
   'entrackr.com': 'Entrackr',
+  // Sprint 14.7c additions:
+  'cnbctv18.com': 'CNBC-TV18',
+  'cricbuzz.com': 'Cricbuzz',
+  'filmcompanion.in': 'Film Companion',
 };
 
 export function publisherLabel(url: string | undefined | null): string | null {
