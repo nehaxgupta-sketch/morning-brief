@@ -37,6 +37,7 @@ import { z } from 'zod';
 import {
   isWhitelistedSource,
   publisherKey,
+  sourceTier,
 } from '@/lib/whitelist';
 // Sprint 11: per-call cost capture.
 import {
@@ -1181,39 +1182,49 @@ function buildPerplexityFetchPrompt(today: string, universe: Universe): string {
   return `You are the news fetcher for Morning Brief, India's daily news digest for thoughtful urban professionals (25-45, English-reading). Today is ${today} (IST).
 
 ═══════════════════════════════════════════════
-PRIMARY DIRECTIVE: OVER-FETCH AGGRESSIVELY
+PRIMARY DIRECTIVE: FIND THE DAY'S REAL STORIES, THEN SELECT — DON'T PAD
 ═══════════════════════════════════════════════
 
-Downstream code filters stories by publisher whitelist, recency, and deduplication — TYPICALLY DROPPING 30-50% OF WHAT YOU RETURN. To deliver a useful brief, you MUST return the UPPER BOUND of every section quota. Hitting the lower bound is a failure mode, not a success.
+Your job is the reader's COMPLETE, ACCURATE picture of today. Two failure modes are equally bad: (a) missing a story everyone is leading with, and (b) padding a section with filler to hit a number.
 
-For EVERY section, run MULTIPLE distinct searches with DIFFERENT angles. A single search per section is not enough. Examples below.
+Search BROADLY to find candidates: for EVERY section run MULTIPLE distinct searches with DIFFERENT angles (examples below) — a single search per section is not enough. THEN select the genuinely consequential, specific, TODAY stories. It is better to return 4 real front-page stories than 8 padded with evergreen trend pieces.
+
+THE TWO TESTS every story must pass:
+• SPECIFIC & DATED: it reports a concrete development from the last 24-48h — something that HAPPENED (a decision, ruling, result, announcement, attack, release, data print, statement), with a date, named actors, and where relevant a number. Reject standing-trend / explainer / outlook pieces with no dated trigger.
+• FRONT-PAGE TEST: a well-informed Indian reader would be surprised or embarrassed to have missed it today.
+
+REJECT (these are the padding pattern that has hurt us — do NOT include them):
+✗ "<sector> enters/poised for AI-led growth phase", "<market> seen reaching ₹X trillion by FY__" — trend/forecast, not news.
+✗ "demand for <thing> falls to <N>-month low", "experts say <generic>" with no dated event.
+✗ evergreen explainers, listicles, "here's what to know", anniversary look-backs with no fresh development.
+ORDER EACH SECTION BEST-FIRST: the first stories in major_events / india / world MUST be the single biggest developments of the day, not a warm-up.
 
 ═══════════════════════════════════════════════
-SECTIONS — minimums are floors, not ceilings
+SECTIONS — targets to aim for via broad search; never pad past what's genuinely consequential
 ═══════════════════════════════════════════════
 
-1. major_events — MINIMUM 5, target 6-8 stories. The day's biggest news, India and world combined. Genuinely consequential — events with real second-order impact.
+1. major_events — aim 6-8. The day's biggest news, India and world combined. Genuinely consequential — events with real second-order impact.
    Search angles: "top news today India", "world news today", "breaking news ${today}", "biggest story today"
 
-2. world — MINIMUM 6, target 7-9 stories. Significant developments OUTSIDE India. Geopolitics, foreign policy, conflicts, foreign elections, major institutions (UN/IMF/WB), big foreign elections.
+2. world — aim 7-9. Significant developments OUTSIDE India. Geopolitics, foreign policy, conflicts, foreign elections, major institutions (UN/IMF/WB).
    Search angles: "world news today", "geopolitics ${today}", "international news today", "US news today", "China news today", "Europe news today", "Middle East today"
 
-3. india — MINIMUM 6, target 7-9 stories. Domestic India: politics, policy, Supreme Court, RBI, regulatory, major corporate India, civic, infrastructure, state-level major events.
-   Search angles: "India news today", "Modi government today", "Supreme Court India today", "RBI news ${today}", "India policy today", "Indian states news today"
+3. india — aim 7-9. Domestic India: politics, policy, Supreme Court, RBI, regulatory, major corporate India, civic, infrastructure, state-level major events, big-city civic news (water, transport, governance).
+   Search angles: "India news today", "Modi government today", "Supreme Court India today", "RBI news ${today}", "India policy today", "Indian states news today", "Mumbai Delhi Bengaluru civic news today"
 
-4. business — MINIMUM 5, target 6-8 stories. Corporate news, earnings, M&A, IPO, regulatory, hires, sector moves. Indian and global. Exclude pure markets summaries (markets is section 9).
+4. business — aim 6-8. Corporate news, earnings, M&A, IPO, regulatory, hires, sector moves. Indian and global. Exclude pure markets summaries (markets is section 9).
    Search angles: "business news today India", "corporate earnings today", "M&A deal today", "Indian company news today", "global business news today"
 
-5. technology — MINIMUM 4, target 5-7 stories. Product launches, AI developments, big-tech regulation, cybersecurity, infrastructure (chips, data centres). Skip rumour and speculation.
+5. technology — aim 5-7. Product launches, AI developments, big-tech regulation, cybersecurity, infrastructure (chips, data centres). Skip rumour and speculation.
    Search angles: "tech news today", "AI news today", "OpenAI Google Meta today", "tech regulation today India", "cybersecurity news today"
 
-6. climate_health — MINIMUM 4, target 5-7 stories. Climate events, environmental policy, health news with real-world impact (outbreaks, approvals, major research).
-   Search angles: "climate news today", "health news today India", "WHO news today", "disease outbreak today", "environment policy today"
+6. climate_health — aim 5-7. Climate events, environmental policy, health news with real-world impact (outbreaks, approvals, major research, heatwave/monsoon developments).
+   Search angles: "climate news today", "health news today India", "WHO news today", "disease outbreak today", "monsoon India today", "heatwave India today"
 
-7. sport — MINIMUM 4 ACROSS DIFFERENT SPORTS, target 5-7. Cricket, football, tennis, F1, badminton, hockey, kabaddi, Olympics, athletics, golf, esports. NO more than 2 cricket stories — force breadth.
-   Search angles: "cricket news today", "tennis news today", "football news today India", "F1 news today", "badminton news today", "sports India today"
+7. sport — aim 5-7 ACROSS DIFFERENT SPORTS. Cricket, football (incl. FIFA/club), tennis, F1, badminton, hockey, kabaddi, Olympics, athletics, golf, esports. NO more than 2 cricket stories — force breadth.
+   Search angles: "cricket news today", "tennis news today", "football FIFA news today", "F1 news today", "badminton news today", "sports India today"
 
-8. culture — MINIMUM 4 ACROSS DIFFERENT TYPES, target 5-7. Films, OTT, music, books, theatre, visual arts, awards, viral cultural phenomena.
+8. culture — aim 5-7 ACROSS DIFFERENT TYPES. Films, OTT, music, books, theatre, visual arts, awards, viral cultural phenomena.
    Search angles: "Bollywood news today", "OTT release today", "film news today", "music news India today", "book news today", "awards news today"
 
 9. markets — ONE object with summary (2-3 sentences) + indices array (4 items: Sensex, Nifty 50, Dow Jones, Nasdaq). At 6:30 AM IST, Indian markets haven't opened — use YESTERDAY'S close. US markets closed overnight — use that close. NEVER return empty indices. If you don't find a number, search again — the data exists.
@@ -1255,13 +1266,13 @@ OUTPUT SHAPE — exactly this, no markdown
 HARD RULES
 ═══════════════════════════════════════════════
 
-1. MINIMUMS ARE NON-NEGOTIABLE. If you return fewer than the minimum for any section, you have failed the task. Run more searches.
+1. CONSEQUENCE OVER COUNT. The targets above are aims, not floors to pad to. Returning a generic/trend story to hit a number is a FAILURE. If a section genuinely has only 4 consequential, specific, today stories, return 4 — never invent or pad. Use the extra searches to FIND real stories, not to manufacture filler.
 
 2. PARAPHRASE — your "body" is your own 2-3 sentence factual summary, not the article's prose. Headlines should also be your own factual summary, not the original article's verbatim title.
 
 3. SOURCE: direct article URLs from reputable publishers (Reuters, AP, Bloomberg, FT, WSJ, NYT, BBC, Guardian, Economist, The Hindu, Indian Express, Hindustan Times, Mint, Business Standard, Economic Times, The Print, Scroll, NDTV, Times of India, Deccan Herald, Telegraph India, Tribune India, Live Law, Bar and Bench, Down to Earth, ESPNCricinfo, ESPN, Variety, TechCrunch, The Verge, Wired, etc.). NO aggregators, NO social media, NO Google News redirects.
 
-4. NEVER FABRICATE. If after MULTIPLE searches you genuinely cannot find a section's minimum, return what you have — but only after exhausting search angles.
+4. NEVER FABRICATE OR PAD. If after MULTIPLE searches you genuinely cannot find more consequential stories for a section, return what you have. A shorter section of real stories beats a padded one — downstream code will fill quotas from the best available; your job is accuracy.
 
 5. PUBLISHER DIVERSITY: no publisher contributes more than 3 stories total across the brief.
 
@@ -1269,7 +1280,7 @@ HARD RULES
 
 7. JSON ONLY: start with { and end with }. No markdown fences. No commentary. No "here is the JSON" preambles.${personalisationContext}
 
-Begin now. Search aggressively across multiple angles per section. Return ONLY the JSON object.`;
+Begin now. Search broadly across multiple angles per section to FIND the day's real stories, then select the consequential, specific, today ones — best-first. Return ONLY the JSON object.`;
 }
 
 // Strategy A: Perplexity Sonar Pro single call, all 10 sections.
@@ -1679,9 +1690,29 @@ async function fetchNewsFromOpenAI(universe: Universe): Promise<RawStories> {
   const strategy = getFetchStrategy();
   console.log(`[fetch] FETCH_STRATEGY=${strategy}`);
 
-  if (strategy === 'perplexity-2phase') return fetchStrategy_Perplexity2Phase(universe);
-  if (strategy === 'gpt4o-2phase')      return fetchStrategy_Gpt4o2Phase(universe);
-  return fetchStrategy_PerplexitySingle(universe);
+  let raw: RawStories;
+  if (strategy === 'perplexity-2phase')      raw = await fetchStrategy_Perplexity2Phase(universe);
+  else if (strategy === 'gpt4o-2phase')      raw = await fetchStrategy_Gpt4o2Phase(universe);
+  else                                       raw = await fetchStrategy_PerplexitySingle(universe);
+
+  // Sprint 14.8 — apply the fetch-time quality gate to the active (non-legacy)
+  // strategies. CRITICAL FIX: the Perplexity migration (Sprint 12) returned the
+  // merged fetch WITHOUT running enforceQualityRules, so non-whitelisted, stale,
+  // and duplicate stories survived into raw_stories. buildSubset() assumes raw
+  // is already clean (its comment says "After enforceQualityRules drops …"), so
+  // it ranked junk into the per-section quota; the only whitelist enforcement
+  // left was the POST-WRITE strip, which deleted those stories after the writer
+  // had used a slot on them — with no backfill. That silently gutted India
+  // (8 pool → 2-3 rendered) on most days. Running the gate here, where
+  // buildSubset expects it, makes the post-write strip a true no-op safety net.
+  // (The two legacy fetchers already call enforceQualityRules internally and are
+  // not routed through here, so this does not double-apply.)
+  const cleaned = enforceQualityRules(raw) as any;
+  // Preserve the diagnostic markers enforceQualityRules drops, so the admin
+  // "fetch source" badge keeps showing the real engine / fetch time.
+  cleaned._source = (raw as any)._source;
+  cleaned._fetched_at = (raw as any)._fetched_at;
+  return cleaned as RawStories;
 }
 
 
@@ -2214,6 +2245,17 @@ function rawStoriesForWriter(raw: RawStories) {
 // by 1-2 stories), but the 5min writer concatenates topicals into a single
 // 'topics' bucket, so breadth coverage matters more than strict subsetting.
 
+// Sprint 14.8 — STABLE rank by source tier (national/record first), preserving
+// the fetcher's relative order within a tier and always keeping must_include on
+// top. Decorate-sort-undecorate so it's stable regardless of engine/target.
+function rankBySourceTier(arr: RawStory[]): RawStory[] {
+  if (!Array.isArray(arr) || arr.length < 2) return Array.isArray(arr) ? arr : [];
+  return arr
+    .map((s, i) => ({ s, i, t: sourceTier((s as any)?.source_url), m: (s as any)?.must_include ? 1 : 0 }))
+    .sort((a, b) => (b.m - a.m) || (b.t - a.t) || (a.i - b.i))
+    .map((d) => d.s);
+}
+
 function buildSubset(raw: RawStories, cap: number): RawStories {
   // Per-section base quotas. Sum equals cap; topical sections always get >=1.
   const QUOTAS: Record<number, Record<string, number>> = {
@@ -2233,12 +2275,21 @@ function buildSubset(raw: RawStories, cap: number): RawStories {
   // Priority for slack redistribution (best-section-first).
   const PRIORITY = ['major_events', 'india', 'world', 'business', 'technology', 'climate_health', 'sport', 'culture'];
 
+  // Sprint 14.8 — rank each section by source tier ONCE so national agencies /
+  // papers of record (Times of India, PTI, The Hindu, Indian Express, HT, the
+  // global wires …) survive the quota ahead of regional/topical or weaker
+  // sources, instead of whatever order the fetcher returned. Used by both passes.
+  const ranked: Record<string, RawStory[]> = {};
+  for (const sec of PRIORITY) {
+    ranked[sec] = rankBySourceTier(((raw as any)[sec] || []) as RawStory[]);
+  }
+
   // First pass: take min(quota, available) per section.
   const taken: Record<string, RawStory[]> = {};
   let used = 0;
   for (const sec of PRIORITY) {
     const want = quota[sec] || 0;
-    const avail = ((raw as any)[sec] || []) as RawStory[];
+    const avail = ranked[sec];
     const take = avail.slice(0, want);
     taken[sec] = take;
     used += take.length;
@@ -2250,7 +2301,7 @@ function buildSubset(raw: RawStories, cap: number): RawStories {
   if (slack > 0) {
     for (const sec of PRIORITY) {
       if (slack <= 0) break;
-      const avail = ((raw as any)[sec] || []) as RawStory[];
+      const avail = ranked[sec];
       const room = avail.length - taken[sec].length;
       const more = Math.min(room, slack);
       if (more > 0) {
@@ -2278,8 +2329,8 @@ function buildSubset(raw: RawStories, cap: number): RawStories {
     // against the cap) so the dedicated-section writer sees them. The brief
     // shows them only to opted-in users; everyone else's personalise step
     // drops them.
-    politics:       ((raw as any).politics || []) as RawStory[],
-    markets_news:   ((raw as any).markets_news || []) as RawStory[],
+    politics:       rankBySourceTier(((raw as any).politics || []) as RawStory[]),
+    markets_news:   rankBySourceTier(((raw as any).markets_news || []) as RawStory[]),
     markets:        raw.markets,
     lens:           raw.lens,
   };
@@ -2587,27 +2638,108 @@ function backfillEmptyDailySections(content: any, subset: RawStories): number {
   return added;
 }
 
-// ─── Sprint 14.5: coherence / copy-desk QA pass (#3) ─────────────────────────
-// Non-blocking review of the assembled edition. Catches the trust-breaking
-// classes the 06-14 brief showed: same-day contradictions (Gulf "escalation"
-// vs "peace"), fabricated-looking numbers, unattributed quotes, stale items
-// written as today's news, and the same story repeated across sections. It
-// only LOGS issues (it never edits or blocks the brief) — so it is safe to run
-// on every write. Runs on 10min + deep, where synthesis/contradiction risk is
-// highest. Issues land in the server logs today; once the /api routes return
-// their logs (Layer 2) they'll show on the admin dashboard too.
-async function runCoherenceCheck(edition: Edition, content: any): Promise<void> {
-  if (!OPENAI_API_KEY) return;
+// ─── Sprint 14.8 — 5min (MicroStory) converter for top-up backfill ───────────
+// Mirrors rawToFullStory but emits the 5min MicroStory shape. Pads short fields
+// so the result always satisfies MicroStorySchema (what_happened/why >= 8).
+function rawToMicroStory(s: any): any {
+  const ensure = (t: any, min: number, fallback: string): string => {
+    const v = String(t || '').trim();
+    return v.length >= min ? v : (v ? v + ' ' : '') + fallback;
+  };
+  const body = String(s?.body || '').trim();
+  const headline = (String(s?.headline || '').trim() || 'Update').slice(0, 200);
+  return {
+    headline,
+    what_happened: ensure(body || headline, 8, 'See the linked report for the full account.'),
+    why_it_matters: ensure(s?.why_it_matters, 8, 'Relevant context for Indian readers; see the linked report.'),
+    source: String(s?.source || '').trim() || 'Source',
+    source_url: String(s?.source_url || '').trim(),
+    industries: Array.isArray(s?.industries) ? s.industries : [],
+    interests: Array.isArray(s?.interests) ? s.interests : [],
+    city_tags: Array.isArray(s?.city_tags) ? s.city_tags : [],
+    topic_tags: Array.isArray(s?.topic_tags) ? s.topic_tags : [],
+    must_include: !!s?.must_include,
+  };
+}
+
+// ─── Sprint 14.8 — top-up backfill (the real fix for "only 2 India items") ───
+// The post-write strip (and, when enabled, the coherence drop) can leave a
+// section SHORT — not empty, so backfillEmptyDailySections never fired. This
+// tops each core section back up toward the count the subset supplied, pulling
+// from the (already whitelisted, already tier-ranked) subset stories that
+// aren't in the rendered section yet. Deduped by normalised source_url. The
+// caller re-validates and only keeps the result if it still passes Zod, so a
+// top-up can never ship invalid content.
+const TOPUP_SECTIONS_10MIN = ['major_events', 'india', 'world', 'business', 'technology', 'climate_health', 'sport', 'culture'];
+const TOPUP_SECTIONS_5MIN  = ['major_events', 'india', 'world'];
+
+function backfillToSubsetCounts(content: any, edition: Edition, subset: RawStories): number {
+  if (!content || typeof content !== 'object') return 0;
+  const sections = edition === '5min' ? TOPUP_SECTIONS_5MIN
+                 : edition === '10min' ? TOPUP_SECTIONS_10MIN
+                 : [];
+  if (sections.length === 0) return 0;
+  const convert = edition === '5min' ? rawToMicroStory : rawToFullStory;
+  let added = 0;
+  for (const sec of sections) {
+    const out = Array.isArray(content[sec]) ? content[sec] : [];
+    const src = Array.isArray((subset as any)[sec]) ? ((subset as any)[sec] as any[]) : [];
+    const target = src.length; // the subset already respects the per-section quota
+    if (out.length >= target || target === 0) continue;
+    const present = new Set(out.map((s: any) => normaliseUrlForCompare(s?.source_url)));
+    for (const raw of src) {
+      if (out.length >= target) break;
+      const key = normaliseUrlForCompare(raw?.source_url);
+      if (key && present.has(key)) continue;
+      out.push(convert(raw));
+      present.add(key);
+      added++;
+    }
+    content[sec] = out;
+  }
+  return added;
+}
+
+
+// Sprint 14.5 introduced this as a NON-BLOCKING copy-desk review. Sprint 14.8
+// makes it BLOCKING (founder decision): high-severity contradictions and
+// fabrications are removed from the brief before it ships, instead of only
+// logged. It catches the trust-breaking classes the 06-14 / 16-Jun briefs
+// showed: same-day contradictions (e.g. markets_news crediting a "US-Iran peace
+// deal" that another section contradicts), fabricated-looking numbers,
+// unattributed quotes, stale items written as today's news, and a story
+// repeated across sections. Runs on 10min + deep, where synthesis/contradiction
+// risk is highest.
+//
+// Enforcement is gated by COHERENCE_ENFORCE ('on' default; set 'off' to revert
+// to log-only without a redeploy — same pattern as URL_LIVENESS). Only
+// `contradiction` and `fabrication` at severity `high` are dropped, and ONLY
+// when the issue names an exact headline that matches a story in the named
+// section — so a drop is always precisely targeted, never a guess.
+
+const COHERENCE_ENFORCE = (process.env.COHERENCE_ENFORCE || 'on').toLowerCase() !== 'off';
+
+type CoherenceIssue = {
+  type: string;
+  section: string;
+  headline: string;
+  severity: string;
+  detail: string;
+};
+
+async function runCoherenceCheck(edition: Edition, content: any): Promise<CoherenceIssue[]> {
+  if (!OPENAI_API_KEY) return [];
   const compact = JSON.stringify(content).slice(0, 24000);
   const today = getISTDate();
-  const prompt = `You are a copy-desk QA reviewer for an Indian daily brief (edition: ${edition}, date ${today}). Review the assembled brief JSON below and flag ONLY real problems a careful reader would catch. Be terse.
+  const prompt = `You are a copy-desk QA reviewer for an Indian daily brief (edition: ${edition}, date ${today}). Review the assembled brief JSON below and flag ONLY real problems a careful reader would catch. Be terse and precise.
 Check for:
-1) internal contradictions — e.g. one part says a conflict is escalating while another says peace was reached the same day, or oil up in one place and down in another.
-2) numbers or charts that look fabricated or internally inconsistent (e.g. a too-perfect sequence, or values that contradict the prose).
+1) internal contradictions — e.g. one part says a conflict is escalating while another says peace was reached the same day; markets attributed to an event another section contradicts; oil up in one place and down in another.
+2) numbers or charts that look fabricated or internally inconsistent (a too-perfect sequence, or values that contradict the prose).
 3) quotes with no named, real attribution.
 4) stale items written as if they are today's development.
 5) the same story repeated across multiple sections.
-Return ONLY JSON: {"issues":[{"type":"contradiction|fabrication|attribution|stale|duplication","where":"section/field","detail":"one sentence"}],"summary":"one sentence overall"}. If nothing is wrong, return {"issues":[],"summary":"clean"}.
+For each issue, identify the SINGLE offending story and copy its EXACT "headline" verbatim from the JSON, name its "section", and set "severity" to "high" only if the problem makes the brief untrustworthy (a real same-day contradiction or an apparent fabrication) — otherwise "low".
+Return ONLY JSON: {"issues":[{"type":"contradiction|fabrication|attribution|stale|duplication","section":"<section key>","headline":"<exact headline of the offending story, or empty if not attributable to one story>","severity":"high|low","detail":"one sentence"}],"summary":"one sentence overall"}. If nothing is wrong, return {"issues":[],"summary":"clean"}.
 
 BRIEF JSON:
 ${compact}`;
@@ -2618,7 +2750,7 @@ ${compact}`;
       body: JSON.stringify({
         model: 'gpt-4o-mini',
         messages: [{ role: 'user', content: prompt }],
-        max_tokens: 900,
+        max_tokens: 1100,
         response_format: { type: 'json_object' },
       }),
     });
@@ -2633,21 +2765,54 @@ ${compact}`;
       detail: `coherence:${edition}`,
     });
     const txt = data?.choices?.[0]?.message?.content;
-    if (!txt) { console.warn(`[coherence:${edition}] empty response`); return; }
+    if (!txt) { console.warn(`[coherence:${edition}] empty response`); return []; }
     const parsed = extractJsonObject(txt);
-    const issues = Array.isArray(parsed?.issues) ? parsed.issues : [];
+    const rawIssues = Array.isArray(parsed?.issues) ? parsed.issues : [];
+    const issues: CoherenceIssue[] = rawIssues.map((it: any) => ({
+      type: String(it?.type || 'issue'),
+      section: String(it?.section || it?.where || '').split('/')[0].trim(),
+      headline: String(it?.headline || '').trim(),
+      severity: String(it?.severity || 'low').toLowerCase(),
+      detail: String(it?.detail || ''),
+    }));
     if (issues.length === 0) {
       console.info(`[coherence:${edition}] clean — ${parsed?.summary || 'no issues'}`);
-      return;
+      return [];
     }
     console.warn(`[coherence:${edition}] ${issues.length} issue(s) — ${parsed?.summary || ''}`);
     for (const it of issues.slice(0, 12)) {
-      console.warn(`[coherence:${edition}]  - ${it?.type || 'issue'} @ ${it?.where || '?'}: ${it?.detail || ''}`);
+      console.warn(`[coherence:${edition}]  - ${it.type}/${it.severity} @ ${it.section || '?'}: ${it.detail}`);
     }
+    return issues;
   } catch (e: any) {
     console.warn(`[coherence:${edition}] check failed: ${e?.message || e}`);
+    return [];
   }
 }
+
+// Sprint 14.8 — apply blocking coherence: drop the exact stories flagged as
+// high-severity contradiction/fabrication. Returns how many were removed.
+function applyCoherenceDrops(content: any, edition: Edition, issues: CoherenceIssue[]): number {
+  if (!content || typeof content !== 'object' || !Array.isArray(issues)) return 0;
+  const ENFORCE_TYPES = new Set(['contradiction', 'fabrication']);
+  const norm = (h: any) => String(h || '').toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
+  let removed = 0;
+  for (const it of issues) {
+    if (it.severity !== 'high' || !ENFORCE_TYPES.has(it.type)) continue;
+    const sec = it.section;
+    const target = norm(it.headline);
+    if (!sec || !target || !Array.isArray(content[sec])) continue;
+    const before = content[sec].length;
+    content[sec] = content[sec].filter((s: any) => norm(s?.headline) !== target);
+    const dropped = before - content[sec].length;
+    if (dropped > 0) {
+      removed += dropped;
+      console.warn(`[coherence:${edition}] BLOCKED — dropped ${dropped} story from "${sec}" (${it.type}): "${String(it.headline).slice(0, 80)}"`);
+    }
+  }
+  return removed;
+}
+
 
 function repairCommonOmissions(content: any, edition: Edition, raw: RawStories): any {
   if (!content || typeof content !== 'object') return content;
@@ -3129,9 +3294,23 @@ async function runWriterForEdition(
       if (validation.ok) {
         // Post-write source-URL guard: drop any story whose source_url isn't
         // from a Tier-1 whitelisted publisher (catches writer hallucinations).
-        const { content: stripped, dropped } = stripNonWhitelistedFromContent(validation.data, ed);
+        let { content: stripped, dropped } = stripNonWhitelistedFromContent(validation.data, ed);
         if (dropped > 0) {
           console.log(`[${ed}] Post-write strip removed ${dropped} non-whitelisted stories.`);
+          // Sprint 14.8 — top the stripped sections back up to the subset counts
+          // (the real fix for "only 2 India items"). Re-validate; keep the
+          // top-up only if it still passes Zod, so it can never ship bad content.
+          const candidate = JSON.parse(JSON.stringify(stripped));
+          const added = backfillToSubsetCounts(candidate, ed, writerInput);
+          if (added > 0) {
+            const reval = validateBrief(candidate, ed);
+            if (reval.ok) {
+              stripped = reval.data;
+              console.log(`[${ed}] strip backfill restored ${added} story(ies) to subset counts.`);
+            } else {
+              console.warn(`[${ed}] strip backfill invalid; keeping stripped brief — ${reval.errors}`);
+            }
+          }
         }
         // Sprint 13: drop stories whose source_url is definitively dead (404/410).
         const live = await dropDeadLinkStories(stripped, ed);
@@ -3141,13 +3320,30 @@ async function runWriterForEdition(
         // Sprint 14.4: deterministic editorial guardrails (dedupe / signature)
         // run here — after validation/strip/liveness, before save — so they
         // apply to exactly the content the reader will see.
-        const finalContent = sanitizeEditionContent(ed, live.content);
-        // Sprint 14.5: non-blocking copy-desk QA on the editions where
-        // contradiction/synthesis risk is highest. Logs issues; never edits or
-        // blocks the brief.
+        let finalContent = sanitizeEditionContent(ed, live.content);
+        // Sprint 14.5/14.8: copy-desk QA on the editions where contradiction /
+        // synthesis risk is highest. BLOCKING (founder decision): high-severity
+        // contradictions/fabrications are dropped, then we re-validate and top
+        // up so a drop can't leave a section short or the brief invalid. Gated
+        // by COHERENCE_ENFORCE ('off' reverts to log-only).
         if (ed === '10min' || ed === 'deep') {
-          try { await runCoherenceCheck(ed, finalContent); }
-          catch (e: any) { console.warn(`[${ed}] coherence check skipped: ${e?.message || e}`); }
+          try {
+            const issues = await runCoherenceCheck(ed, finalContent);
+            if (COHERENCE_ENFORCE && issues.length > 0) {
+              const candidate = JSON.parse(JSON.stringify(finalContent));
+              const removed = applyCoherenceDrops(candidate, ed, issues);
+              if (removed > 0) {
+                backfillToSubsetCounts(candidate, ed, writerInput);
+                const reval = validateBrief(candidate, ed);
+                if (reval.ok) {
+                  finalContent = reval.data;
+                  console.log(`[${ed}] coherence enforcement removed ${removed} story(ies); brief re-validated.`);
+                } else {
+                  console.warn(`[${ed}] coherence-enforced brief invalid; shipping pre-enforcement content — ${reval.errors}`);
+                }
+              }
+            }
+          } catch (e: any) { console.warn(`[${ed}] coherence check skipped: ${e?.message || e}`); }
         }
         // Save the FULL rawStories (not the subset) into the brief row so
         // downstream consumers see the same raw for every edition.
@@ -3398,9 +3594,86 @@ function emptySectionCount(edition: Edition, content: any): number {
   return empty;
 }
 
+// ─── Sprint 14.8 — OMISSION-AWARE SCORING (founder decision) ─────────────────
+//
+// The 7-dim scorer only ever saw the brief's OWN content, so it could not know
+// what the day's actual top stories were — it scored currentness/relevance 9/9
+// on a brief that missed Mumbai's water crisis, the Trump-Iran development, etc.
+// (16-Jun run). Coverage's only real penalty was the empty-section check, which
+// fires on a STRUCTURALLY empty section, never on one full of filler.
+//
+// Fix: fetch an INDEPENDENT reference list of the day's real top India + world
+// headlines (one cheap Perplexity call, recency=day), then (a) hand it to the
+// LLM scorer as a coverage reference, and (b) apply a DETERMINISTIC coverage
+// penalty for reference headlines the brief omits — so a real miss always moves
+// the score. Gated by SCORE_GROUNDTRUTH ('off' skips the call and the penalty).
+
+const SCORE_GROUNDTRUTH = (process.env.SCORE_GROUNDTRUTH || 'on').toLowerCase() !== 'off';
+
+type GroundTruth = { india: string[]; world: string[] };
+
+async function fetchGroundTruthHeadlines(today: string): Promise<GroundTruth | null> {
+  if (!SCORE_GROUNDTRUTH) return null;
+  const prompt = `List the most important real news headlines for ${today} (IST). This is a neutral reference set for auditing a news brief's completeness.
+Return ONLY JSON: {"india":["headline", ...], "world":["headline", ...]}.
+- "india": the 8-10 biggest India stories today (politics, policy, economy, courts, RBI/markets, major civic or state events, big-city civic news).
+- "world": the 6-8 biggest non-India stories today (geopolitics, conflicts, foreign policy, major institutions).
+Each headline is a short, specific, factual title naming the concrete development that happened today — not a topic or a standing trend. No commentary, no markdown.`;
+  try {
+    const text = await callPerplexity(prompt, 60_000);
+    const parsed = extractJsonObject(text);
+    const clean = (a: any): string[] =>
+      Array.isArray(a) ? a.map((x: any) => String(x || '').trim()).filter(Boolean).slice(0, 12) : [];
+    const gt: GroundTruth = { india: clean(parsed?.india), world: clean(parsed?.world) };
+    if (gt.india.length === 0 && gt.world.length === 0) {
+      console.warn('[score:groundtruth] reference fetch returned nothing usable — scoring without it.');
+      return null;
+    }
+    console.log(`[score:groundtruth] reference: ${gt.india.length} India + ${gt.world.length} world headlines.`);
+    return gt;
+  } catch (e: any) {
+    console.warn(`[score:groundtruth] fetch failed (non-fatal): ${e?.message || e}`);
+    return null;
+  }
+}
+
+// Collect every headline the brief actually rendered (across all story sections).
+function collectBriefHeadlines(content: any): string[] {
+  if (!content || typeof content !== 'object') return [];
+  const out: string[] = [];
+  for (const v of Object.values(content)) {
+    if (Array.isArray(v)) {
+      for (const s of v) {
+        const h = (s && typeof s === 'object') ? (s as any).headline : null;
+        if (typeof h === 'string' && h.trim()) out.push(h);
+      }
+    }
+  }
+  return out;
+}
+
+// A reference headline is "covered" if it shares >=2 significant words with any
+// rendered headline. Returns the reference headlines the brief MISSED.
+const COVERAGE_MATCH_THRESHOLD = 2;
+
+function missedReferenceHeadlines(content: any, gt: GroundTruth | null): string[] {
+  if (!gt) return [];
+  const briefSets = collectBriefHeadlines(content).map(significantWords);
+  const refs = [...gt.india, ...gt.world];
+  const missed: string[] = [];
+  for (const ref of refs) {
+    const refSet = significantWords(ref);
+    if (refSet.size === 0) continue;
+    const covered = briefSets.some((b) => semanticOverlap(refSet, b) >= COVERAGE_MATCH_THRESHOLD);
+    if (!covered) missed.push(ref);
+  }
+  return missed;
+}
+
 async function scoreBriefWithLLM(
   edition: Edition,
   content: any,
+  groundTruth?: GroundTruth | null,
 ): Promise<{
   dim_coverage: number;
   dim_field_completeness: number;
@@ -3417,13 +3690,20 @@ async function scoreBriefWithLLM(
   // tokens low. The scorer reads headlines, bodies, sources, and structure.
   const compact = JSON.stringify(content, null, 0).slice(0, 28000);
 
+  // Sprint 14.8 — give the scorer the day's REAL top headlines so COVERAGE is
+  // judged against what actually happened, not just against the brief itself.
+  const missedRefs = missedReferenceHeadlines(content, groundTruth || null);
+  const referenceBlock = groundTruth
+    ? `\n\nCOVERAGE REFERENCE — the day's actual top headlines from major outlets (independently retrieved). Judge COVERAGE against THIS list; a brief that omits several of these has a real coverage gap, however polished the stories it did include:\nINDIA: ${groundTruth.india.map((h) => `• ${h}`).join('\n')}\nWORLD: ${groundTruth.world.map((h) => `• ${h}`).join('\n')}\n${missedRefs.length ? `Reference headlines this brief appears to MISS entirely: ${missedRefs.map((h) => `"${h}"`).join('; ')}.` : 'The brief appears to cover the reference headlines.'}`
+    : '';
+
   const prompt = `You are the quality auditor for Morning Brief, a daily news digest for thoughtful urban Indian professionals (25-45). You score one edition against a 7-dimension rubric. Be honest and discerning. Most production briefs score 50-62/70. A score of 70/70 is rare and reserved for exceptional days.
 
 EDITION SCORED: ${edition === '5min' ? 'The Brief (5min commute skim)' : edition === '10min' ? 'The Daily (10min full edition)' : 'The Editorial (deep synthesis)'}
 
 RUBRIC — score each dimension 0-10:
 
-1. COVERAGE: Does the brief cover the day's most consequential stories? Are there any glaring omissions (e.g. RBI rate decision, major war development, big election result that other outlets are leading with)? Higher = more comprehensive.
+1. COVERAGE: Does the brief cover the day's most consequential stories? Use the COVERAGE REFERENCE below (if provided) as the yardstick — penalise heavily for reference headlines the brief omits. Higher = more comprehensive.
 
 2. FIELD COMPLETENESS: Are all required fields populated on every story? For 10min: headline, facts, background, why_it_matters, what_happens_next, analysis. For 5min: headline, what_happened, why_it_matters. For deep: title, body, stories_connected. Empty/null/placeholder text on any field reduces this score significantly.
 
@@ -3433,12 +3713,12 @@ RUBRIC — score each dimension 0-10:
 
 5. EDITORIAL SHARPNESS: Is the voice intelligent and specific? Or does it read like rewritten wire copy? Sharp analysis, specific names/numbers/dates, calibrated uncertainty score high. Generic phrases ("amid rising tensions", "stay tuned for more") score low.
 
-6. CURRENTNESS: Do headlines describe today's DEVELOPMENT, not the underlying narrative? "Tehran signals back-channel talks" (good) vs "Iran-US tensions continue" (bad). Any story that feels like yesterday's news drops this score.
+6. CURRENTNESS: Do headlines describe today's DEVELOPMENT, not the underlying narrative? "Tehran signals back-channel talks" (good) vs "Iran-US tensions continue" (bad). A story that merely describes a standing trend ("sector poised for growth", "demand at multi-month low") with no dated event is NOT current — drop this score for such filler.
 
 7. RELEVANCE: Is the brief well-targeted at urban Indian professionals (25-45)? Is the mix of world/India/business/tech/sport/culture right for that audience? Or does it over-index on a niche topic, miss obvious appeal, or skew too foreign / too political?
 
 BRIEF CONTENT:
-${compact}
+${compact}${referenceBlock}
 
 OUTPUT — return ONLY this JSON, no preamble, no markdown:
 {
@@ -3484,10 +3764,21 @@ OUTPUT — return ONLY this JSON, no preamble, no markdown:
   // Completeness, applied in code so the scorer model can't be lenient.
   const emptySections = emptySectionCount(edition, content);
   const penalty = emptySections * 5;
-  const dim_coverage           = Math.max(0, dim_coverage_raw - penalty);
+
+  // Sprint 14.8: deterministic coverage penalty for the day's real top stories
+  // the brief MISSED entirely (independent reference set). -1.5 per miss, capped
+  // at -6, so stark omissions move the score even if the LLM is generous. This
+  // is what makes "the score not reflecting misses" impossible going forward.
+  const missCount = missedRefs.length;
+  const missPenalty = Math.min(6, Math.round(missCount * 1.5));
+
+  const dim_coverage           = Math.max(0, dim_coverage_raw - penalty - missPenalty);
   const dim_field_completeness = Math.max(0, dim_field_raw - penalty);
   if (emptySections > 0) {
     console.warn(`[score:${edition}] ${emptySections} empty section(s) → -${penalty} on coverage and field_completeness.`);
+  }
+  if (missPenalty > 0) {
+    console.warn(`[score:${edition}] ${missCount} reference headline(s) missed → -${missPenalty} on coverage. Missed: ${missedRefs.slice(0, 6).map((h) => `"${h.slice(0, 60)}"`).join('; ')}`);
   }
 
   const total =
@@ -3504,7 +3795,8 @@ OUTPUT — return ONLY this JSON, no preamble, no markdown:
     dim_relevance,
     total,
     notes: (typeof parsed?.notes === 'string' ? parsed.notes.slice(0, 800) : '')
-      + (emptySections > 0 ? ` [auto-penalty: ${emptySections} empty section(s), -${penalty} on coverage & field completeness]` : ''),
+      + (emptySections > 0 ? ` [auto-penalty: ${emptySections} empty section(s), -${penalty} on coverage & field completeness]` : '')
+      + (missPenalty > 0 ? ` [coverage-gap: missed ${missCount} of the day's top headlines, -${missPenalty} on coverage]` : ''),
   };
 }
 
@@ -3526,6 +3818,10 @@ async function modeScore() {
   const editions: Edition[] = ['5min', '10min', 'deep'];
   const results: Record<string, any> = {};
 
+  // Sprint 14.8 — fetch the day's real top headlines ONCE (shared across all
+  // three editions) so coverage is scored against what actually happened.
+  const groundTruth = await fetchGroundTruthHeadlines(today);
+
   await Promise.all(
     editions.map(async (ed) => {
       const row = data.find((r) => r.edition === ed);
@@ -3534,7 +3830,7 @@ async function modeScore() {
         return;
       }
       try {
-        const scored = await scoreBriefWithLLM(ed, row.content);
+        const scored = await scoreBriefWithLLM(ed, row.content, groundTruth);
         const { error: insErr } = await supabase
           .from('brief_scores')
           .upsert(

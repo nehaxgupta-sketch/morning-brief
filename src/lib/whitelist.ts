@@ -72,6 +72,14 @@ export const TIER_1_DOMAINS = new Set<string>([
   'thequint.com',
   'caravanmagazine.in',
   'thenewsminute.com',                 // South India regional
+  // Sprint 14.8 — reputable NATIONAL outlets Perplexity frequently surfaces but
+  // that were missing from the whitelist, so their legitimate India stories were
+  // ranked into the subset and then stripped post-write with no backfill (e.g.
+  // "The Week" on the 16-Jun run). Conservative addition of established national
+  // mastheads only; extend deliberately, never with low-trust local-digital sites.
+  'theweek.in',                        // The Week (Malayala Manorama group)
+  'news18.com',                        // News18 / CNN-News18 (Network18)
+  'firstpost.com',                     // Firstpost (Network18)
   // Sprint 12.5.1 — Beatroot News (Faye D'Souza, founded 2020, Mumbai;
   // fact-checked, non-partisan, no clickbait headlines). App-first publisher;
   // articles primarily exist inside the Beatroot app, but URLs on
@@ -350,6 +358,9 @@ const PUBLISHER_LABELS: Record<string, string> = {
   'thequint.com': 'The Quint',
   'caravanmagazine.in': 'The Caravan',
   'thenewsminute.com': 'The News Minute',
+  'theweek.in': 'The Week',
+  'news18.com': 'News18',
+  'firstpost.com': 'Firstpost',
   'beatrootnews.com': 'Beatroot News',
   'livelaw.in': 'Live Law',
   'barandbench.com': 'Bar and Bench',
@@ -404,4 +415,72 @@ export function publisherLabel(url: string | undefined | null): string | null {
   const key = publisherKey(url);
   if (!key) return null;
   return PUBLISHER_LABELS[key] || key;
+}
+
+// ─── Sprint 14.8 — SOURCE TIERS (story ranking, not whitelist membership) ────
+//
+// The whitelist decides whether a source is allowed AT ALL. The TIER decides
+// where a story RANKS within its section. Founder ask: national coverage
+// agencies / papers of record (Times of India, PTI, ANI, The Hindu, Indian
+// Express, Hindustan Times, NDTV, the global wires …) should lead each section,
+// ahead of regional/vernacular mastheads and topical/specialist outlets.
+//
+// buildSubset() and the personalise scorer sort by sourceTier() DESC (after
+// must_include) before slicing, so the best-sourced stories survive the per-
+// section quota instead of whatever order the fetcher happened to return.
+//
+//   3 = national wires + papers of record + govt/institutional primary sources
+//   2 = reputable national business / digital / magazine + global specialists
+//   1 = any other whitelisted source (regional + vernacular + topical floor)
+//   0 = NOT whitelisted (should not reach ranking once fetch-time enforcement
+//       runs, but kept so the function is safe to call on any url)
+
+const TIER_3_DOMAINS = new Set<string>([
+  // Global wires + papers of record
+  'reuters.com', 'apnews.com', 'bloomberg.com', 'ft.com', 'wsj.com',
+  'nytimes.com', 'washingtonpost.com', 'bbc.com', 'bbc.co.uk', 'economist.com',
+  'theguardian.com', 'aljazeera.com', 'abc.net.au',
+  // India national dailies + wires
+  'ptinews.com', 'aninews.in', 'thehindu.com', 'thehindubusinessline.com',
+  'indianexpress.com', 'newindianexpress.com', 'hindustantimes.com', 'ndtv.com',
+  'timesofindia.indiatimes.com', 'deccanherald.com', 'telegraphindia.com',
+  'tribuneindia.com',
+  // Government / institutional primary sources (authoritative when cited)
+  'rbi.org.in', 'sebi.gov.in', 'mospi.gov.in', 'pib.gov.in',
+  'bls.gov', 'treasury.gov', 'federalreserve.gov', 'imf.org', 'worldbank.org', 'who.int',
+]);
+
+const TIER_2_DOMAINS = new Set<string>([
+  // India business / markets
+  'livemint.com', 'business-standard.com', 'economictimes.indiatimes.com',
+  'financialexpress.com', 'moneycontrol.com', 'businesstoday.in', 'cnbctv18.com',
+  // India digital + magazine journalism
+  'theprint.in', 'scroll.in', 'thewire.in', 'indiatoday.in', 'outlookindia.com',
+  'thequint.com', 'caravanmagazine.in', 'thenewsminute.com', 'beatrootnews.com',
+  'theweek.in', 'news18.com', 'firstpost.com',
+  // India specialist
+  'livelaw.in', 'barandbench.com', 'downtoearth.org.in',
+  // Global specialist (sport / entertainment / science / tech)
+  'espncricinfo.com', 'espn.com', 'cricbuzz.com', 'variety.com',
+  'hollywoodreporter.com', 'filmcompanion.in', 'nature.com', 'science.org',
+  'statnews.com', 'techcrunch.com', 'theverge.com', 'arstechnica.com', 'wired.com',
+]);
+
+// Numeric rank for a story's source. Higher ranks lead the section.
+export function sourceTier(url: string | undefined | null): number {
+  const key = publisherKey(url); // matched whitelisted root domain, or null
+  if (!key) return 0;
+  if (TIER_3_DOMAINS.has(key)) return 3;
+  if (TIER_2_DOMAINS.has(key)) return 2;
+  return 1; // whitelisted but regional/vernacular/topical
+}
+
+// Human-readable tier name (for logs / admin).
+export function sourceTierLabel(url: string | undefined | null): string {
+  switch (sourceTier(url)) {
+    case 3: return 'national/record';
+    case 2: return 'national-digital/specialist';
+    case 1: return 'regional/topical';
+    default: return 'non-whitelisted';
+  }
 }
