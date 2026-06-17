@@ -1182,49 +1182,49 @@ function buildPerplexityFetchPrompt(today: string, universe: Universe): string {
   return `You are the news fetcher for Morning Brief, India's daily news digest for thoughtful urban professionals (25-45, English-reading). Today is ${today} (IST).
 
 ═══════════════════════════════════════════════
-PRIMARY DIRECTIVE: FIND THE DAY'S REAL STORIES, THEN SELECT — DON'T PAD
+PRIMARY DIRECTIVE: OVER-FETCH REAL STORIES — VOLUME *AND* QUALITY
 ═══════════════════════════════════════════════
 
-Your job is the reader's COMPLETE, ACCURATE picture of today. Two failure modes are equally bad: (a) missing a story everyone is leading with, and (b) padding a section with filler to hit a number.
+Downstream code filters by publisher whitelist, recency, and deduplication, TYPICALLY DROPPING 30-50% OF WHAT YOU RETURN. So you MUST OVER-FETCH: meet or exceed the MINIMUM for every section. Returning too few is the most common and most damaging failure — it leaves whole sections EMPTY after filtering. When in doubt, return MORE real stories, not fewer.
 
-Search BROADLY to find candidates: for EVERY section run MULTIPLE distinct searches with DIFFERENT angles (examples below) — a single search per section is not enough. THEN select the genuinely consequential, specific, TODAY stories. It is better to return 4 real front-page stories than 8 padded with evergreen trend pieces.
+For EVERY section run MULTIPLE distinct searches with DIFFERENT angles (examples below). A single search per section is not enough.
 
-THE TWO TESTS every story must pass:
-• SPECIFIC & DATED: it reports a concrete development from the last 24-48h — something that HAPPENED (a decision, ruling, result, announcement, attack, release, data print, statement), with a date, named actors, and where relevant a number. Reject standing-trend / explainer / outlook pieces with no dated trigger.
-• FRONT-PAGE TEST: a well-informed Indian reader would be surprised or embarrassed to have missed it today.
+QUALITY governs ORDER and what you drop LAST — never whether you hit the minimum. Within each section LEAD with the most consequential, specific, TODAY stories; if you must trim, drop the weakest first. A strong story ideally passes:
+• SPECIFIC & DATED: a concrete development from the last 24-48h — something that HAPPENED (a decision, ruling, result, announcement, attack, release, data print, statement), with a date, named actors, and where relevant a number.
+• FRONT-PAGE TEST: a well-informed Indian reader would be surprised to have missed it today.
 
-REJECT (these are the padding pattern that has hurt us — do NOT include them):
-✗ "<sector> enters/poised for AI-led growth phase", "<market> seen reaching ₹X trillion by FY__" — trend/forecast, not news.
+PREFER specific dated stories over these weaker types — but a real, sourced story still COUNTS toward the minimum, so include it rather than fall short:
+✗ "<sector> enters/poised for AI-led growth phase", "<market> seen reaching ₹X trillion by FY__" — trend/forecast.
 ✗ "demand for <thing> falls to <N>-month low", "experts say <generic>" with no dated event.
-✗ evergreen explainers, listicles, "here's what to know", anniversary look-backs with no fresh development.
-ORDER EACH SECTION BEST-FIRST: the first stories in major_events / india / world MUST be the single biggest developments of the day, not a warm-up.
+✗ evergreen explainers, listicles, anniversary look-backs with no fresh development.
+Lead each section with hard news; let these weaker types fill the TAIL only when you're short of stronger stories. NEVER fabricate to reach a number — if a story isn't real, don't invent it; search harder instead.
 
 ═══════════════════════════════════════════════
-SECTIONS — targets to aim for via broad search; never pad past what's genuinely consequential
+SECTIONS — minimums are FLOORS (over-fetch above them); lead each section best-first
 ═══════════════════════════════════════════════
 
-1. major_events — aim 6-8. The day's biggest news, India and world combined. Genuinely consequential — events with real second-order impact.
+1. major_events — MINIMUM 5, target 6-8. The day's biggest news, India and world combined. Genuinely consequential — events with real second-order impact.
    Search angles: "top news today India", "world news today", "breaking news ${today}", "biggest story today"
 
-2. world — aim 7-9. Significant developments OUTSIDE India. Geopolitics, foreign policy, conflicts, foreign elections, major institutions (UN/IMF/WB).
+2. world — MINIMUM 6, target 7-9. Significant developments OUTSIDE India. Geopolitics, foreign policy, conflicts, foreign elections, major institutions (UN/IMF/WB).
    Search angles: "world news today", "geopolitics ${today}", "international news today", "US news today", "China news today", "Europe news today", "Middle East today"
 
-3. india — aim 7-9. Domestic India: politics, policy, Supreme Court, RBI, regulatory, major corporate India, civic, infrastructure, state-level major events, big-city civic news (water, transport, governance).
+3. india — MINIMUM 6, target 7-9. Domestic India: politics, policy, Supreme Court, RBI, regulatory, major corporate India, civic, infrastructure, state-level major events, big-city civic news (water, transport, governance).
    Search angles: "India news today", "Modi government today", "Supreme Court India today", "RBI news ${today}", "India policy today", "Indian states news today", "Mumbai Delhi Bengaluru civic news today"
 
-4. business — aim 6-8. Corporate news, earnings, M&A, IPO, regulatory, hires, sector moves. Indian and global. Exclude pure markets summaries (markets is section 9).
+4. business — MINIMUM 5, target 6-8. Corporate news, earnings, M&A, IPO, regulatory, hires, sector moves. Indian and global. Exclude pure markets summaries (markets is section 9).
    Search angles: "business news today India", "corporate earnings today", "M&A deal today", "Indian company news today", "global business news today"
 
-5. technology — aim 5-7. Product launches, AI developments, big-tech regulation, cybersecurity, infrastructure (chips, data centres). Skip rumour and speculation.
+5. technology — MINIMUM 4, target 5-7. Product launches, AI developments, big-tech regulation, cybersecurity, infrastructure (chips, data centres). Skip rumour and speculation.
    Search angles: "tech news today", "AI news today", "OpenAI Google Meta today", "tech regulation today India", "cybersecurity news today"
 
-6. climate_health — aim 5-7. Climate events, environmental policy, health news with real-world impact (outbreaks, approvals, major research, heatwave/monsoon developments).
+6. climate_health — MINIMUM 4, target 5-7. Climate events, environmental policy, health news with real-world impact (outbreaks, approvals, major research, heatwave/monsoon developments).
    Search angles: "climate news today", "health news today India", "WHO news today", "disease outbreak today", "monsoon India today", "heatwave India today"
 
-7. sport — aim 5-7 ACROSS DIFFERENT SPORTS. Cricket, football (incl. FIFA/club), tennis, F1, badminton, hockey, kabaddi, Olympics, athletics, golf, esports. NO more than 2 cricket stories — force breadth.
+7. sport — MINIMUM 4 ACROSS DIFFERENT SPORTS, target 5-7. Cricket, football (incl. FIFA/club), tennis, F1, badminton, hockey, kabaddi, Olympics, athletics, golf, esports. NO more than 2 cricket stories — force breadth.
    Search angles: "cricket news today", "tennis news today", "football FIFA news today", "F1 news today", "badminton news today", "sports India today"
 
-8. culture — aim 5-7 ACROSS DIFFERENT TYPES. Films, OTT, music, books, theatre, visual arts, awards, viral cultural phenomena.
+8. culture — MINIMUM 4 ACROSS DIFFERENT TYPES, target 5-7. Films, OTT, music, books, theatre, visual arts, awards, viral cultural phenomena.
    Search angles: "Bollywood news today", "OTT release today", "film news today", "music news India today", "book news today", "awards news today"
 
 9. markets — ONE object with summary (2-3 sentences) + indices array (4 items: Sensex, Nifty 50, Dow Jones, Nasdaq). At 6:30 AM IST, Indian markets haven't opened — use YESTERDAY'S close. US markets closed overnight — use that close. NEVER return empty indices. If you don't find a number, search again — the data exists.
@@ -1266,13 +1266,13 @@ OUTPUT SHAPE — exactly this, no markdown
 HARD RULES
 ═══════════════════════════════════════════════
 
-1. CONSEQUENCE OVER COUNT. The targets above are aims, not floors to pad to. Returning a generic/trend story to hit a number is a FAILURE. If a section genuinely has only 4 consequential, specific, today stories, return 4 — never invent or pad. Use the extra searches to FIND real stories, not to manufacture filler.
+1. MEET THE MINIMUM FOR EVERY SECTION. Below the minimum = failure — run more searches with new angles until you reach it. Over-fetching above the minimum is good (downstream filtering drops 30-50%). The only thing you must NOT do to hit a number is fabricate (see rule 4).
 
 2. PARAPHRASE — your "body" is your own 2-3 sentence factual summary, not the article's prose. Headlines should also be your own factual summary, not the original article's verbatim title.
 
 3. SOURCE: direct article URLs from reputable publishers (Reuters, AP, Bloomberg, FT, WSJ, NYT, BBC, Guardian, Economist, The Hindu, Indian Express, Hindustan Times, Mint, Business Standard, Economic Times, The Print, Scroll, NDTV, Times of India, Deccan Herald, Telegraph India, Tribune India, Live Law, Bar and Bench, Down to Earth, ESPNCricinfo, ESPN, Variety, TechCrunch, The Verge, Wired, etc.). NO aggregators, NO social media, NO Google News redirects.
 
-4. NEVER FABRICATE OR PAD. If after MULTIPLE searches you genuinely cannot find more consequential stories for a section, return what you have. A shorter section of real stories beats a padded one — downstream code will fill quotas from the best available; your job is accuracy.
+4. NEVER FABRICATE. Every story must be a real, published article you can cite. Do not invent stories, headlines, or URLs to pad a section. But "don't fabricate" is NOT licence to return few — exhaust the search angles to find enough REAL stories first; only return below the minimum if the genuine news truly isn't there.
 
 5. PUBLISHER DIVERSITY: no publisher contributes more than 3 stories total across the brief.
 
@@ -1280,7 +1280,7 @@ HARD RULES
 
 7. JSON ONLY: start with { and end with }. No markdown fences. No commentary. No "here is the JSON" preambles.${personalisationContext}
 
-Begin now. Search broadly across multiple angles per section to FIND the day's real stories, then select the consequential, specific, today ones — best-first. Return ONLY the JSON object.`;
+Begin now. Run MANY searches per section across different angles, meet or exceed every section's MINIMUM (over-fetching is good — downstream filtering drops 30-50%), and lead each section with the most consequential, specific, today stories. Return ONLY the JSON object.`;
 }
 
 // Strategy A: Perplexity Sonar Pro single call, all 10 sections.
@@ -1402,7 +1402,43 @@ async function fetchStrategy_PerplexitySingle(universe: Universe): Promise<RawSt
     _fetched_at:    new Date().toISOString(),
   };
 
-  console.log(`[fetch] (Sprint 12.4 ${source}) merged section counts: ` +
+  // Sprint 14.8 — STORY-SPARSE SAFETY NET. The 17-Jun run returned a long, valid
+  // response (9.6k chars) carrying only ~8 stories total (major=3,world=3,
+  // india=1). The existing retry only fires on a SHORT/empty response, so this
+  // slipped through; the now-active fetch-time quality gate then emptied the
+  // brief. Here we count core stories and, if the pool is thin, supplement it
+  // with one gpt-4o web-search fetch, taking the richer set per section. This
+  // never produces an empty brief from a single weak fetch. Gated by
+  // FETCH_SPARSE_BACKSTOP ('on' default; 'off' disables).
+  const CORE_SECTIONS = ['major_events', 'world', 'india', 'business', 'technology', 'climate_health', 'sport', 'culture'];
+  const coreCount = CORE_SECTIONS.reduce((n, s) => n + (Array.isArray(merged[s]) ? merged[s].length : 0), 0);
+  const SPARSE_THRESHOLD = 12; // pre-filter floor; downstream drops 30-50%
+  const sparseBackstopOn = (process.env.FETCH_SPARSE_BACKSTOP || 'on').toLowerCase() !== 'off';
+  if (coreCount < SPARSE_THRESHOLD && source !== 'gpt-4o-fallback' && sparseBackstopOn) {
+    console.warn(`[fetch] STORY-SPARSE (${coreCount} core stories < ${SPARSE_THRESHOLD}) from ${source} — supplementing via gpt-4o web search.`);
+    try {
+      const suppText = await callGpt4oWebSearchFallback(prompt, 180_000);
+      const supp = safeParse(suppText, 'gpt-4o-supplement');
+      let filled = 0;
+      for (const s of CORE_SECTIONS) {
+        const cur = Array.isArray(merged[s]) ? merged[s] : [];
+        const alt = Array.isArray(supp?.[s]) ? supp[s] : [];
+        if (alt.length > cur.length) { merged[s] = alt; filled += (alt.length - cur.length); }
+      }
+      // Take markets/lens from the supplement only if the primary lacked them.
+      if ((!merged.markets?.indices || merged.markets.indices.length < 4) && supp?.markets?.indices?.length) {
+        merged.markets = supp.markets;
+      }
+      if (!merged.lens && supp?.lens) merged.lens = supp.lens;
+      merged._source = `${source}+gpt4o-supplement`;
+      const newCore = CORE_SECTIONS.reduce((n, s) => n + (Array.isArray(merged[s]) ? merged[s].length : 0), 0);
+      console.log(`[fetch] supplement added ${filled} stories; core now ${newCore}.`);
+    } catch (e: any) {
+      console.warn(`[fetch] sparse supplement failed (non-fatal): ${e?.message || e}`);
+    }
+  }
+
+  console.log(`[fetch] (Sprint 12.4 ${merged._source}) merged section counts: ` +
     `major=${merged.major_events.length}, world=${merged.world.length}, india=${merged.india.length}, ` +
     `biz=${merged.business.length}, tech=${merged.technology.length}, climate=${merged.climate_health.length}, ` +
     `sport=${merged.sport.length}, culture=${merged.culture.length}, indices=${merged.markets?.indices?.length || 0}`);
