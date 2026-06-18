@@ -1286,6 +1286,23 @@ Begin now. Run MANY searches per section across different angles, meet or exceed
 // Strategy A: Perplexity Sonar Pro single call, all 10 sections.
 // Fallback chain: Perplexity primary → Perplexity retry → gpt-4o web_search.
 // Wall clock: 30-90s typical. Cost: ~$0.15/fetch.
+
+// Sprint 14.8 — helpers for stub-aware fetch acceptance.
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+// Count how many real stories a raw fetch response actually parsed to, across
+// the core sections. The old acceptance guard checked `text.length >= 1000`,
+// but the 18-Jun Perplexity stub was 1155 chars (520 content + injected
+// citations) yet carried ZERO stories — it passed the length gate and was
+// accepted without a retry. Gating on story count instead catches that.
+function countCoreStories(rawText: string): number {
+  if (!rawText) return 0;
+  let parsed: any;
+  try { parsed = extractJsonObject(rawText); } catch { return 0; }
+  const CORE = ['major_events', 'world', 'india', 'business', 'technology', 'climate_health', 'sport', 'culture'];
+  return CORE.reduce((n, s) => n + (Array.isArray(parsed?.[s]) ? parsed[s].length : 0), 0);
+}
+
 async function fetchStrategy_PerplexitySingle(universe: Universe): Promise<RawStories> {
   const today = getISTDate();
 
@@ -1298,13 +1315,18 @@ async function fetchStrategy_PerplexitySingle(universe: Universe): Promise<RawSt
   let text = '';
   let source: 'perplexity' | 'perplexity-retry' | 'gpt-4o-fallback' | 'none' = 'none';
 
+  // A response is only "good" if it parses to real stories. A long stub with
+  // zero stories (the 18-Jun failure) must NOT be accepted.
+  const MIN_CORE_OK = 5;
+
   // Attempt 1: Perplexity Sonar Pro
   try {
     text = await callPerplexity(prompt, 120_000);
-    if (text && text.length >= 1000) {
+    const n = countCoreStories(text);
+    if (text && n >= MIN_CORE_OK) {
       source = 'perplexity';
     } else {
-      console.warn(`[fetch] Perplexity returned suspiciously short response (${text.length} chars). Will retry.`);
+      console.warn(`[fetch] Perplexity primary returned ${text.length} chars but only ${n} core stories (< ${MIN_CORE_OK}) — treating as a stub, will retry.`);
       text = '';
     }
   } catch (err: any) {
@@ -1312,15 +1334,20 @@ async function fetchStrategy_PerplexitySingle(universe: Universe): Promise<RawSt
     text = '';
   }
 
-  // Attempt 2: Perplexity with simpler reminder prompt
+  // Attempt 2: Perplexity with a reminder prompt, after a short backoff (a stub
+  // is often a transient rate/load blip — retrying the GOOD engine beats falling
+  // straight to the weaker gpt-4o fetcher).
   if (!text) {
-    console.log('[fetch] Attempting Perplexity retry with reminder...');
+    await sleep(4000);
+    console.log('[fetch] Attempting Perplexity retry with reminder (after 4s backoff)...');
     try {
-      const retryPrompt = prompt + '\n\nIMPORTANT: Return ONLY the JSON object described above. Do not include explanatory text. Begin with { and end with }.';
+      const retryPrompt = prompt + '\n\nIMPORTANT: Return ONLY the JSON object described above, fully populated to each section MINIMUM. Do not include explanatory text. Begin with { and end with }.';
       text = await callPerplexity(retryPrompt, 120_000);
-      if (text && text.length >= 1000) {
+      const n = countCoreStories(text);
+      if (text && n >= MIN_CORE_OK) {
         source = 'perplexity-retry';
       } else {
+        console.warn(`[fetch] Perplexity retry still sparse (${n} core stories) — falling back to gpt-4o.`);
         text = '';
       }
     } catch (err: any) {
@@ -1329,13 +1356,15 @@ async function fetchStrategy_PerplexitySingle(universe: Universe): Promise<RawSt
     }
   }
 
-  // Attempt 3: gpt-4o web_search fallback
+  // Attempt 3: gpt-4o web_search fallback (last resort; weaker fetcher)
   if (!text) {
-    console.log('[fetch] Both Perplexity attempts failed. Falling back to gpt-4o + web_search.');
+    console.log('[fetch] Both Perplexity attempts failed/sparse. Falling back to gpt-4o + web_search.');
     try {
       text = await callGpt4oWebSearchFallback(prompt, 180_000);
-      if (text && text.length >= 1000) {
+      if (text && countCoreStories(text) >= 3) {
         source = 'gpt-4o-fallback';
+      } else if (text && text.length < 1000) {
+        text = '';
       }
     } catch (err: any) {
       console.error(`[fetch] gpt-4o fallback failed: ${err.message}`);
