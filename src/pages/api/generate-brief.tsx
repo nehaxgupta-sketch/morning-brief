@@ -2203,55 +2203,58 @@ function enforceQualityRules(raw: any): RawStories {
     console.warn('Markets indices count off — got', cleaned.markets.indices?.length);
   }
 
-  // ─── Sprint 11: publisher diversity cap ─────────────────────────────────
-  // Cap at max 3 stories from any one publisher across the FULL fetch (not
-  // per section). Applied AFTER recency + whitelist + dedup filters so we
-  // only drop excess stories, never quality stories. must_include stories
-  // are exempt (they're flagged as undroppable upstream — 1-3 per fetch).
-  //
-  // Risk: on heavy days dominated by one publisher, post-cap count can dip
-  // below 15 stories. That's logged but accepted — the prompt-level rule
-  // ("no more than 3 from any one publisher in the final fetch") addresses
-  // root cause. This cap is the safety net.
-  const PUBLISHER_CAP = 3;
-  const publisherCount = new Map<string, number>();
+  // ─── Sprint 11 / 14.8: publisher diversity cap (now PER-SECTION) ─────────
+  // Originally a GLOBAL cap of 3/publisher across the whole fetch. That proved
+  // far too aggressive once enforceQualityRules began running on the Perplexity
+  // pool: Indian news is dominated by a few big mastheads, so a healthy 42-story
+  // retry pool (6/6/6/6/5/4/5/4 on the 18-Jun 11:25 run) collapsed to ~9 —
+  // world/business/tech went to ZERO because indianexpress.com had spent its
+  // GLOBAL budget of 3 on the higher-priority sections, leaving none for the
+  // rest. A global cap also fights the source-tiering (we WANT national agencies
+  // leading EVERY section). Fix: cap PER SECTION, tunable via PUBLISHER_CAP
+  // (default 4). A single source can no longer monopolise one section, but
+  // claiming slots in major/india no longer starves world/tech. must_include
+  // stories remain exempt.
+  const PUBLISHER_CAP = Math.max(1, parseInt(process.env.PUBLISHER_CAP || '4', 10) || 4);
   let publisherDropped = 0;
+  const globalDistribution = new Map<string, number>();
 
   function applyPublisherCap(arr: any[], section: string): RawStory[] {
     const out: RawStory[] = [];
+    const perSection = new Map<string, number>(); // reset for each section
     for (const story of arr) {
       const key = publisherKey(story?.source_url) || 'unknown';
-      const used = publisherCount.get(key) || 0;
+      const used = perSection.get(key) || 0;
       if (!story?.must_include && used >= PUBLISHER_CAP) {
-        console.log(`[publisher-cap] dropping ${section} story (publisher ${key} already at cap=${PUBLISHER_CAP}): "${(story?.headline || '').slice(0, 70)}"`);
+        console.log(`[publisher-cap] dropping ${section} story (publisher ${key} already at ${PUBLISHER_CAP} in this section): "${(story?.headline || '').slice(0, 70)}"`);
         publisherDropped++;
         dropped.push({
           section,
-          reason: `publisher diversity cap (${key} at ${PUBLISHER_CAP})`,
+          reason: `publisher diversity cap (${key} at ${PUBLISHER_CAP}/section)`,
           headline: story.headline,
           url: story.source_url,
         });
         continue;
       }
-      publisherCount.set(key, used + 1);
+      perSection.set(key, used + 1);
+      globalDistribution.set(key, (globalDistribution.get(key) || 0) + 1);
       out.push(story);
     }
     return out;
   }
 
-  // Walk in priority order — higher-priority sections claim publisher slots
-  // first, lower-priority sections lose excess.
+  // Cap each section independently — no cross-section coupling.
   for (const sec of priority) {
     (cleaned as any)[sec] = applyPublisherCap((cleaned as any)[sec] || [], sec);
   }
 
   if (publisherDropped > 0) {
-    const distribution = Array.from(publisherCount.entries())
+    const distribution = Array.from(globalDistribution.entries())
       .filter(([, n]) => n > 0)
       .sort((a, b) => b[1] - a[1])
       .map(([k, n]) => `${k}=${n}`)
       .join(', ');
-    console.log(`[publisher-cap] dropped ${publisherDropped} stories to enforce max ${PUBLISHER_CAP}/publisher. Final distribution: ${distribution}`);
+    console.log(`[publisher-cap] dropped ${publisherDropped} stories (max ${PUBLISHER_CAP}/publisher/section). Final distribution: ${distribution}`);
   }
 
   // Final story-count check — warn if cap dropped us below 15 (the 5min cap).
