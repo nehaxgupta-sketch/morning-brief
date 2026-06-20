@@ -123,6 +123,15 @@ function parseFeed(body: string, src: string, tier: number, secs: Section[]): Po
       source: publisherLabel(real) || src,
       source_url: real,
       published_at: date || undefined,
+      // Full field set so the pool shape matches the writer's expectations
+      // exactly (empty tag arrays are valid; personalisation tags are added
+      // later when the tails move to RSS). Prevents the writer from dropping
+      // the "carry unchanged" group, which caused a 10min validation hiccup.
+      industries: [],
+      interests: [],
+      city_tags: [],
+      topic_tags: [],
+      must_include: false,
       _tier: sourceTier(real) || tier,
       _secs: secs,
     });
@@ -226,10 +235,13 @@ async function storeItems(items: RssStory[]): Promise<void> {
   if ((process.env.STORE_ITEMS || 'on').toLowerCase() === 'off') return;
   try {
     const sb = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
-    const rows = items.map((s) => ({
+    // A story can appear in more than one section, so the flattened list may
+    // contain the same source_url twice. De-dupe before upsert, otherwise the
+    // batch hits "ON CONFLICT cannot affect row a second time".
+    const rows = Array.from(new Map(items.map((s) => [s.source_url, {
       source_url: s.source_url, headline: s.headline, source: s.source,
       published_at: s.published_at || null, fetched_at: new Date().toISOString(),
-    }));
+    }])).values());
     for (let i = 0; i < rows.length; i += 200) {
       const { error } = await sb.from('news_items').upsert(rows.slice(i, i + 200), { onConflict: 'source_url' });
       if (error) { console.warn('[rss] storeItems upsert failed (non-fatal):', error.message); break; }
