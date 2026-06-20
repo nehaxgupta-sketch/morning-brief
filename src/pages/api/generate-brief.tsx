@@ -47,6 +47,8 @@ import {
 } from '@/lib/cost-log';
 import { attachLogCapture } from '@/lib/log-capture';
 import { applyCitySafety } from '@/lib/editorial-safety';
+// Sprint 15: the RSS retrieval engine (used when RETRIEVAL=rss; old path otherwise).
+import { fetchStrategy_Rss } from '@/lib/rss-retrieval';
 
 // 300s = 5min. Vercel Pro caps at 300; Hobby with Fluid Compute enabled also
 // reaches 300. gpt-5 with reasoning web_search at 'low' effort runs ~150-200s.
@@ -1741,6 +1743,10 @@ Begin now. Return ONLY the JSON object.`;
 //                          Higher quality per section, 2x cost.
 //   'gpt4o-2phase'       — Strategy C. Two parallel gpt-4o + web_search calls.
 //                          Safety net if Perplexity has issues; ~3x cost.
+// Sprint 15 — the on/off switch for the RSS engine. Default 'perplexity' keeps
+// the existing engine; set RETRIEVAL=rss in Vercel to use feed-based retrieval.
+const RETRIEVAL = (process.env.RETRIEVAL || 'perplexity').toLowerCase();
+
 type FetchStrategy = 'perplexity-single' | 'perplexity-2phase' | 'gpt4o-2phase';
 
 function getFetchStrategy(): FetchStrategy {
@@ -1752,6 +1758,18 @@ function getFetchStrategy(): FetchStrategy {
 }
 
 async function fetchNewsFromOpenAI(universe: Universe): Promise<RawStories> {
+  // Sprint 15 — when the switch is on, use the deterministic RSS engine. It
+  // returns the same RawStories shape, so the quality gate + the entire
+  // downstream pipeline run unchanged. The old path below is untouched.
+  if (RETRIEVAL === 'rss') {
+    console.log('[fetch] RETRIEVAL=rss — using the RSS engine.');
+    const rss = await fetchStrategy_Rss(universe) as any;
+    const cleanedRss = enforceQualityRules(rss) as any;
+    cleanedRss._source = rss._source;
+    cleanedRss._fetched_at = rss._fetched_at;
+    return cleanedRss as RawStories;
+  }
+
   const strategy = getFetchStrategy();
   console.log(`[fetch] FETCH_STRATEGY=${strategy}`);
 
