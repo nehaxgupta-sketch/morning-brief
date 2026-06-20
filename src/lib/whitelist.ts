@@ -12,6 +12,15 @@
 //                 a national-only source list structurally biases city sections
 //                 toward crime/accidents. The real civic news lives on local
 //                 (often Marathi/Bengali/Kannada/Hindi) mastheads.
+// Sprint 15 — broad-but-ranked expansion. Founder decision: maximise VARIETY
+//                 while keeping AUTHORITY ranking intact. New sources are
+//                 accepted at the door (so Google News query feeds can surface
+//                 them immediately) and slotted into the existing tiers so the
+//                 wires / papers of record still lead every section. The
+//                 strongest additions also get a dedicated backbone feed — see
+//                 feeds.config.ts. Sources with a poor fact-check record are
+//                 deliberately excluded; unvetted hyper-local digital-only sites
+//                 are still held back for the numeric per-domain trust score.
 //
 // Previously this list was duplicated inline in both generate-brief.tsx and
 // personalise-briefs.tsx. The two copies drifted: the personalise-briefs copy
@@ -120,6 +129,40 @@ export const TIER_1_DOMAINS = new Set<string>([
   'theverge.com',
   'arstechnica.com',
   'wired.com',
+
+  // ─── Sprint 15 — broad-but-ranked expansion (non-regional additions) ───────
+  // These appear immediately via Google News query feeds; tier placement below
+  // keeps wires/record leading. Regional-language additions live in
+  // REGIONAL_DOMAINS (merged in further down).
+  //
+  // World / geopolitics breadth
+  'afp.com',                           // AFP — third global wire (ranks Tier 3)
+  'scmp.com',                          // South China Morning Post — Asia / China
+  'asia.nikkei.com',                   // Nikkei Asia — Asia business + geopolitics
+  'thediplomat.com',                   // The Diplomat — Asia-Pacific analysis
+  'cnn.com',                           // CNN — global breaking-news breadth
+  // Deeper business / markets
+  'the-ken.com',                       // The Ken — deep India business (subscription)
+  'themorningcontext.com',             // The Morning Context — tech/business investigations
+  'ndtvprofit.com',                    // NDTV Profit — India markets (ex-BloombergQuint)
+  'fortuneindia.com',                  // Fortune India — corporate India
+  'cnbc.com',                          // CNBC — global markets / business
+  // Tech / tech-policy
+  'restofworld.org',                   // Rest of World — global-south + India tech
+  'technologyreview.com',              // MIT Technology Review — AI / emerging tech
+  'medianama.com',                     // Medianama — India tech policy / regulation
+  // Climate / science / health (the thinnest section — biggest win)
+  'india.mongabay.com',                // Mongabay India — environment, on-ground
+  'carbonbrief.org',                   // Carbon Brief — climate science / policy
+  'dialogue.earth',                    // Dialogue Earth (The Third Pole) — Himalaya / water
+  'indiaspend.com',                    // IndiaSpend — health / policy data journalism
+  'thelancet.com',                     // The Lancet — top medical authority
+  // Verification / fact-checking (backs the no-fabrication rule)
+  'altnews.in',                        // Alt News — leading India fact-checker
+  'boomlive.in',                       // BOOM — IFCN-certified fact-checker
+  // Sport / culture breadth
+  'theathletic.com',                   // The Athletic — premium global sport (NYT)
+  'deadline.com',                      // Deadline — entertainment industry
 ]);
 
 // ─── Regional sources ───────────────────────────────────────────────────────
@@ -174,6 +217,15 @@ export const REGIONAL_DOMAINS = new Set<string>([
   'navbharattimes.indiatimes.com',     // Navbharat Times (TOI group, Hindi)
   'livehindustan.com',                 // Hindustan (HT group, Hindi)
   'millenniumpost.in',                 // Millennium Post (Delhi / East)
+
+  // ─── Sprint 15 — more languages + regions (variety floor; rank Tier 1) ─────
+  'mathrubhumi.com',                   // Mathrubhumi (Malayalam, Kerala)
+  'eenadu.net',                        // Eenadu (Telugu)
+  'sakshi.com',                        // Sakshi (Telugu)
+  'dailythanthi.com',                  // Daily Thanthi (Tamil)
+  'deccanchronicle.com',               // Deccan Chronicle (South India, English)
+  'eastmojo.com',                      // EastMojo (Northeast India — newly covered region)
+  'gujaratsamachar.com',               // Gujarat Samachar (Gujarati)
 ]);
 
 // Merge regional domains into TIER_1_DOMAINS so existing whitelist checks
@@ -232,21 +284,23 @@ export const REGIONAL_BY_CITY: Record<string, string[]> = {
   'delhi':          ['hindustantimes.com', 'timesofindia.indiatimes.com', 'indianexpress.com', 'thehindu.com', 'theprint.in', 'jagran.com', 'bhaskar.com', 'amarujala.com', 'navbharattimes.indiatimes.com', 'livehindustan.com', 'millenniumpost.in'],
   'mumbai':         ['mid-day.com', 'freepressjournal.in', 'maharashtratimes.com', 'loksatta.com', 'lokmat.com', 'hindustantimes.com', 'indianexpress.com', 'timesofindia.indiatimes.com'],
 
-  // ── Sprint 12 entries (nationals; expand per THE RULE above when a user signs up) ──
-  'chennai':        ['thehindu.com', 'dtnext.in', 'newindianexpress.com', 'thenewsminute.com'],
-  'hyderabad':      ['telanganatoday.com', 'thehindu.com', 'newindianexpress.com', 'deccanherald.com'],
-  'ahmedabad':      ['ahmedabadmirror.com', 'indianexpress.com', 'timesofindia.indiatimes.com'],
+  // ── Sprint 12 entries (expanded in Sprint 15 with state-language dailies per THE RULE) ──
+  'chennai':        ['thehindu.com', 'dtnext.in', 'dailythanthi.com', 'newindianexpress.com', 'thenewsminute.com'],
+  'hyderabad':      ['telanganatoday.com', 'eenadu.net', 'sakshi.com', 'deccanchronicle.com', 'thehindu.com', 'newindianexpress.com', 'deccanherald.com'],
+  'ahmedabad':      ['ahmedabadmirror.com', 'gujaratsamachar.com', 'indianexpress.com', 'timesofindia.indiatimes.com'],
   'jaipur':         ['hindustantimes.com', 'indianexpress.com', 'tribuneindia.com'],
   'lucknow':        ['hindustantimes.com', 'indianexpress.com', 'thehindu.com', 'amarujala.com', 'jagran.com'],
   'chandigarh':     ['tribuneindia.com', 'hindustantimes.com', 'indianexpress.com'],
-  'kochi':          ['onmanorama.com', 'thehindu.com', 'newindianexpress.com', 'thenewsminute.com'],
+  'kochi':          ['onmanorama.com', 'mathrubhumi.com', 'thehindu.com', 'newindianexpress.com', 'thenewsminute.com'],
   'indore':         ['freepressjournal.in', 'bhaskar.com', 'hindustantimes.com', 'indianexpress.com'],
   'bhopal':         ['freepressjournal.in', 'bhaskar.com', 'hindustantimes.com', 'indianexpress.com'],
   'nagpur':         ['hindustantimes.com', 'indianexpress.com', 'lokmat.com', 'freepressjournal.in'],
-  'surat':          ['ahmedabadmirror.com', 'indianexpress.com', 'timesofindia.indiatimes.com'],
-  'visakhapatnam':  ['thehindu.com', 'newindianexpress.com', 'deccanherald.com'],
-  'coimbatore':     ['thehindu.com', 'dtnext.in', 'newindianexpress.com'],
-  'vadodara':       ['ahmedabadmirror.com', 'indianexpress.com', 'timesofindia.indiatimes.com'],
+  'surat':          ['ahmedabadmirror.com', 'gujaratsamachar.com', 'indianexpress.com', 'timesofindia.indiatimes.com'],
+  'visakhapatnam':  ['thehindu.com', 'eenadu.net', 'sakshi.com', 'newindianexpress.com', 'deccanherald.com'],
+  'coimbatore':     ['thehindu.com', 'dtnext.in', 'dailythanthi.com', 'newindianexpress.com'],
+  'vadodara':       ['ahmedabadmirror.com', 'gujaratsamachar.com', 'indianexpress.com', 'timesofindia.indiatimes.com'],
+  // Sprint 15 — Northeast India now covered (was falling back to nationals only)
+  'guwahati':       ['eastmojo.com', 'telegraphindia.com', 'thehindu.com', 'hindustantimes.com'],
 };
 
 // ─── Interest / industry → preferred sources (Sprint 14.7b) ─────────────────
@@ -257,15 +311,18 @@ export const REGIONAL_BY_CITY: Record<string, string[]> = {
 export const TOPIC_SOURCES: Record<string, string[]> = {
   // Interests
   'food & travel':               ['cntraveller.in', 'nationalgeographic.com', 'travelandleisure.com', 'livemint.com', 'thehindu.com', 'indianexpress.com'],
-  'personal finance':            ['livemint.com', 'moneycontrol.com', 'economictimes.indiatimes.com', 'financialexpress.com', 'business-standard.com', 'forbesindia.com'],
+  'personal finance':            ['livemint.com', 'moneycontrol.com', 'economictimes.indiatimes.com', 'financialexpress.com', 'business-standard.com', 'forbesindia.com', 'fortuneindia.com'],
   'psychology':                  ['scientificamerican.com', 'theconversation.com', 'sciencedaily.com', 'nature.com', 'thehindu.com'],
   'philosophy':                  ['aeon.co', 'theconversation.com', 'caravanmagazine.in', 'thehindu.com'],
   'education':                   ['thehindu.com', 'indianexpress.com', 'hindustantimes.com', 'theprint.in', 'scroll.in', 'theconversation.com'],
   'parenting':                   ['theconversation.com', 'theatlantic.com', 'thehindu.com', 'indianexpress.com', 'hindustantimes.com'],
-  'startups & entrepreneurship': ['yourstory.com', 'inc42.com', 'entrackr.com', 'economictimes.indiatimes.com', 'livemint.com', 'moneycontrol.com', 'techcrunch.com'],
-  'law & policy':                ['livelaw.in', 'barandbench.com', 'thehindu.com', 'indianexpress.com', 'thewire.in', 'caravanmagazine.in'],
+  'startups & entrepreneurship': ['yourstory.com', 'inc42.com', 'entrackr.com', 'the-ken.com', 'themorningcontext.com', 'restofworld.org', 'economictimes.indiatimes.com', 'livemint.com', 'moneycontrol.com', 'techcrunch.com'],
+  'law & policy':                ['livelaw.in', 'barandbench.com', 'thehindu.com', 'indianexpress.com', 'thewire.in', 'caravanmagazine.in', 'medianama.com'],
+  // Sprint 15 — new topical keys (used when an interest/industry matches)
+  'climate':                     ['downtoearth.org.in', 'india.mongabay.com', 'carbonbrief.org', 'dialogue.earth', 'indiaspend.com', 'reuters.com', 'thehindu.com'],
+  'health':                      ['thelancet.com', 'statnews.com', 'indiaspend.com', 'who.int', 'thehindu.com', 'indianexpress.com', 'downtoearth.org.in'],
   // Industries (used by the industry tail)
-  'technology':                  ['techcrunch.com', 'theverge.com', 'wired.com', 'arstechnica.com', 'economictimes.indiatimes.com', 'livemint.com', 'moneycontrol.com'],
+  'technology':                  ['techcrunch.com', 'theverge.com', 'wired.com', 'arstechnica.com', 'restofworld.org', 'technologyreview.com', 'medianama.com', 'economictimes.indiatimes.com', 'livemint.com', 'moneycontrol.com'],
   'energy':                      ['downtoearth.org.in', 'reuters.com', 'bloomberg.com', 'economictimes.indiatimes.com', 'livemint.com', 'business-standard.com', 'moneycontrol.com'],
 };
 
@@ -409,6 +466,36 @@ const PUBLISHER_LABELS: Record<string, string> = {
   'cnbctv18.com': 'CNBC-TV18',
   'cricbuzz.com': 'Cricbuzz',
   'filmcompanion.in': 'Film Companion',
+  // Sprint 15 additions:
+  'afp.com': 'AFP',
+  'scmp.com': 'South China Morning Post',
+  'asia.nikkei.com': 'Nikkei Asia',
+  'thediplomat.com': 'The Diplomat',
+  'cnn.com': 'CNN',
+  'the-ken.com': 'The Ken',
+  'themorningcontext.com': 'The Morning Context',
+  'ndtvprofit.com': 'NDTV Profit',
+  'fortuneindia.com': 'Fortune India',
+  'cnbc.com': 'CNBC',
+  'restofworld.org': 'Rest of World',
+  'technologyreview.com': 'MIT Technology Review',
+  'medianama.com': 'Medianama',
+  'india.mongabay.com': 'Mongabay India',
+  'carbonbrief.org': 'Carbon Brief',
+  'dialogue.earth': 'Dialogue Earth',
+  'indiaspend.com': 'IndiaSpend',
+  'thelancet.com': 'The Lancet',
+  'altnews.in': 'Alt News',
+  'boomlive.in': 'BOOM',
+  'theathletic.com': 'The Athletic',
+  'deadline.com': 'Deadline',
+  'mathrubhumi.com': 'Mathrubhumi',
+  'eenadu.net': 'Eenadu',
+  'sakshi.com': 'Sakshi',
+  'dailythanthi.com': 'Daily Thanthi',
+  'deccanchronicle.com': 'Deccan Chronicle',
+  'eastmojo.com': 'EastMojo',
+  'gujaratsamachar.com': 'Gujarat Samachar',
 };
 
 export function publisherLabel(url: string | undefined | null): string | null {
@@ -440,6 +527,7 @@ const TIER_3_DOMAINS = new Set<string>([
   'reuters.com', 'apnews.com', 'bloomberg.com', 'ft.com', 'wsj.com',
   'nytimes.com', 'washingtonpost.com', 'bbc.com', 'bbc.co.uk', 'economist.com',
   'theguardian.com', 'aljazeera.com', 'abc.net.au',
+  'afp.com', // Sprint 15 — third global wire
   // India national dailies + wires
   'ptinews.com', 'aninews.in', 'thehindu.com', 'thehindubusinessline.com',
   'indianexpress.com', 'newindianexpress.com', 'hindustantimes.com', 'ndtv.com',
@@ -464,6 +552,13 @@ const TIER_2_DOMAINS = new Set<string>([
   'espncricinfo.com', 'espn.com', 'cricbuzz.com', 'variety.com',
   'hollywoodreporter.com', 'filmcompanion.in', 'nature.com', 'science.org',
   'statnews.com', 'techcrunch.com', 'theverge.com', 'arstechnica.com', 'wired.com',
+  // Sprint 15 — reputable national-digital / specialist additions (rank below wires)
+  'scmp.com', 'asia.nikkei.com', 'thediplomat.com', 'cnn.com',
+  'the-ken.com', 'themorningcontext.com', 'ndtvprofit.com', 'fortuneindia.com', 'cnbc.com',
+  'restofworld.org', 'technologyreview.com', 'medianama.com',
+  'india.mongabay.com', 'carbonbrief.org', 'dialogue.earth', 'indiaspend.com', 'thelancet.com',
+  'altnews.in', 'boomlive.in',
+  'theathletic.com', 'deadline.com',
 ]);
 
 // Numeric rank for a story's source. Higher ranks lead the section.
