@@ -68,6 +68,22 @@ const FEATURE_TARGET = 8;            // 7-day features fetch ask (a couple extra
 const DESK_FETCH_MODEL = 'gpt-4o-mini-search-preview';
 const DESK_WRITE_MODEL = 'gpt-4o-mini'; // writer AND scorer (mini, per cost gate)
 
+// ── Sprint 17: feature liveness + recency verification ──────────────────────
+// The search model (gpt-4o-mini-search-preview) returns "last 7 days" features
+// that are sometimes a YEAR stale (a July-2025 royalties piece, a Jan-2026
+// AR Rahman piece) or point at dead URLs (a cntraveller 404). The model's own
+// published_at is unreliable AND is dropped before the edition is written, so a
+// date filter on stored content catches nothing. We instead VERIFY each feature
+// against its source: fetch the page, drop a hard 4xx/5xx (broken link), read the
+// real publish date from the page's meta/JSON-LD and drop anything older than the
+// window. Only features are verified (a small set), not the whole pool (pool
+// stories are already recency-gated upstream in the brief).
+const FEATURE_MAX_AGE_DAYS = Math.max(1, parseInt(process.env.DESK_FEATURE_MAX_AGE_DAYS || '21', 10) || 21);
+// What to do when the verification fetch itself fails (timeout / publisher blocks
+// Vercel's IP): 'drop' (default — an unverifiable feature carries the same risk
+// as the stale ones) or 'keep' (loosen if desks thin from reachability).
+const FEATURE_VERIFY_ONFAIL = (process.env.DESK_FEATURE_VERIFY_ONFAIL || 'drop').toLowerCase() === 'keep' ? 'keep' : 'drop';
+
 // ─── Auth (same contract as generate-brief: CRON_SECRET or session token) ───
 
 async function authoriseRequest(req: NextApiRequest): Promise<{ ok: boolean; via: string }> {
@@ -174,6 +190,146 @@ function normalisePoolStory(s: any, segment: string): RawDeskStory | null {
   if (!headline || !source_url) return null;
   if (!isWhitelistedSource(source_url)) return null;
   return { headline, body, source, source_url, segment } as RawDeskStory;
+}
+
+// ─── #3 (Sprint 17): deterministic per-desk relevance pre-filter ─────────────
+//
+// Relevance was a prompt-only instruction to gpt-4o-mini, which is handed the
+// WHOLE day's cross-section pool ("NOT pre-filtered to this desk") and fills
+// slots — quick_takes especially — with off-theme filler (yoga and AI-funding
+// in the Sport desk; thermal-coal and asylum-seekers in Entertainment; school
+// textbooks in Tech). We now gate the pool to each desk's scope BEFORE the
+// writer sees it: a story is a candidate if it comes from one of the desk's
+// HOME sections, or its headline/body matches the desk's keyword set. The writer
+// still does the final editorial pick — but only from genuine candidates. This
+// is the same "deterministic guardrail around LLM judgement" the main brief uses.
+// A desk not listed here is left unfiltered (preserves behaviour for new desks).
+const DESK_HOME_SECTIONS: Record<string, string[]> = {
+  business:      ['business', 'markets_news'],
+  markets:       ['business', 'markets_news'],
+  tech:          ['technology'],
+  entertainment: ['culture'],
+  sport:         ['sport'],
+  // politics has no dedicated brief bucket — political stories live inside the
+  // generic `india` section mixed with non-political ones, so it is keyword-only.
+  politics:      [],
+};
+const DESK_KEYWORDS: Record<string, string[]> = {
+  business: ['rbi', 'sebi', 'earnings', 'ipo', 'merger', 'acquisition', 'm&a', 'revenue', 'profit', 'startup', 'funding', 'corporate', 'economy', 'gdp', 'inflation', 'tax', 'tariff', 'export', 'import', 'bank', 'investment', 'stock', 'equity', 'bond', 'rupee', 'sensex', 'nifty', 'fpi', 'fii', 'quarterly', 'results', 'layoff', 'hiring', 'deal', 'manufacturing', 'industry', 'fiscal', 'liquidity', 'capital', 'company'],
+  markets: ['sensex', 'nifty', 'stock', 'equity', 'bond', 'yield', 'rupee', 'dollar', 'currency', 'commodity', 'crude', 'oil', 'gold', 'fpi', 'fii', 'rally', 'selloff', 'index', 'rate', 'rbi', 'inflation', 'portfolio', 'mutual fund', 'etf', 'ipo', 'buyback', 'liquidity', 'capital', 'valuation', 'earnings', 'investor'],
+  tech: ['artificial intelligence', ' ai ', 'startup', 'chip', 'semiconductor', 'software', 'cloud', 'cyber', 'google', 'microsoft', 'apple', 'meta', 'openai', 'anthropic', 'nvidia', 'digital', 'internet', 'platform', 'algorithm', 'smartphone', '5g', 'quantum', 'robot', 'automation', 'space', 'satellite', 'isro', 'in-space', 'saas', 'fintech', 'crypto', 'data centre', 'data center'],
+  entertainment: ['film', 'movie', 'bollywood', 'hollywood', 'cinema', 'box office', 'ott', 'streaming', 'netflix', 'prime video', 'music', 'album', 'song', 'singer', 'actor', 'actress', 'director', 'celebrity', 'award', 'festival', 'series', 'theatre', 'concert', 'trailer', 'rahman', 'royalt', 'artist'],
+  sport: ['cricket', 'football', 'soccer', 'fifa', 'world cup', 'ipl', 'test ', 'odi', 't20', 'wicket', 'batsman', 'bowler', 'tennis', 'wimbledon', 'formula', 'grand prix', ' f1 ', 'badminton', 'hockey', 'kabaddi', 'pkl', 'olympic', 'medal', 'tournament', 'league', 'match', 'striker', 'midfielder', 'championship', 'isl', 'wrestling', 'athletics', 'chess', 'squad', 'selector'],
+  politics: ['parliament', 'modi', 'bjp', 'congress', 'election', 'vote', 'poll', 'government', 'minister', 'cabinet', 'supreme court', 'high court', 'lok sabha', 'rajya sabha', 'governance', 'coalition', 'chief minister', 'rahul gandhi', 'amit shah', 'opposition', 'assembly', 'constitution', 'verdict', 'reservation', 'caste', 'policy', 'bill', 'party'],
+};
+function isRelevantToDesk(story: RawDeskStory, desk: DeskRow): boolean {
+  // Unknown desk → don't filter (keep prior behaviour).
+  if (!(desk.slug in DESK_KEYWORDS) && !(desk.slug in DESK_HOME_SECTIONS)) return true;
+  const home = DESK_HOME_SECTIONS[desk.slug] || [];
+  const seg = String(story.segment || '').replace(/^tail:/, '').toLowerCase();
+  if (home.includes(seg)) return true;
+  const kws = DESK_KEYWORDS[desk.slug] || [];
+  const text = ` ${(story.headline || '')} ${(story.body || '')} `.toLowerCase();
+  return kws.some((k) => text.includes(k));
+}
+
+// ─── #2 (Sprint 17): cross-section dedup of the writer's output ──────────────
+//
+// enforceDeskSourceUrls validates each section's URLs but never dedupes ACROSS
+// sections, so when the writer (against its own instruction) places one story in
+// two sections of the SAME desk, both survive — today's Entertainment desk ran
+// "AR Rahman…" and "Digital Boom… Royalties" in BOTH features and top_stories;
+// Sport ran one Iran-travel story in BOTH global and quick_takes. Walk sections
+// in priority order; a story already used in a higher-priority section is
+// dropped. Primary key is source_url (the writer carries it verbatim, so a
+// reused pool/feature story is caught even if its headline was reworded); a
+// significant-word headline overlap catches the rarer reworded-different-URL case.
+function deskSigWords(headline: string): Set<string> {
+  const STOP = new Set(['the', 'and', 'for', 'with', 'from', 'into', 'over', 'after', 'amid', 'that', 'this', 'than', 'india', 'indian', 'new', 'says', 'said']);
+  return new Set(
+    String(headline || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/)
+      .filter((w) => w.length >= 4 && !STOP.has(w)),
+  );
+}
+function dedupeAcrossSections(content: any): { content: any; removed: number } {
+  const order = ['top_stories', 'india', 'global', 'features', 'quick_takes'];
+  const seenUrls = new Set<string>();
+  const seenSigs: Set<string>[] = [];
+  let removed = 0;
+  const overlap = (a: Set<string>, b: Set<string>) => { let n = 0; a.forEach((w) => { if (b.has(w)) n++; }); return n; };
+  for (const sec of order) {
+    if (!Array.isArray(content?.[sec])) continue;
+    content[sec] = content[sec].filter((s: any) => {
+      const url = String(s?.source_url || '').split('?')[0].replace(/\/$/, '').toLowerCase();
+      if (url && seenUrls.has(url)) { removed++; return false; }
+      const sig = deskSigWords(s?.headline || '');
+      for (const prev of seenSigs) { if (overlap(sig, prev) >= 5) { removed++; return false; } }
+      if (url) seenUrls.add(url);
+      seenSigs.push(sig);
+      return true;
+    });
+  }
+  return { content, removed };
+}
+
+// ─── #1 (Sprint 17): feature liveness + recency verification ────────────────
+const VERIFY_HEADERS: Record<string, string> = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'en-IN,en;q=0.9',
+};
+async function fetchPageForVerify(url: string, ms = 9000): Promise<{ status: number; html: string } | null> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const res = await fetch(url, { headers: VERIFY_HEADERS, redirect: 'follow', signal: ctrl.signal });
+    const html = res.ok ? (await res.text()).slice(0, 24000) : '';
+    return { status: res.status, html };
+  } catch { return null; } finally { clearTimeout(timer); }
+}
+function extractPublishedTs(html: string): number | null {
+  const patterns: RegExp[] = [
+    /<meta[^>]+(?:property|name)=["']article:published_time["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']article:published_time["']/i,
+    /<meta[^>]+(?:property|name)=["']article:modified_time["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+(?:property|name)=["']og:updated_time["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+(?:name)=["'](?:date|pubdate|publishdate|publish-date|dc\.date\.issued|dc\.date)["'][^>]+content=["']([^"']+)["']/i,
+    /"datePublished"\s*:\s*"([^"]+)"/i,
+    /"dateModified"\s*:\s*"([^"]+)"/i,
+    /<time[^>]+datetime=["']([^"']+)["']/i,
+  ];
+  for (const re of patterns) {
+    const m = html.match(re);
+    if (m && m[1]) { const t = Date.parse(m[1]); if (!Number.isNaN(t)) return t; }
+  }
+  return null;
+}
+async function verifyFeatures(features: RawDeskStory[], label: string): Promise<RawDeskStory[]> {
+  if (!features.length) return features;
+  const cutoff = Date.now() - FEATURE_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
+  const out: RawDeskStory[] = [];
+  let dead = 0, stale = 0, failHandled = 0;
+  const CONCURRENCY = 5;
+  let idx = 0;
+  async function worker() {
+    while (idx < features.length) {
+      const f = features[idx++];
+      const res = await fetchPageForVerify(f.source_url);
+      if (res === null) {                 // fetch failed (timeout / blocked IP)
+        if (FEATURE_VERIFY_ONFAIL === 'keep') out.push(f);
+        failHandled++;
+        continue;
+      }
+      if (res.status >= 400 || res.status === 0) { dead++; continue; }  // broken link → drop
+      const ts = extractPublishedTs(res.html);
+      if (ts !== null && ts < cutoff) { stale++; continue; }            // confirmed stale → drop
+      if (ts !== null) f.published_at = new Date(ts).toISOString().slice(0, 10); // backfill real date
+      out.push(f);                         // live + (recent OR no extractable date)
+    }
+  }
+  await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+  console.log(`[desk:${label}:verify] features in=${features.length} kept=${out.length} dropped(dead=${dead}, stale=${stale}, fetch-fail=${failHandled}, onfail=${FEATURE_VERIFY_ONFAIL})`);
+  return out;
 }
 
 async function loadSharedPool(): Promise<RawDeskStory[]> {
@@ -371,6 +527,8 @@ DESK SCOPE: ${desk.description}
 
 Search the web for ${FEATURE_TARGET}-10 substantial NON-BREAKING pieces published in the LAST 7 DAYS in this desk's scope: features, analyses, interviews, profiles, and explainers. The pieces a good weekend section would run — depth over recency. India-relevant preferred; global pieces welcome when they illuminate something for Indian readers.
 
+STRICT RECENCY: only include pieces published within the last 14 days. Do NOT include anything older, however good — no archive pieces, no "evergreen" explainers from months ago. Every item MUST carry an accurate published_at (YYYY-MM-DD); if you cannot establish a recent date for a piece, leave it out.
+
 Each item: paraphrase the piece's argument or substance into 2-4 sentences — do NOT quote at length. Tag each with its kind. Headlines must be your own summary, not the original title verbatim. Source diversity matters: no more than 3 from any one publisher.
 ${formatExcludeBlock(excludeUrls)}
 ${whitelistBlock()}
@@ -388,7 +546,7 @@ Return ONLY a JSON object — no markdown:
     }
   ]
 }`;
-  return callDeskSearch(prompt, `${desk.slug}:features`, desk.slug, FEATURE_TARGET + 2);
+  return verifyFeatures(await callDeskSearch(prompt, `${desk.slug}:features`, desk.slug, FEATURE_TARGET + 2), desk.slug);
 }
 
 // ─── Writer ─────────────────────────────────────────────────────────────────
@@ -654,7 +812,12 @@ async function runDesk(desk: DeskRow, pool: RawDeskStory[]): Promise<DeskRunResu
     //    this desk already ran in the last 6 days. Features = a fresh 7-day
     //    fetch (that depth isn't in the daily pool).
     const excludeUrls = new Set(await loadRecentUsedUrls(desk.slug));
-    const poolForDesk = pool.filter((s) => !excludeUrls.has(s.source_url));
+    const poolFresh = pool.filter((s) => !excludeUrls.has(s.source_url));
+    const poolForDesk = poolFresh.filter((s) => isRelevantToDesk(s, desk));
+    const offTopic = poolFresh.length - poolForDesk.length;
+    if (offTopic > 0) {
+      console.log(`[desk:${desk.slug}] relevance filter dropped ${offTopic} off-scope pool stories (${poolForDesk.length} candidates remain).`);
+    }
     const features = await fetchDeskFeatures(desk, Array.from(excludeUrls));
     console.log(`[desk:${desk.slug}] pool=${poolForDesk.length} features=${features.length}`);
 
@@ -676,6 +839,13 @@ async function runDesk(desk: DeskRow, pool: RawDeskStory[]): Promise<DeskRunResu
     content = enforced.content;
     if (enforced.dropped > 0) {
       console.warn(`[desk:${desk.slug}] dropped ${enforced.dropped} stories with invented/non-whitelisted URLs post-write.`);
+    }
+
+    // Sprint 17 #2: remove the same story repeated across sections of this desk.
+    const deduped = dedupeAcrossSections(content);
+    content = deduped.content;
+    if (deduped.removed > 0) {
+      console.warn(`[desk:${desk.slug}] cross-section dedup removed ${deduped.removed} duplicate placement(s).`);
     }
 
     // Minimal structural validation.

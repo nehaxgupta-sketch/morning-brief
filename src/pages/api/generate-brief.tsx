@@ -3177,7 +3177,7 @@ async function isUrlDead(url: string): Promise<boolean> {
 
 const LIVENESS_SECTIONS: Record<string, string[]> = {
   '5min':  ['major_events', 'world', 'india', 'topics'],
-  '10min': ['major_events', 'world', 'india', 'business', 'technology', 'climate_health', 'sport', 'culture'],
+  '10min': ['major_events', 'world', 'india', 'business', 'technology', 'climate_health', 'sport', 'culture', 'politics', 'markets_news'],
   // deep has no per-story source_urls in the same shape — skipped.
 };
 

@@ -29,6 +29,7 @@ import { createClient } from '@supabase/supabase-js';
 // Sprint 11: shared whitelist module — fixes the Sprint 10 Law & Policy gap
 // caused by a smaller, drifted whitelist copy. Single source of truth now.
 import { isWhitelistedSource, REGIONAL_BY_CITY, publisherLabel, TOPIC_SOURCES } from '@/lib/whitelist';
+import { dropDeadStories } from '@/lib/liveness';
 // Sprint 11: per-call cost capture.
 import { logOpenAICost, extractUsageFromResponses } from '@/lib/cost-log';
 import { attachLogCapture } from '@/lib/log-capture';
@@ -1542,6 +1543,26 @@ async function fillEmptyFromTailBriefs(
 
 // ─── Save ────────────────────────────────────────────────────────────────────
 
+// Sprint 17: the personalised path does its OWN legacy in-handler fetch for
+// non-standard interests (USE_TAIL_BRIEFS=false), so those stories never pass
+// through the brief's dead-link check in generate-brief.tsx — a dead cntraveller
+// travel link shipped this way. Run the SAME hardened liveness check (shared
+// @/lib/liveness) over every personal_sections story before save. Scoped to the
+// few personalised stories that actually ship; conservative (only 404/410 drop),
+// with the 30% circuit breaker. NOTE: this runs per (user × edition); at current
+// user counts that is cheap. If personalised users grow, move the check up to the
+// city/interest CACHE build so each unique URL is checked once for all users.
+async function pruneDeadPersonalLinks(content: any, label: string): Promise<number> {
+  if (!content || !Array.isArray(content.personal_sections)) return 0;
+  let removed = 0;
+  for (const sec of content.personal_sections) {
+    if (!sec || !Array.isArray(sec.stories) || sec.stories.length === 0) continue;
+    const r = await dropDeadStories(sec.stories, (s: any) => s?.source_url, { label: `${label}:${sec.id || 'section'}` });
+    if (!r.circuitBroken && r.dead.length > 0) { sec.stories = r.kept; removed += r.dead.length; }
+  }
+  return removed;
+}
+
 async function savePersonalised(
   userId: string,
   date: string,
@@ -1553,6 +1574,11 @@ async function savePersonalised(
   const contentWithLens = content
     ? { ...content, lens: lens ?? content?.lens ?? null }
     : content;
+  // Sprint 17: drop dead personalised links before they reach the reader.
+  if (contentWithLens) {
+    const removed = await pruneDeadPersonalLinks(contentWithLens, `personalise:liveness ${edition}`);
+    if (removed > 0) console.warn(`[personalise:liveness] ${userId} ${edition}: dropped ${removed} dead personalised link(s).`);
+  }
   const { error } = await supabase
     .from('personalised_briefs')
     .upsert(

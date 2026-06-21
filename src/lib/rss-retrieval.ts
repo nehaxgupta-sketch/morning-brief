@@ -114,7 +114,7 @@ function unwrapGoogle(href: string): string | null {
   } catch { return null; }
 }
 
-interface PoolItem extends RssStory { _tier: number; _secs: Section[]; _w?: Set<string>; _emb?: number[]; _corr?: number; }
+interface PoolItem extends RssStory { _tier: number; _secs: Section[]; _w?: Set<string>; _emb?: number[]; _corr?: number; _isSport?: boolean; }
 
 function parseFeed(body: string, src: string, tier: number, secs: Section[]): PoolItem[] {
   const blocks = body.match(/<(item|entry)[\s\S]*?<\/(item|entry)>/gi) || [];
@@ -225,6 +225,22 @@ async function dedupe(items: PoolItem[]): Promise<{ kept: PoolItem[]; pulled: nu
     }
     if (match) {
       clusters.get(match)!.add(pubOf(s));   // another outlet on the same story
+      // ── Cluster-freshest dating (Sprint 17) ─────────────────────────────
+      // The kept representative is the highest-TIER article in the cluster,
+      // which is not necessarily the most RECENT. Stamp it with the freshest
+      // publish time across the cluster so "recency" downstream means "the
+      // latest development on this story", not "when the lead outlet happened
+      // to file". Effect: a story still being covered keeps a fresh date and
+      // survives the recency gate; a story that has gone quiet keeps its old
+      // date and ages out. That is exactly "carry forward only when there is a
+      // genuine new update" — no blanket weekend widening, so a dead Friday
+      // story does not replay on Sunday, but a live one (Iran strikes, an
+      // unfolding disaster) is not silently binned for being >24h old.
+      const tNew = Date.parse(s.published_at || '');
+      const tCur = Date.parse(match.published_at || '');
+      if (!Number.isNaN(tNew) && (Number.isNaN(tCur) || tNew > tCur)) {
+        match.published_at = s.published_at;
+      }
     } else {
       kept.push(s);
       clusters.set(s, new Set([pubOf(s)]));
@@ -350,12 +366,44 @@ export async function fetchStrategy_Rss(_universe?: any): Promise<RssPool> {
   const LEAD_PER_PUBLISHER = 3;   // keep the lead varied; no single masthead dominates
   const INDIA_LEAD_MIN = 4;       // India-anchored brief: reserve up to this many slots for India
 
-  // Front-page ranking = IMPORTANCE, not recency. Cross-source corroboration
-  // first (a story many outlets ran outranks a one-off), then source tier, then
-  // recency. This is what stops a fresh-but-trivial single-source item (e.g. a
-  // resort fire) from leading over a widely-covered story.
+  // ── P2 (Sprint 17): keep sport from dominating the front page ──────────────
+  // Cross-source corroboration is the right importance signal, but during a big
+  // tournament (the FIFA World Cup) heavily-covered match results score the
+  // HIGHEST corroboration and were LEADING major_events over Gaza, Iran-US and
+  // India politics. Sport has its own section AND its own desk, so it should not
+  // lead the NEWS front page — but a genuinely huge event must still be able to,
+  // so this is a gentle down-weight, not an exclusion (FIFA is real news).
+  //
+  // We flag a lead candidate as sport two ways: a tight sport lexicon, and an
+  // overlap with the sport pool's own headlines (this catches football that
+  // arrived dressed as "world" news via BBC World / wire feeds and so isn't
+  // tagged sec:sport). A flagged story's corroboration is multiplied by
+  // SPORT_LEAD_WEIGHT for ranking ONLY — its section placement is untouched.
+  // Tunable via env; 1.0 disables the down-weight, lower clamps sport harder.
+  const SPORT_LEAD_WEIGHT = (() => {
+    const v = parseFloat(process.env.SPORT_LEAD_WEIGHT || '0.6');
+    return Number.isFinite(v) && v > 0 ? v : 0.6;
+  })();
+  const SPORT_RE = /\b(world cup|fifa|uefa|la liga|serie a|bundesliga|premier league|champions league|europa league|test match|t20|odi|ipl|wicket|batsman|bowler|innings|grand prix|formula 1|f1|motogp|wimbledon|grand slam|olympics?)\b/i;
+  const sportSigs = (pool.sport as PoolItem[]).map((s) => words(s.headline));
+  const looksSporty = (s: PoolItem): boolean => {
+    if (SPORT_RE.test(`${s.headline} ${s.body}`)) return true;
+    const hw = words(s.headline);
+    for (const sig of sportSigs) if (overlap(hw, sig) >= 3) return true;
+    return false;
+  };
+  for (const sec of ['india', 'world', 'major_events'] as Section[]) {
+    for (const s of (pool[sec] as PoolItem[])) if (s._isSport === undefined) s._isSport = looksSporty(s);
+  }
+  const effCorr = (s: PoolItem): number => (s._corr || 1) * (s._isSport ? SPORT_LEAD_WEIGHT : 1);
+
+  // Front-page ranking = IMPORTANCE, not recency. Effective corroboration first
+  // (a story many outlets ran outranks a one-off; sport is down-weighted), then
+  // source tier, then recency. This is what stops a fresh-but-trivial
+  // single-source item (e.g. a resort fire) from leading over a widely-covered
+  // story — and now stops a World Cup result from leading over real news.
   const rankLead = (a: PoolItem, b: PoolItem) =>
-    ((b._corr || 1) - (a._corr || 1)) ||
+    (effCorr(b) - effCorr(a)) ||
     (b._tier - a._tier) ||
     ((Date.parse(b.published_at || '') || 0) - (Date.parse(a.published_at || '') || 0));
 
@@ -390,9 +438,18 @@ export async function fetchStrategy_Rss(_universe?: any): Promise<RssPool> {
   lead.sort(rankLead);
   pool.major_events = lead;
 
+  // Verification line (Sprint 17): the curated front page with each story's raw
+  // corroboration, sport flag, and effective (down-weighted) corroboration, so
+  // it is provable from the log that sport is no longer leading the news.
+  const sportLeadN = lead.filter((s) => s._isSport).length;
+  console.log(
+    `[fetch] RSS front page (lead ${lead.length}, sport-flagged ${sportLeadN}, SPORT_LEAD_WEIGHT=${SPORT_LEAD_WEIGHT}):\n` +
+    lead.map((s, i) => `  ${i + 1}. corr=${s._corr || 1}${s._isSport ? `→${effCorr(s).toFixed(1)} [sport]` : ''} · ${(s.headline || '').slice(0, 80)}`).join('\n'),
+  );
+
   // Strip internal fields -> clean RssStory.
   for (const sec of SECTIONS) {
-    pool[sec] = (pool[sec] as PoolItem[]).map(({ _tier, _secs, _w, _emb, _corr, ...rest }) => rest as RssStory);
+    pool[sec] = (pool[sec] as PoolItem[]).map(({ _tier, _secs, _w, _emb, _corr, _isSport, ...rest }) => rest as RssStory);
   }
 
   // Markets (real numbers) + a mechanical lens (no fabrication).
