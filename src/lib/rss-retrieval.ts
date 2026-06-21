@@ -73,9 +73,27 @@ async function fetchText(url: string, ms = 30000): Promise<string | null> {
   } catch { return null; } finally { clearTimeout(timer); }
 }
 
+// Decode HTML entities. The old code replaced ALL "&name;" with a space, which
+// both mangled named entities (&amp; -> ' ' instead of '&') and missed NUMERIC
+// entities entirely (&#8217;, &#124;, &#8216;) — so curly quotes and pipes leaked
+// raw into headlines, bodies and the lens. Decode decimal + hex numerics and the
+// common named set; anything unknown still collapses to a space (safe).
+function decodeEntities(s: string): string {
+  const named: Record<string, string> = {
+    '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'",
+    '&nbsp;': ' ', '&ndash;': '\u2013', '&mdash;': '\u2014', '&hellip;': '\u2026',
+    '&rsquo;': '\u2019', '&lsquo;': '\u2018', '&rdquo;': '\u201d', '&ldquo;': '\u201c',
+  };
+  return String(s || '')
+    .replace(/&#(\d+);/g, (_, n) => { const c = parseInt(n, 10); return c ? String.fromCodePoint(c) : ' '; })
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => { const c = parseInt(h, 16); return c ? String.fromCodePoint(c) : ' '; })
+    .replace(/&[a-zA-Z]+;/g, (m) => (m in named ? named[m] : ' '));
+}
+
 function stripTags(s: string): string {
-  return String(s || '').replace(/<!\[CDATA\[/g, '').replace(/\]\]>/g, '')
-    .replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/gi, ' ').replace(/\s+/g, ' ').trim();
+  return decodeEntities(
+    String(s || '').replace(/<!\[CDATA\[/g, '').replace(/\]\]>/g, '').replace(/<[^>]+>/g, ' '),
+  ).replace(/\s+/g, ' ').trim();
 }
 
 // Unwrap a Google News redirect to the real publisher URL (best-effort). Items
@@ -96,7 +114,7 @@ function unwrapGoogle(href: string): string | null {
   } catch { return null; }
 }
 
-interface PoolItem extends RssStory { _tier: number; _secs: Section[]; _w?: Set<string>; _emb?: number[]; }
+interface PoolItem extends RssStory { _tier: number; _secs: Section[]; _w?: Set<string>; _emb?: number[]; _corr?: number; }
 
 function parseFeed(body: string, src: string, tier: number, secs: Section[]): PoolItem[] {
   const blocks = body.match(/<(item|entry)[\s\S]*?<\/(item|entry)>/gi) || [];
@@ -190,16 +208,29 @@ async function dedupe(items: PoolItem[]): Promise<{ kept: PoolItem[]; pulled: nu
   }
 
   const kept: PoolItem[] = [];
+  // Cross-source corroboration: how many DISTINCT publishers ran essentially the
+  // same story (the engine's own near-dup notion). Widely-covered stories cluster
+  // (high _corr); a one-off single-source item stays at 1. Used to rank the front
+  // page by importance, so a fresh-but-trivial story can't lead over a big one.
+  // (With CLUSTER=embeddings this is semantic and much stronger than word-overlap.)
+  const clusters = new Map<PoolItem, Set<string>>();
+  const pubOf = (s: PoolItem) => (publisherLabel(s.source_url) || s.source || s.source_url || 'unknown').toLowerCase();
   for (const s of noUrl) {
-    let dup = false;
+    let match: PoolItem | undefined;
     if (s._emb) {
-      dup = kept.some((k) => k._emb && cosine(s._emb!, k._emb!) >= threshold);
+      match = kept.find((k) => k._emb && cosine(s._emb!, k._emb!) >= threshold);
     } else {
       const sw = words(s.headline); s._w = sw;
-      dup = kept.some((k) => overlap(sw, k._w!) >= 4);
+      match = kept.find((k) => overlap(sw, k._w!) >= 4);
     }
-    if (!dup) kept.push(s);
+    if (match) {
+      clusters.get(match)!.add(pubOf(s));   // another outlet on the same story
+    } else {
+      kept.push(s);
+      clusters.set(s, new Set([pubOf(s)]));
+    }
   }
+  for (const k of kept) k._corr = clusters.get(k)!.size;
   return { kept, pulled, afterUrl: noUrl.length };
 }
 
@@ -295,10 +326,73 @@ export async function fetchStrategy_Rss(_universe?: any): Promise<RssPool> {
   const pool: any = {};
   for (const sec of SECTIONS) pool[sec] = [];
   for (const s of kept) for (const sec of s._secs) if (pool[sec]) pool[sec].push(s);
+
+  // Rank every section: highest source tier first, then most recent.
+  const rankSec = (a: PoolItem, b: PoolItem) =>
+    (b._tier - a._tier) || ((Date.parse(b.published_at || '') || 0) - (Date.parse(a.published_at || '') || 0));
+  for (const sec of SECTIONS) (pool[sec] as PoolItem[]).sort(rankSec);
+
+  // ── Curate major_events as a SMALL, mixed front page ───────────────────────
+  // Until now every national India feed AND every world wire was *mapped* into
+  // major_events, so it held ~85 stories. Downstream, enforceQualityRules
+  // de-duplicates india/world against major_events by headline-word overlap —
+  // and with a giant major_events that stripped nearly all real India hard-news
+  // OUT of the India section, leaving only feeds NOT mapped to major_events
+  // (Mongabay nature pieces, Scroll long-reads). That is why India read as
+  // "a Mongabay music video".
+  //
+  // Fix: major_events is now just the day's biggest handful of stories, taken
+  // from the India + World pools (plus any feed explicitly tagged a front-page
+  // "top" feed). India and World keep their FULL pools; downstream dedup now
+  // only lifts these few leads out of them — no duplication — and India then
+  // shows the next-best *real* India stories.
+  const LEAD_MAX = 12;            // size of the curated front page
+  const LEAD_PER_PUBLISHER = 3;   // keep the lead varied; no single masthead dominates
+  const INDIA_LEAD_MIN = 4;       // India-anchored brief: reserve up to this many slots for India
+
+  // Front-page ranking = IMPORTANCE, not recency. Cross-source corroboration
+  // first (a story many outlets ran outranks a one-off), then source tier, then
+  // recency. This is what stops a fresh-but-trivial single-source item (e.g. a
+  // resort fire) from leading over a widely-covered story.
+  const rankLead = (a: PoolItem, b: PoolItem) =>
+    ((b._corr || 1) - (a._corr || 1)) ||
+    (b._tier - a._tier) ||
+    ((Date.parse(b.published_at || '') || 0) - (Date.parse(a.published_at || '') || 0));
+
+  const indiaRanked = [...(pool.india as PoolItem[])].sort(rankLead);
+  const restRanked = [
+    ...(pool.major_events as PoolItem[]),   // explicit "top" feeds (e.g. TOI Top Stories)
+    ...(pool.world as PoolItem[]),
+  ].sort(rankLead);
+
+  const leadSeen = new Set<string>();
+  const leadByPub = new Map<string, number>();
+  const lead: PoolItem[] = [];
+  const tryAddLead = (s: PoolItem): boolean => {
+    const key = s.source_url.split('?')[0].replace(/\/$/, '');
+    if (leadSeen.has(key)) return false;
+    const pub = (publisherLabel(s.source_url) || s.source || 'unknown').toLowerCase();
+    if ((leadByPub.get(pub) || 0) >= LEAD_PER_PUBLISHER) return false;
+    leadSeen.add(key);
+    leadByPub.set(pub, (leadByPub.get(pub) || 0) + 1);
+    lead.push(s);
+    return true;
+  };
+  // 1) Guarantee India presence (best India stories by importance) so the
+  //    India-anchored front page is never squeezed out by world wire volume.
+  for (const s of indiaRanked) { if (lead.length >= INDIA_LEAD_MIN) break; tryAddLead(s); }
+  // 2) Fill the rest with the most-corroborated stories overall (India + world).
+  for (const s of [...indiaRanked, ...restRanked].sort(rankLead)) {
+    if (lead.length >= LEAD_MAX) break;
+    tryAddLead(s);
+  }
+  // 3) Order the finished front page by importance so the biggest story leads.
+  lead.sort(rankLead);
+  pool.major_events = lead;
+
+  // Strip internal fields -> clean RssStory.
   for (const sec of SECTIONS) {
-    (pool[sec] as PoolItem[]).sort((a, b) => (b._tier - a._tier) || ((Date.parse(b.published_at || '') || 0) - (Date.parse(a.published_at || '') || 0)));
-    // strip internal fields -> clean RssStory
-    pool[sec] = (pool[sec] as PoolItem[]).map(({ _tier, _secs, _w, _emb, ...rest }) => rest as RssStory);
+    pool[sec] = (pool[sec] as PoolItem[]).map(({ _tier, _secs, _w, _emb, _corr, ...rest }) => rest as RssStory);
   }
 
   // Markets (real numbers) + a mechanical lens (no fabrication).

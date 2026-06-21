@@ -658,11 +658,27 @@ function QuickRenderer({
 
 // ─── Renderer: The Daily ────────────────────────────────────────────────────
 
-function DeskFeatureCard({ deskSlug, deskName, feature }: {
-  deskSlug: string; deskName: string; feature: any
+function DeskFeatureCard({ data }: {
+  data:
+    | { mode: 'feature'; deskSlug: string; deskName: string; deskEmoji: string; feature: any }
+    | { mode: 'showcase'; deskSlug: string; deskName: string; deskEmoji: string; description: string }
 }) {
+  const { deskSlug, deskName, deskEmoji } = data
+  const isShowcase = data.mode === 'showcase'
+  // Showcase: first sentence of the desk's scope, trimmed, as a teaser.
+  const teaser = data.mode === 'showcase'
+    ? (data.description || '').replace(/\s+/g, ' ').trim().split('. ')[0].slice(0, 180)
+    : ''
+  const kind = data.mode === 'feature' ? data.feature?.kind : undefined
+  const headline = data.mode === 'feature'
+    ? (data.feature?.headline || '')
+    : `${deskEmoji ? deskEmoji + ' ' : ''}${deskName}`
+  const body = data.mode === 'feature' ? (data.feature?.body || '') : teaser
   return (
-    <div style={{ padding: '20px 20px 0' }}>
+    // 72px left padding matches the brief body (DailyRenderer etc.) so the card
+    // clears the fixed SidebarNav rail. It was 20px, so the rail overlapped and
+    // clipped the card's left edge ("FROM YOUR …", the title, the kind tag).
+    <div style={{ padding: '20px 20px 0 72px' }}>
       <Link href={`/desk/${deskSlug}`} style={{ textDecoration: 'none', display: 'block' }}>
         <div style={{
           background: C.surface,
@@ -673,30 +689,30 @@ function DeskFeatureCard({ deskSlug, deskName, feature }: {
           <div style={{
             fontFamily: "'DM Mono', monospace", fontSize: '10px',
             letterSpacing: '1.5px', color: C.gold, marginBottom: '10px',
-          }}>FROM YOUR {deskName.toUpperCase()} DESK</div>
-          {feature?.kind && (
+          }}>{isShowcase ? `NEW DESK · ${deskName.toUpperCase()}` : `FROM YOUR ${deskName.toUpperCase()} DESK`}</div>
+          {kind && (
             <span style={{
               display: 'inline-block', fontFamily: "'DM Mono', monospace",
               fontSize: '9px', letterSpacing: '1.5px', color: C.textMute,
               border: `1px solid ${C.border}`, borderRadius: '2px',
               padding: '3px 7px', marginBottom: '10px',
-            }}>{String(feature.kind).toUpperCase()}</span>
+            }}>{String(kind).toUpperCase()}</span>
           )}
           <div style={{
             fontFamily: "'Playfair Display', Georgia, serif",
             fontSize: '19px', fontWeight: 700, color: C.text,
             lineHeight: 1.35, marginBottom: '8px',
-          }}>{feature?.headline || ''}</div>
-          {feature?.body && (
+          }}>{headline}</div>
+          {body && (
             <div style={{
               fontFamily: "'DM Sans', sans-serif", fontSize: '15px',
               color: C.textSoft, lineHeight: 1.65, marginBottom: '10px',
-            }}>{feature.body}</div>
+            }}>{body}</div>
           )}
           <div style={{
             fontFamily: "'DM Mono', monospace", fontSize: '11px',
             letterSpacing: '1.5px', color: C.gold,
-          }}>READ THE {deskName.toUpperCase()} DESK →</div>
+          }}>{isShowcase ? `EXPLORE THE ${deskName.toUpperCase()} DESK →` : `READ THE ${deskName.toUpperCase()} DESK →`}</div>
         </div>
       </Link>
     </div>
@@ -1114,8 +1130,13 @@ export default function BriefPage() {
   const [isPersonalised, setIsPersonalised] = useState(false)
   // Sprint 14.2: one desk feature surfaced inside the personalised brief,
   // matched to the reader's interests (read-time, since desks generate after
-  // the personalise stage).
-  const [deskFeature, setDeskFeature] = useState<{ deskSlug: string; deskName: string; feature: any } | null>(null)
+  // the personalise stage). Sprint 15.1: may also be a 'showcase' teaser for a
+  // brand-new desk that has no edition yet (nudge), built from the desk catalog.
+  const [deskFeature, setDeskFeature] = useState<
+    { mode: 'feature'; deskSlug: string; deskName: string; deskEmoji: string; feature: any }
+    | { mode: 'showcase'; deskSlug: string; deskName: string; deskEmoji: string; description: string }
+    | null
+  >(null)
   // Sprint 14.5: which day's brief is being shown (today / yesterday / 2 days
   // ago), driven by the ?date= param the home toggle passes. Defaults to today.
   const [briefDateISO, setBriefDateISO] = useState<string>(istDateISO(0))
@@ -1218,17 +1239,31 @@ export default function BriefPage() {
                 .in('desk_slug', wantedSlugs)
                 .in('status', ['ready', 'thin'])
                 .eq('date', briefDate),
-              supabase.from('desks').select('slug, name').in('slug', wantedSlugs),
+              supabase.from('desks').select('slug, name, emoji, description').in('slug', wantedSlugs),
             ])
-            const nameBySlug: Record<string, string> = {}
-            for (const d of (deskRows || []) as any[]) nameBySlug[d.slug] = d.name
-            // First desk (in the reader's interest order) that has a feature.
+            const deskBySlug: Record<string, any> = {}
+            for (const d of (deskRows || []) as any[]) deskBySlug[d.slug] = d
+            // 1) Prefer a REAL feature from the first interest desk that has
+            //    today's edition (these are desks someone already subscribes to).
+            let chosen = false
             for (const slug of wantedSlugs) {
               const ed = (edRows || []).find((r: any) => r.desk_slug === slug && r.content)
               const feats = ed?.content?.features
               if (Array.isArray(feats) && feats.length > 0) {
-                setDeskFeature({ deskSlug: slug, deskName: nameBySlug[slug] || slug, feature: feats[0] })
+                const d = deskBySlug[slug] || {}
+                setDeskFeature({ mode: 'feature', deskSlug: slug, deskName: d.name || slug, deskEmoji: d.emoji || '', feature: feats[0] })
+                chosen = true
                 break
+              }
+            }
+            // 2) Otherwise SHOWCASE a brand-new desk (no edition exists yet → it
+            //    has no subscribers, so this reader isn't subscribed). Static
+            //    teaser from the catalog — zero generation cost. Nudges adoption.
+            if (!chosen) {
+              const slug = wantedSlugs.find((s) => deskBySlug[s])
+              if (slug) {
+                const d = deskBySlug[slug]
+                setDeskFeature({ mode: 'showcase', deskSlug: slug, deskName: d.name || slug, deskEmoji: d.emoji || '', description: d.description || '' })
               }
             }
           } catch { /* non-fatal — card just won't show */ }
@@ -1448,11 +1483,7 @@ export default function BriefPage() {
         ) : hasBriefs && activeBrief ? (
           <>
             {isPersonalised && deskFeature && (
-              <DeskFeatureCard
-                deskSlug={deskFeature.deskSlug}
-                deskName={deskFeature.deskName}
-                feature={deskFeature.feature}
-              />
+              <DeskFeatureCard data={deskFeature} />
             )}
             {activeEdition === '5min' ? (
               <QuickRenderer

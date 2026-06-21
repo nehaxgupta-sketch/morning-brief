@@ -660,23 +660,25 @@ async function fetchLens(rawStories: RawStories, today: string): Promise<{ world
   // Synthesised once we have all sections back. Doesn't need its own web search;
   // the input is the already-fetched stories.
   const summary = {
-    world: rawStories.world.slice(0, 3).map((s) => s.headline),
-    india: rawStories.india.slice(0, 3).map((s) => s.headline),
-    major_events: rawStories.major_events.slice(0, 3).map((s) => s.headline),
+    world: rawStories.world.slice(0, 5).map((s) => s.headline),
+    india: rawStories.india.slice(0, 5).map((s) => s.headline),
+    major_events: rawStories.major_events.slice(0, 5).map((s) => s.headline),
     markets_summary: rawStories.markets.summary,
   };
 
-  const prompt = `You are writing the four-line "lens" that appears on the home screen of an India daily brief on ${today}. Each line is ONE short sentence (max 14 words), written in clear neutral English.
+  const prompt = `You are writing the "lens" that appears on the home screen of an India daily brief on ${today}. It has four parts: world, india, markets, watch. Each part is a SHORT ANALYTICAL PARAGRAPH of 2-3 sentences in clear, neutral English.
+
+Be analytical, NOT descriptive: synthesise the single biggest THEME and explain what today's news MEANS and why it matters — do not just restate one headline. Stay India-anchored. Ignore low-importance one-off stories (a single accident, a celebrity item); lead with the most consequential developments.
 
 Stories fetched today:
 ${JSON.stringify(summary, null, 2)}
 
 Return ONLY this JSON, no markdown:
 {
-  "world": "the single biggest theme in global news today",
-  "india": "the single biggest theme in Indian news today",
-  "markets": "a one-liner on markets direction and what's driving it",
-  "watch": "the single most important development to watch this week"
+  "world": "2-3 sentence analytical paragraph on the biggest global theme and what it means",
+  "india": "2-3 sentence analytical paragraph on the biggest Indian theme and what it means",
+  "markets": "2-3 sentence analytical paragraph on markets direction and what is driving it",
+  "watch": "2-3 sentence analytical paragraph on the most important development(s) to watch in the days ahead"
 }`;
 
   // No web search needed — pure synthesis.
@@ -689,7 +691,7 @@ Return ONLY this JSON, no markdown:
     body: JSON.stringify({
       model: 'gpt-4o-mini',
       input: prompt,
-      max_output_tokens: 600,
+      max_output_tokens: 900,
     }),
   });
   const data = await response.json();
@@ -1767,6 +1769,15 @@ async function fetchNewsFromOpenAI(universe: Universe): Promise<RawStories> {
     const cleanedRss = enforceQualityRules(rss) as any;
     cleanedRss._source = rss._source;
     cleanedRss._fetched_at = rss._fetched_at;
+    // The RSS engine is deterministic (no LLM), so it only builds a mechanical
+    // "top headline per section" lens — which repeated across world/watch and
+    // surfaced low-importance items. Synthesise the proper analytical lens the
+    // home screen expects, using the same writer the old path uses, from the
+    // cleaned RSS stories. Falls back to the mechanical lens if synthesis fails.
+    cleanedRss.lens = await fetchLens(cleanedRss, getISTDate()).catch((err: any) => {
+      console.warn('[fetch:lens] RSS lens synthesis failed; keeping mechanical lens:', err?.message || err);
+      return cleanedRss.lens;
+    });
     return cleanedRss as RawStories;
   }
 
@@ -2049,7 +2060,7 @@ function isWithinRecencyWindow(publishedAt: any, section: string): boolean {
   }
   const ts = Date.parse(normalized);
   if (isNaN(ts)) return true; // permissive on unparseable
-  const hours = section === 'major_events' ? RECENCY_HOURS_MAJOR : RECENCY_HOURS_DEFAULT;
+  const hours = (section === 'major_events' || section === 'climate_health') ? RECENCY_HOURS_MAJOR : RECENCY_HOURS_DEFAULT;
   const ageHours = (Date.now() - ts) / (1000 * 60 * 60);
   return ageHours <= hours;
 }
@@ -2080,7 +2091,13 @@ function significantWords(headline: string): Set<string> {
   return new Set(tokens);
 }
 
-const SEMANTIC_DEDUP_THRESHOLD = 3;
+// Raised from 3 to 4 (Sprint 15.1): with major_events now a small curated
+// front page, a 3-word overlap was wrongly dropping *different* India/World
+// stories that merely shared common words (Modi, India, court, …) with a lead.
+// 4 still catches true duplicates (a promoted story shares its whole headline)
+// while protecting the India shelf. A duplicate is a better failure than a
+// silently dropped story.
+const SEMANTIC_DEDUP_THRESHOLD = 4;
 
 function semanticOverlap(a: Set<string>, b: Set<string>): number {
   let n = 0;

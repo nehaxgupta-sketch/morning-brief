@@ -231,13 +231,27 @@ export const SECTION_FEEDS: SectionFeed[] = [
   { source: 'Medianama', tier: 2, url: 'https://www.medianama.com/feed/',
     sections: ['technology'], tags: ['src:medianama', 'sec:tech'], verified: false },
   { source: 'Mongabay India', tier: 2, url: 'https://india.mongabay.com/feed/',
-    sections: ['climate_health', 'india'], tags: ['src:mongabay', 'sec:climate'], verified: false },
+    sections: ['climate_health'], tags: ['src:mongabay', 'sec:climate'], verified: false },
   { source: 'Carbon Brief', tier: 2, url: 'https://www.carbonbrief.org/feed/',
     sections: ['climate_health'], tags: ['src:carbonbrief', 'sec:climate'], verified: false },
   { source: 'Alt News', tier: 2, url: 'https://www.altnews.in/feed/',
     sections: ['india', 'major_events'], tags: ['src:altnews', 'sec:india'], verified: false },
   { source: 'Deadline', tier: 2, url: 'https://deadline.com/feed/',
     sections: ['culture'], tags: ['src:deadline', 'sec:entertainment'], verified: false },
+
+  // ==== Sprint 15.1 — reliable "floor" feeds for thin/empty sections ====
+  // These publishers are confirmed to answer from Vercel's data-centre IP, so
+  // they keep sport / business / climate_health from going empty when the
+  // slower or bot-blocked specialist feeds don't respond. India-first where
+  // a section feed exists (IE Sport); broad wires (BBC, Guardian) as backstop.
+  { source: 'Indian Express', tier: 3, url: 'https://indianexpress.com/section/sports/feed/',
+    sections: ['sport'], tags: ['src:indianexpress', 'sec:sport'], verified: false },
+  { source: 'BBC', tier: 3, url: 'https://feeds.bbci.co.uk/sport/rss.xml',
+    sections: ['sport'], tags: ['src:bbc', 'sec:sport'], verified: false },
+  { source: 'BBC', tier: 3, url: 'https://feeds.bbci.co.uk/news/business/rss.xml',
+    sections: ['business'], tags: ['src:bbc', 'sec:business'], verified: false },
+  { source: 'The Guardian', tier: 3, url: 'https://www.theguardian.com/environment/rss',
+    sections: ['climate_health'], tags: ['src:guardian', 'sec:climate'], verified: false },
 ];
 
 /**
