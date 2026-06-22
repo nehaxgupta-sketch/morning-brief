@@ -20,6 +20,22 @@
 //   CLUSTER_THRESHOLD    -> cosine cutoff, biased toward keeping separate (default 0.86)
 //   STORE_ITEMS=off      -> skip persisting the pool (default: on)
 //   RSS_RECENCY_HOURS    -> freshness window (default 48)
+//
+// Sprint 18 (reachability observability) — ONLY the fetch/polling path changed:
+//   * Per-feed diagnostics: each feed now logs HTTP status OR error class, raw
+//     <item> count BEFORE filtering, kept count AFTER, bytes and ms. The old
+//     code collapsed every failure into a silent `continue`, so "feeds X/51"
+//     could not distinguish a 403 bot-block from a 404 dead URL from a timeout
+//     from a feed that answered fine but whose items were all older than the
+//     freshness window. The new table makes the next run diagnosable.
+//   * Two cheap, low-risk recoveries: one retry on transient failures
+//     (network error / timeout / 429 / 5xx), and — only on a "blocked" status
+//     (401/403/406/451) — one retry with an honest feed-fetcher User-Agent.
+//     The latter is a PROBE: it converts UA-based blocks to 200 and leaves
+//     IP-based blocks failing, so the log tells us whether a proxy is the real
+//     fix. The Chrome UA was already being sent, so this is NOT a headers fix.
+//   Curation, de-dup, corroboration, cluster-freshest dating, the sport
+//   down-weight, ranking, markets, the lens and storage are all UNCHANGED.
 
 import { createClient } from '@supabase/supabase-js';
 import {
@@ -60,17 +76,40 @@ const HEADERS: Record<string, string> = {
   'Accept': 'application/rss+xml, application/atom+xml, application/xml, text/xml, */*',
   'Accept-Language': 'en-IN,en;q=0.9',
 };
+// Alternate identity used ONLY to retry a feed that hard-blocked the Chrome UA
+// (401/403/406/451). Honest and self-identifying: many publishers explicitly
+// allow declared feed fetchers while fingerprinting "a browser from a data
+// centre". If this converts a 403 -> 200 the block was UA-based; if it still
+// fails the block is IP-based and a fetch relay/proxy is the real fix.
+const ALT_HEADERS: Record<string, string> = {
+  ...HEADERS,
+  'User-Agent': 'MorningBriefFeedFetcher/1.0 (+https://morning-brief-liart.vercel.app; RSS reader)',
+};
 const RECENCY_HOURS = parseInt(process.env.RSS_RECENCY_HOURS || '48', 10);
 
 // ── fetch + parse ─────────────────────────────────────────────────────────
-async function fetchText(url: string, ms = 30000): Promise<string | null> {
+// Structured fetch: returns the body PLUS the HTTP status or error class, bytes
+// and elapsed ms, so the caller can tell exactly how a feed failed. (The old
+// fetchText returned string|null and threw all of that away.)
+interface FetchResult { body: string | null; status: number | null; error: string | null; bytes: number; ms: number; }
+async function fetchRaw(url: string, ms = 30000, headers: Record<string, string> = HEADERS): Promise<FetchResult> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ms);
+  const t0 = Date.now();
   try {
-    const res = await fetch(url, { headers: HEADERS, redirect: 'follow', signal: ctrl.signal });
-    if (!res.ok) return null;
-    return await res.text();
-  } catch { return null; } finally { clearTimeout(timer); }
+    const res = await fetch(url, { headers, redirect: 'follow', signal: ctrl.signal });
+    if (!res.ok) return { body: null, status: res.status, error: null, bytes: 0, ms: Date.now() - t0 };
+    const text = await res.text();
+    return { body: text, status: res.status, error: null, bytes: text.length, ms: Date.now() - t0 };
+  } catch (e: any) {
+    const error = e?.name === 'AbortError' ? 'timeout' : (e?.cause?.code || e?.code || e?.name || 'fetch-error');
+    return { body: null, status: null, error: String(error), bytes: 0, ms: Date.now() - t0 };
+  } finally { clearTimeout(timer); }
+}
+// Back-compat string fetcher for non-feed callers (markets, embeddings). Same
+// behaviour as before: the body on success, null on any failure.
+async function fetchText(url: string, ms = 30000): Promise<string | null> {
+  return (await fetchRaw(url, ms)).body;
 }
 
 // Decode HTML entities. The old code replaced ALL "&name;" with a space, which
@@ -317,22 +356,99 @@ export async function fetchStrategy_Rss(_universe?: any): Promise<RssPool> {
   for (const f of SECTION_FEEDS) jobs.push({ url: f.url, src: f.source, tier: f.tier, secs: f.sections.filter((s) => (SECTIONS as string[]).includes(s)) as Section[] });
   for (const q of [...WIRE_FEEDS, ...NEW_SOURCE_QUERY_FEEDS]) jobs.push({ url: googleNewsFeed(q.q), src: q.slug.replace('src:', ''), tier: 2, secs: tagToSec(q.tags) });
 
-  // Poll (bounded concurrency).
+  // ── Poll (bounded concurrency) with per-feed instrumentation (Sprint 18) ───
+  // Each feed records: HTTP status OR error class, raw <item> count BEFORE
+  // filtering, kept count AFTER, bytes and ms. Two cheap recoveries: one retry
+  // on transient failures (network / timeout / 429 / 5xx); and — only on a
+  // "blocked" status — one retry with an honest feed-fetcher UA (a probe that
+  // separates UA-based from IP-based blocking). Nothing about ranking or
+  // bucketing changes; this only widens what we can SEE and recovers the easy
+  // transient misses.
+  type FeedStat = {
+    src: string; host: string; secs: string;
+    status: number | null; error: string | null;
+    rawBlocks: number; kept: number; bytes: number; ms: number; note: string;
+  };
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const isTransient = (r: { status: number | null; error: string | null }) =>
+    (r.status != null && (r.status === 429 || r.status >= 500)) ||
+    (r.error != null && /ECONNRESET|ETIMEDOUT|EAI_AGAIN|UND_ERR|timeout|socket|network|aborted|reset/i.test(r.error));
+  const hostOf = (u: string) => { try { return new URL(u).host; } catch { return u.slice(0, 40); } };
+  const blockStatuses = new Set([401, 403, 406, 451]);
+
   const items: PoolItem[] = [];
+  const stats: FeedStat[] = [];
   let feedsOk = 0;
-  const CONCURRENCY = 6;
+  const CONCURRENCY = 8;
   let idx = 0;
   async function worker() {
     while (idx < jobs.length) {
       const job = jobs[idx++];
-      const body = await fetchText(job.url);
-      if (!body) continue;
-      const parsed = parseFeed(body, job.src, job.tier, job.secs.length ? job.secs : ['world']);
+      let r = await fetchRaw(job.url);
+      let note = '';
+      // 1) transient retry (one shot, short backoff)
+      if (!r.body && isTransient(r)) {
+        await sleep(400);
+        const r2 = await fetchRaw(job.url);
+        if (r2.body || (r2.status != null && r2.status < 500)) { r = r2; note = 'retried'; }
+      }
+      // 2) blocked-status retry with the alternate (honest feed-fetcher) UA
+      if (!r.body && r.status != null && blockStatuses.has(r.status)) {
+        const r3 = await fetchRaw(job.url, 30000, ALT_HEADERS);
+        if (r3.body) { r = r3; note = note ? `${note},alt-ua` : 'alt-ua'; }
+        else note = note ? `${note},alt-ua-x` : 'alt-ua-x';
+      }
+      const rawBlocks = r.body ? ((r.body.match(/<(item|entry)[\s\S]*?<\/(item|entry)>/gi) || []).length) : 0;
+      const parsed = r.body ? parseFeed(r.body, job.src, job.tier, job.secs.length ? job.secs : ['world']) : [];
       if (parsed.length) feedsOk++;
       for (const p of parsed) items.push(p);
+      stats.push({
+        src: job.src, host: hostOf(job.url), secs: job.secs.join('+') || 'world',
+        status: r.status, error: r.error, rawBlocks, kept: parsed.length, bytes: r.bytes, ms: r.ms, note,
+      });
     }
   }
   await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+
+  // ── Per-feed reachability diagnostics ──────────────────────────────────────
+  // classify each feed so the headline number ("X/51") is finally meaningful:
+  //   ok        – produced >=1 kept story
+  //   blocked   – 401/403/406/451 (bot-wall; alt-ua note shows if UA-fixable)
+  //   notfound  – 404/410 (dead/changed feed URL -> fix in feeds.config)
+  //   ratelimit – 429
+  //   server    – 5xx
+  //   neterr    – DNS/connect/timeout (status null)
+  //   empty     – responded 200 but zero <item> blocks (format/empty feed)
+  //   filtered  – responded 200 WITH items, all dropped by 48h window/whitelist
+  //               (NOT a reachability problem — do not chase these as "blocked")
+  const classify = (s: FeedStat): string => {
+    if (s.kept > 0) return 'ok';
+    if (s.status == null) return 'neterr';
+    if (s.status === 404 || s.status === 410) return 'notfound';
+    if (s.status === 429) return 'ratelimit';
+    if (blockStatuses.has(s.status)) return 'blocked';
+    if (s.status >= 500) return 'server';
+    if (s.rawBlocks === 0) return 'empty';
+    return 'filtered';
+  };
+  const order: Record<string, number> = {
+    blocked: 0, notfound: 1, neterr: 2, server: 3, ratelimit: 4, empty: 5, filtered: 6, ok: 7,
+  };
+  const tag = (s: FeedStat) => (s.status != null ? String(s.status) : (s.error || 'ERR'));
+  const rows = stats
+    .map((s) => ({ s, c: classify(s) }))
+    .sort((a, b) => (order[a.c] - order[b.c]) || a.s.src.localeCompare(b.s.src))
+    .map(({ s, c }) =>
+      `  ${c === 'ok' ? '·' : '✗'} ${c.padEnd(9)} ${tag(s).padEnd(7)} raw=${String(s.rawBlocks).padStart(3)} ` +
+      `kept=${String(s.kept).padStart(3)} ${String(s.ms).padStart(5)}ms  ${s.src} [${s.secs}] ${s.host}` +
+      `${s.note ? ` {${s.note}}` : ''}`);
+  const count = (c: string) => stats.filter((s) => classify(s) === c).length;
+  const responded = stats.filter((s) => s.kept > 0 || s.rawBlocks > 0 || (s.status != null && s.status < 400)).length;
+  console.log(`[fetch] RSS per-feed diagnostics (${stats.length} feeds):\n${rows.join('\n')}`);
+  console.log(
+    `[fetch] RSS reachability — responded ${responded}/${stats.length} · kept-items ${feedsOk}/${stats.length} · ` +
+    `blocked ${count('blocked')} · notfound ${count('notfound')} · neterr ${count('neterr')} · server ${count('server')} · ` +
+    `ratelimit ${count('ratelimit')} · empty ${count('empty')} · all-filtered ${count('filtered')}`);
 
   // De-duplicate (the "go wide -> trim" funnel).
   const { kept, pulled, afterUrl } = await dedupe(items);
