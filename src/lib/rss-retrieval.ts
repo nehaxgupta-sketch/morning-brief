@@ -155,9 +155,18 @@ function unwrapGoogle(href: string): string | null {
 
 interface PoolItem extends RssStory { _tier: number; _secs: Section[]; _w?: Set<string>; _emb?: number[]; _corr?: number; _isSport?: boolean; }
 
-function parseFeed(body: string, src: string, tier: number, secs: Section[]): PoolItem[] {
+// Sprint 18.1 (probe): per-feed drop reasons. A feed can respond 200 with N
+// items yet keep 0 — and "X/51" never said WHY. These counters split the loss
+// into nolink (link missing OR Google-unwrap returned null), stale (older than
+// RSS_RECENCY_HOURS), notwhite (publisher not whitelisted) and nohdr (no title),
+// so the next run pins the exact line to change instead of us guessing
+// recency-vs-parse. Diagnostic only — no behaviour change.
+interface DropCounts { nohdr: number; nolink: number; stale: number; notwhite: number; }
+
+function parseFeed(body: string, src: string, tier: number, secs: Section[]): { items: PoolItem[]; drops: DropCounts } {
   const blocks = body.match(/<(item|entry)[\s\S]*?<\/(item|entry)>/gi) || [];
   const out: PoolItem[] = [];
+  const drops: DropCounts = { nohdr: 0, nolink: 0, stale: 0, notwhite: 0 };
   for (const b of blocks) {
     const headline = stripTags((b.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '');
     let link = (b.match(/<link[^>]*>([\s\S]*?)<\/link>/i) || [])[1];
@@ -168,12 +177,13 @@ function parseFeed(body: string, src: string, tier: number, secs: Section[]): Po
       || b.match(/<published>([^<]+)<\/published>/i)
       || b.match(/<updated>([^<]+)<\/updated>/i) || [])[1] || '').trim();
     const real = unwrapGoogle((link || '').trim());
-    if (!headline || !real) continue;
+    if (!headline) { drops.nohdr++; continue; }
+    if (!real) { drops.nolink++; continue; }
     // Freshness (only when the feed gives a parseable date).
     const t = Date.parse(date);
-    if (!Number.isNaN(t) && (Date.now() - t) / 36e5 > RECENCY_HOURS) continue;
+    if (!Number.isNaN(t) && (Date.now() - t) / 36e5 > RECENCY_HOURS) { drops.stale++; continue; }
     // Whitelist by the REAL publisher link.
-    if (!isWhitelistedSource(real)) continue;
+    if (!isWhitelistedSource(real)) { drops.notwhite++; continue; }
     out.push({
       headline,
       body: body_,
@@ -193,7 +203,7 @@ function parseFeed(body: string, src: string, tier: number, secs: Section[]): Po
       _secs: secs,
     });
   }
-  return out;
+  return { items: out, drops };
 }
 
 // ── de-duplication ─────────────────────────────────────────────────────────
@@ -368,6 +378,7 @@ export async function fetchStrategy_Rss(_universe?: any): Promise<RssPool> {
     src: string; host: string; secs: string;
     status: number | null; error: string | null;
     rawBlocks: number; kept: number; bytes: number; ms: number; note: string;
+    drops: DropCounts;
   };
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const isTransient = (r: { status: number | null; error: string | null }) =>
@@ -399,12 +410,16 @@ export async function fetchStrategy_Rss(_universe?: any): Promise<RssPool> {
         else note = note ? `${note},alt-ua-x` : 'alt-ua-x';
       }
       const rawBlocks = r.body ? ((r.body.match(/<(item|entry)[\s\S]*?<\/(item|entry)>/gi) || []).length) : 0;
-      const parsed = r.body ? parseFeed(r.body, job.src, job.tier, job.secs.length ? job.secs : ['world']) : [];
+      const pf = r.body
+        ? parseFeed(r.body, job.src, job.tier, job.secs.length ? job.secs : ['world'])
+        : { items: [] as PoolItem[], drops: { nohdr: 0, nolink: 0, stale: 0, notwhite: 0 } as DropCounts };
+      const parsed = pf.items;
       if (parsed.length) feedsOk++;
       for (const p of parsed) items.push(p);
       stats.push({
         src: job.src, host: hostOf(job.url), secs: job.secs.join('+') || 'world',
         status: r.status, error: r.error, rawBlocks, kept: parsed.length, bytes: r.bytes, ms: r.ms, note,
+        drops: pf.drops,
       });
     }
   }
@@ -435,13 +450,21 @@ export async function fetchStrategy_Rss(_universe?: any): Promise<RssPool> {
     blocked: 0, notfound: 1, neterr: 2, server: 3, ratelimit: 4, empty: 5, filtered: 6, ok: 7,
   };
   const tag = (s: FeedStat) => (s.status != null ? String(s.status) : (s.error || 'ERR'));
+  const dropStr = (s: FeedStat) => {
+    const d = s.drops; const parts: string[] = [];
+    if (d.nolink) parts.push(`nolink=${d.nolink}`);
+    if (d.stale) parts.push(`stale=${d.stale}`);
+    if (d.notwhite) parts.push(`notwhite=${d.notwhite}`);
+    if (d.nohdr) parts.push(`nohdr=${d.nohdr}`);
+    return parts.length ? ` drops:${parts.join(',')}` : '';
+  };
   const rows = stats
     .map((s) => ({ s, c: classify(s) }))
     .sort((a, b) => (order[a.c] - order[b.c]) || a.s.src.localeCompare(b.s.src))
     .map(({ s, c }) =>
       `  ${c === 'ok' ? '·' : '✗'} ${c.padEnd(9)} ${tag(s).padEnd(7)} raw=${String(s.rawBlocks).padStart(3)} ` +
       `kept=${String(s.kept).padStart(3)} ${String(s.ms).padStart(5)}ms  ${s.src} [${s.secs}] ${s.host}` +
-      `${s.note ? ` {${s.note}}` : ''}`);
+      `${s.note ? ` {${s.note}}` : ''}${dropStr(s)}`);
   const count = (c: string) => stats.filter((s) => classify(s) === c).length;
   const responded = stats.filter((s) => s.kept > 0 || s.rawBlocks > 0 || (s.status != null && s.status < 400)).length;
   console.log(`[fetch] RSS per-feed diagnostics (${stats.length} feeds):\n${rows.join('\n')}`);
