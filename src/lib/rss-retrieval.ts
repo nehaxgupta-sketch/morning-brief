@@ -163,22 +163,69 @@ interface PoolItem extends RssStory { _tier: number; _secs: Section[]; _w?: Set<
 // recency-vs-parse. Diagnostic only — no behaviour change.
 interface DropCounts { nohdr: number; nolink: number; stale: number; notwhite: number; }
 
-function parseFeed(body: string, src: string, tier: number, secs: Section[]): { items: PoolItem[]; drops: DropCounts } {
+// Robust link extraction. The old two-regex approach (plain <link>text</link>,
+// then atom href="…") returned null for several real feed shapes — the Sprint
+// 18.1 probe caught this as the ENTIRE loss on The Hindu / HT / ToI / NDTV /
+// Mint (drops:nolink == the whole feed). Handle, in priority order:
+//   1. <feedburner:origLink> — the un-rewritten publisher URL. FeedBurner feeds
+//      (e.g. NDTV) rewrite <link> to a feedproxy redirect; origLink is the real
+//      article URL and is what the whitelist needs to see.
+//   2. <link>…</link> text content, with CDATA unwrapped.
+//   3. Atom <link href="…"> — single OR double quotes; skip rel="self".
+//   4. <guid isPermaLink="true">…</guid> as a last resort.
+// Returns a clean absolute http(s) URL or null. This is a SUPERSET of the old
+// logic: every URL the old code accepted still resolves identically (plain text
+// links and double-quoted atom hrefs are still cases 2 and 3), so feeds that
+// already work cannot regress — it only recovers the shapes that returned null.
+function extractLink(b: string): string | null {
+  const clean = (x?: string | null) =>
+    String(x || '').replace(/<!\[CDATA\[/g, '').replace(/\]\]>/g, '').trim();
+  const candidates: string[] = [];
+  const fb = b.match(/<(?:[a-z]+:)?origLink[^>]*>([\s\S]*?)<\/(?:[a-z]+:)?origLink>/i);
+  if (fb) candidates.push(clean(fb[1]));
+  const rss = b.match(/<link\b(?![^>]*\brel\s*=\s*["']self["'])[^>]*>([\s\S]*?)<\/link>/i);
+  if (rss) candidates.push(clean(rss[1]));
+  for (const m of b.matchAll(/<link\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>/gi)) {
+    if (/\brel\s*=\s*["']self["']/i.test(m[0])) continue;
+    candidates.push(clean(m[1]));
+  }
+  const guid = b.match(/<guid\b[^>]*>([\s\S]*?)<\/guid>/i);
+  if (guid) candidates.push(clean(guid[1]));
+  for (const c of candidates) {
+    const u = c.replace(/\s+/g, '');
+    if (/^https?:\/\//i.test(u)) return u;
+  }
+  return null;
+}
+
+function parseFeed(body: string, src: string, tier: number, secs: Section[]): { items: PoolItem[]; drops: DropCounts; linkSample?: string } {
   const blocks = body.match(/<(item|entry)[\s\S]*?<\/(item|entry)>/gi) || [];
   const out: PoolItem[] = [];
   const drops: DropCounts = { nohdr: 0, nolink: 0, stale: 0, notwhite: 0 };
+  let linkSample: string | undefined;
   for (const b of blocks) {
     const headline = stripTags((b.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '');
-    let link = (b.match(/<link[^>]*>([\s\S]*?)<\/link>/i) || [])[1];
-    if (!link) link = (b.match(/<link[^>]+href="([^"]+)"/i) || [])[1];
     const body_ = stripTags(((b.match(/<description[^>]*>([\s\S]*?)<\/description>/i)
       || b.match(/<summary[^>]*>([\s\S]*?)<\/summary>/i) || [])[1]) || '').slice(0, 600);
     const date = ((b.match(/<pubDate>([^<]+)<\/pubDate>/i)
       || b.match(/<published>([^<]+)<\/published>/i)
       || b.match(/<updated>([^<]+)<\/updated>/i) || [])[1] || '').trim();
-    const real = unwrapGoogle((link || '').trim());
+    const rawLink = extractLink(b);
+    const real = unwrapGoogle(rawLink || '');
     if (!headline) { drops.nohdr++; continue; }
-    if (!real) { drops.nolink++; continue; }
+    if (!real) {
+      drops.nolink++;
+      // When extractLink ITSELF failed (vs a Google URL we couldn't decode),
+      // capture one raw sample so a residual parser miss is visible next run
+      // without another probe cycle. Google links resolve here (extractLink
+      // returns them) and only fail later in unwrapGoogle, so they aren't sampled.
+      if (!rawLink && !linkSample) {
+        linkSample = (b.match(/<link[\s\S]{0,180}?<\/link>/i)?.[0]
+          || b.match(/<guid[\s\S]{0,140}?<\/guid>/i)?.[0]
+          || b.slice(0, 140)).replace(/\s+/g, ' ').slice(0, 180);
+      }
+      continue;
+    }
     // Freshness (only when the feed gives a parseable date).
     const t = Date.parse(date);
     if (!Number.isNaN(t) && (Date.now() - t) / 36e5 > RECENCY_HOURS) { drops.stale++; continue; }
@@ -203,7 +250,7 @@ function parseFeed(body: string, src: string, tier: number, secs: Section[]): { 
       _secs: secs,
     });
   }
-  return { items: out, drops };
+  return { items: out, drops, linkSample };
 }
 
 // ── de-duplication ─────────────────────────────────────────────────────────
@@ -379,6 +426,7 @@ export async function fetchStrategy_Rss(_universe?: any): Promise<RssPool> {
     status: number | null; error: string | null;
     rawBlocks: number; kept: number; bytes: number; ms: number; note: string;
     drops: DropCounts;
+    linkSample?: string;
   };
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const isTransient = (r: { status: number | null; error: string | null }) =>
@@ -412,7 +460,7 @@ export async function fetchStrategy_Rss(_universe?: any): Promise<RssPool> {
       const rawBlocks = r.body ? ((r.body.match(/<(item|entry)[\s\S]*?<\/(item|entry)>/gi) || []).length) : 0;
       const pf = r.body
         ? parseFeed(r.body, job.src, job.tier, job.secs.length ? job.secs : ['world'])
-        : { items: [] as PoolItem[], drops: { nohdr: 0, nolink: 0, stale: 0, notwhite: 0 } as DropCounts };
+        : { items: [] as PoolItem[], drops: { nohdr: 0, nolink: 0, stale: 0, notwhite: 0 } as DropCounts, linkSample: undefined as string | undefined };
       const parsed = pf.items;
       if (parsed.length) feedsOk++;
       for (const p of parsed) items.push(p);
@@ -420,6 +468,7 @@ export async function fetchStrategy_Rss(_universe?: any): Promise<RssPool> {
         src: job.src, host: hostOf(job.url), secs: job.secs.join('+') || 'world',
         status: r.status, error: r.error, rawBlocks, kept: parsed.length, bytes: r.bytes, ms: r.ms, note,
         drops: pf.drops,
+        linkSample: pf.linkSample,
       });
     }
   }
@@ -464,7 +513,7 @@ export async function fetchStrategy_Rss(_universe?: any): Promise<RssPool> {
     .map(({ s, c }) =>
       `  ${c === 'ok' ? '·' : '✗'} ${c.padEnd(9)} ${tag(s).padEnd(7)} raw=${String(s.rawBlocks).padStart(3)} ` +
       `kept=${String(s.kept).padStart(3)} ${String(s.ms).padStart(5)}ms  ${s.src} [${s.secs}] ${s.host}` +
-      `${s.note ? ` {${s.note}}` : ''}${dropStr(s)}`);
+      `${s.note ? ` {${s.note}}` : ''}${dropStr(s)}${s.linkSample ? ` link⟨${s.linkSample}⟩` : ''}`);
   const count = (c: string) => stats.filter((s) => classify(s) === c).length;
   const responded = stats.filter((s) => s.kept > 0 || s.rawBlocks > 0 || (s.status != null && s.status < 400)).length;
   console.log(`[fetch] RSS per-feed diagnostics (${stats.length} feeds):\n${rows.join('\n')}`);
