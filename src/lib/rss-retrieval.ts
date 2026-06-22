@@ -185,9 +185,11 @@ function extractLink(b: string): string | null {
   if (fb) candidates.push(clean(fb[1]));
   const rss = b.match(/<link\b(?![^>]*\brel\s*=\s*["']self["'])[^>]*>([\s\S]*?)<\/link>/i);
   if (rss) candidates.push(clean(rss[1]));
-  for (const m of b.matchAll(/<link\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>/gi)) {
-    if (/\brel\s*=\s*["']self["']/i.test(m[0])) continue;
-    candidates.push(clean(m[1]));
+  const atomRe = /<link\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>/gi;
+  let am: RegExpExecArray | null;
+  while ((am = atomRe.exec(b)) !== null) {
+    if (/\brel\s*=\s*["']self["']/i.test(am[0])) continue;
+    candidates.push(clean(am[1]));
   }
   const guid = b.match(/<guid\b[^>]*>([\s\S]*?)<\/guid>/i);
   if (guid) candidates.push(clean(guid[1]));
