@@ -153,7 +153,7 @@ function unwrapGoogle(href: string): string | null {
   } catch { return null; }
 }
 
-interface PoolItem extends RssStory { _tier: number; _secs: Section[]; _w?: Set<string>; _emb?: number[]; _corr?: number; _isSport?: boolean; _eventCorr?: number; _eventSig?: Set<string>; }
+interface PoolItem extends RssStory { _tier: number; _secs: Section[]; _w?: Set<string>; _emb?: number[]; _corr?: number; _isSport?: boolean; _eventCorr?: number; _eventSig?: Set<string>; _eventId?: number; }
 
 // Sprint 18.1 (probe): per-feed drop reasons. A feed can respond 200 with N
 // items yet keep 0 — and "X/51" never said WHY. These counters split the loss
@@ -306,7 +306,7 @@ const pubOfItem = (s: PoolItem): string => (publisherLabel(s.source_url) || s.so
 // Greedy single-link clustering of reworded variants → distinct-publisher count
 // per event, stored as _eventCorr for ranking. Same greedy approach dedupe()
 // uses; over/under-grouping only nudges ranking, never section contents.
-type EventCluster = { sig: Set<string>; pubs: Set<string>; members: PoolItem[] };
+type EventCluster = { id: number; sig: Set<string>; pubs: Set<string>; members: PoolItem[] };
 function assignEventCorr(items: PoolItem[]): void {
   const clusters: EventCluster[] = [];
   for (const s of items) {
@@ -315,9 +315,9 @@ function assignEventCorr(items: PoolItem[]): void {
     let hit: EventCluster | undefined;
     for (const c of clusters) { if (sameEventSig(sig, c.sig)) { hit = c; break; } }
     if (hit) { hit.pubs.add(pubOfItem(s)); hit.members.push(s); sig.forEach((w) => hit!.sig.add(w)); }
-    else clusters.push({ sig: new Set(Array.from(sig)), pubs: new Set([pubOfItem(s)]), members: [s] });
+    else clusters.push({ id: clusters.length, sig: new Set(Array.from(sig)), pubs: new Set([pubOfItem(s)]), members: [s] });
   }
-  for (const c of clusters) { const n = c.pubs.size; for (const m of c.members) m._eventCorr = n; }
+  for (const c of clusters) { const n = c.pubs.size; for (const m of c.members) { m._eventCorr = n; m._eventId = c.id; } }
 }
 
 async function embed(texts: string[]): Promise<number[][] | null> {
@@ -667,22 +667,23 @@ export async function fetchStrategy_Rss(_universe?: any): Promise<RssPool> {
 
   const leadSeen = new Set<string>();
   const leadByPub = new Map<string, number>();
-  const leadSigs: Set<string>[] = [];
+  const leadEventIds = new Set<number>();
   const lead: PoolItem[] = [];
   const tryAddLead = (s: PoolItem): boolean => {
     const key = s.source_url.split('?')[0].replace(/\/$/, '');
     if (leadSeen.has(key)) return false;
     const pub = (publisherLabel(s.source_url) || s.source || 'unknown').toLowerCase();
     if ((leadByPub.get(pub) || 0) >= LEAD_PER_PUBLISHER) return false;
-    // Same-event collapse: never let two reworded versions of one story (e.g.
-    // "Lucknow building fire: 15 dead" and "15 dead in Lucknow coaching fire")
-    // both occupy the 12-slot front page. Candidates arrive best-first, so the
-    // strongest representative of an event is the one that gets in.
-    const sig = s._eventSig || (s._eventSig = eventSig(s.headline));
-    for (const ls of leadSigs) if (sameEventSig(sig, ls)) return false;
+    // Same-event collapse by CLUSTER ID (consistent with how corroboration is
+    // counted). Reworded angles of one story — the Lucknow fire as "15 dead",
+    // "Papa save me", "PM announces aid", "AC duct cause" — share almost no
+    // headline tokens pairwise, so a pairwise check missed them; but they chain
+    // into one event cluster. One lead per cluster gives a genuinely diverse
+    // front page instead of six takes on the same topic.
+    if (s._eventId != null && leadEventIds.has(s._eventId)) return false;
     leadSeen.add(key);
     leadByPub.set(pub, (leadByPub.get(pub) || 0) + 1);
-    leadSigs.push(sig);
+    if (s._eventId != null) leadEventIds.add(s._eventId);
     lead.push(s);
     return true;
   };
@@ -709,7 +710,7 @@ export async function fetchStrategy_Rss(_universe?: any): Promise<RssPool> {
 
   // Strip internal fields -> clean RssStory.
   for (const sec of SECTIONS) {
-    pool[sec] = (pool[sec] as PoolItem[]).map(({ _tier, _secs, _w, _emb, _corr, _isSport, _eventCorr, _eventSig, ...rest }) => rest as RssStory);
+    pool[sec] = (pool[sec] as PoolItem[]).map(({ _tier, _secs, _w, _emb, _corr, _isSport, _eventCorr, _eventSig, _eventId, ...rest }) => rest as RssStory);
   }
 
   // Markets (real numbers) + a mechanical lens (no fabrication).
