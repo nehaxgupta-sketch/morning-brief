@@ -2047,6 +2047,21 @@ async function fetchNewsFromOpenAI_legacy(universe: Universe): Promise<RawStorie
 const RECENCY_HOURS_DEFAULT = 24;
 const RECENCY_HOURS_MAJOR = 72;
 
+// Weekend carry (Sprint 18.2): a Monday brief must still surface Saturday/Sunday
+// hard news, and weekend briefs reach back over Friday — otherwise the 24h
+// window silently bins the weekend's biggest stories (Iran talks, an election
+// result) on Monday morning. Importance ranking (event corroboration) and
+// cluster-freshest dating keep genuinely stale single-source items from leading,
+// so widening the window does not resurface dead stories. Mon = 72h, Sat/Sun =
+// 48h, weekdays = 24h; major_events/climate stay at least 72h.
+function recencyWindowHours(section: string): number {
+  const istMs = Date.now() + 5.5 * 60 * 60 * 1000;
+  const dow = new Date(istMs).getUTCDay(); // 0 = Sun … 6 = Sat
+  const base = dow === 1 ? 72 : (dow === 0 || dow === 6) ? 48 : RECENCY_HOURS_DEFAULT;
+  const major = section === 'major_events' || section === 'climate_health';
+  return major ? Math.max(RECENCY_HOURS_MAJOR, base) : base;
+}
+
 function isWithinRecencyWindow(publishedAt: any, section: string): boolean {
   if (!publishedAt || typeof publishedAt !== 'string') return true; // permissive on missing
   // Date-only strings (YYYY-MM-DD) must be parsed as end-of-day IST, not
@@ -2060,7 +2075,7 @@ function isWithinRecencyWindow(publishedAt: any, section: string): boolean {
   }
   const ts = Date.parse(normalized);
   if (isNaN(ts)) return true; // permissive on unparseable
-  const hours = (section === 'major_events' || section === 'climate_health') ? RECENCY_HOURS_MAJOR : RECENCY_HOURS_DEFAULT;
+  const hours = recencyWindowHours(section);
   const ageHours = (Date.now() - ts) / (1000 * 60 * 60);
   return ageHours <= hours;
 }
@@ -2103,6 +2118,41 @@ function semanticOverlap(a: Set<string>, b: Set<string>): number {
   let n = 0;
   for (const w of Array.from(a)) if (b.has(w)) n++;
   return n;
+}
+
+// ─── Same-event near-dup (Sprint 18.2) ──────────────────────────────────────
+// Safety net mirroring the engine's eventSig: fold the highest-frequency news
+// synonyms (killed/dead, blast/explosion, resigns/quits) and keep salient
+// figures so two reworded versions of ONE story inside the SAME rendered section
+// (e.g. an oil-sanctions pair in world) can be collapsed to one. Applied
+// per-section only and conservatively — a duplicate is a safer failure than a
+// dropped story, so this never reaches across sections.
+const EVENT_SYN_GB: Record<string, string> = {
+  killed: '@kill', kills: '@kill', kill: '@kill', dead: '@kill', death: '@kill', deaths: '@kill', die: '@kill', dies: '@kill', died: '@kill', killing: '@kill', toll: '@kill',
+  blast: '@blast', blasts: '@blast', explosion: '@blast', explosions: '@blast', explode: '@blast', exploded: '@blast', explodes: '@blast',
+  fire: '@fire', blaze: '@fire', inferno: '@fire',
+  resign: '@resign', resigns: '@resign', resigned: '@resign', resignation: '@resign', quit: '@resign', quits: '@resign', step: '@resign', steps: '@resign', stepping: '@resign', stepped: '@resign',
+  talks: '@talks', talk: '@talks', negotiation: '@talks', negotiations: '@talks', deal: '@talks',
+  strike: '@strike', strikes: '@strike', struck: '@strike', attack: '@strike', attacks: '@strike',
+  bust: '@seize', seize: '@seize', seized: '@seize', seizes: '@seize', seizure: '@seize',
+  poll: '@vote', polls: '@vote', vote: '@vote', votes: '@vote', election: '@vote', elections: '@vote', runoff: '@vote',
+};
+function eventSignature(headline: string): Set<string> {
+  const out = new Set<string>();
+  const toks = String(headline || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/);
+  for (const w of toks) {
+    if (!w) continue;
+    if (/^\d+$/.test(w)) { if (w.length >= 2 && parseInt(w, 10) >= 5) out.add('#' + w); continue; }
+    if (w.length < 4 || STOPWORDS.has(w)) continue;
+    out.add(EVENT_SYN_GB[w] || w);
+  }
+  return out;
+}
+function isSameEvent(a: Set<string>, b: Set<string>): boolean {
+  const shared = semanticOverlap(a, b);
+  if (shared >= 4) return true;
+  const small = Math.min(a.size, b.size) || 1;
+  return shared >= 3 && shared / small >= 0.6;
 }
 
 function dropSemanticDuplicatesAgainstMajor(raw: any): { kept: any; droppedCount: number } {
@@ -2290,6 +2340,36 @@ function enforceQualityRules(raw: any): RawStories {
       .map(([k, n]) => `${k}=${n}`)
       .join(', ');
     console.log(`[publisher-cap] dropped ${publisherDropped} stories (max ${PUBLISHER_CAP}/publisher/section). Final distribution: ${distribution}`);
+  }
+
+  // ─── Within-section same-event collapse (Sprint 18.2) ──────────────────────
+  // The engine collapses the curated front page, but world/india/etc. can still
+  // carry two reworded versions of one story (an oil-sanctions pair, a duplicate
+  // fire report). Drop the later one — keep the first (already in importance
+  // order). Per-section only: it never reaches across sections, so the worst
+  // case is losing one of a true pair while its near-twin still covers the event.
+  let nearDupDropped = 0;
+  for (const sec of priority) {
+    const arr = (cleaned as any)[sec] as RawStory[];
+    if (!Array.isArray(arr) || arr.length < 2) continue;
+    const keptSigs: Set<string>[] = [];
+    const out: RawStory[] = [];
+    for (const story of arr) {
+      const sig = eventSignature(story?.headline || '');
+      let dup = false;
+      for (const ks of keptSigs) { if (isSameEvent(sig, ks)) { dup = true; break; } }
+      if (dup && !story?.must_include) {
+        console.log(`[near-dup] dropping ${sec} story (same event as an earlier one in section): "${(story?.headline || '').slice(0, 70)}"`);
+        nearDupDropped++;
+        continue;
+      }
+      keptSigs.push(sig);
+      out.push(story);
+    }
+    (cleaned as any)[sec] = out;
+  }
+  if (nearDupDropped > 0) {
+    console.log(`[near-dup] dropped ${nearDupDropped} within-section same-event duplicate(s).`);
   }
 
   // Final story-count check — warn if cap dropped us below 15 (the 5min cap).
