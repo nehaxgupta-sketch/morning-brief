@@ -320,6 +320,80 @@ function assignEventCorr(items: PoolItem[]): void {
   for (const c of clusters) { const n = c.pubs.size; for (const m of c.members) { m._eventCorr = n; m._eventId = c.id; } }
 }
 
+// ── Newsworthiness scoring (Sprint 18.3) ───────────────────────────────────
+// Corroboration measures how WIDELY a story was covered, not how IMPORTANT it
+// is — so heavily-aggregated sensational crime and "who is X" explainers led the
+// front page. A cheap LLM pass rates the realistic contenders for genuine
+// significance; the front-page score then blends it with corroboration. Fully
+// fail-safe: any failure returns an empty map and the caller falls back to pure
+// corroboration ranking (the prior behaviour).
+async function scoreNewsworthiness(cands: PoolItem[]): Promise<Map<PoolItem, number>> {
+  const out = new Map<PoolItem, number>();
+  const key = process.env.OPENAI_API_KEY;
+  if (!key || cands.length === 0) return out;
+  const list = cands.slice(0, 30);
+  const numbered = list.map((s, i) => `${i}: ${(s.headline || '').slice(0, 160)}`).join('\n');
+  const prompt = `You are a senior wire editor for a serious daily news brief for Indian professionals (urban, 25-45). Rate each headline 0-10 for NEWSWORTHINESS — the genuine consequence a thoughtful reader needs to know — NOT how much coverage it got.
+HIGH (7-10): major geopolitics, war, defence, significant government policy or economy, central-bank or market-moving decisions, large-scale disasters, consequential India national developments, major science/technology shifts.
+MID (4-6): notable but second-order business, technology or world news.
+LOW (0-3): sensational crime (abductions, ransom notes, murders), celebrity news or deaths, "who is X" personality explainers, viral, lifestyle or listicle content, routine sport.
+Return ONLY a JSON array, one object per headline: [{"i":0,"score":7}, ...]. No prose, no code fences.
+Headlines:
+${numbered}`;
+  try {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        model: process.env.NEWSWORTHINESS_MODEL || 'gpt-4o-mini',
+        temperature: 0,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    if (!res.ok) { console.warn(`[newsworthiness] HTTP ${res.status} — falling back to corroboration ranking.`); return out; }
+    const j: any = await res.json();
+    const txt: string = j?.choices?.[0]?.message?.content || '';
+    const m = txt.match(/\[[\s\S]*\]/);
+    if (!m) { console.warn('[newsworthiness] no JSON array in response — falling back to corroboration.'); return out; }
+    const arr: any[] = JSON.parse(m[0]);
+    for (const o of arr) {
+      const idx = parseInt(o?.i, 10);
+      const sc = Number(o?.score);
+      if (Number.isInteger(idx) && idx >= 0 && idx < list.length && Number.isFinite(sc)) {
+        out.set(list[idx], Math.max(0, Math.min(10, sc)));
+      }
+    }
+    console.log(`[newsworthiness] scored ${out.size}/${list.length} contenders via ${process.env.NEWSWORTHINESS_MODEL || 'gpt-4o-mini'}.`);
+  } catch (e: any) {
+    console.warn(`[newsworthiness] non-fatal error: ${e?.message || e} — falling back to corroboration.`);
+  }
+  return out;
+}
+
+// ── Conservative section reclassification (Sprint 18.3) ────────────────────
+// The engine tags by FEED, so a masthead "top stories" feed drops its markets
+// and sport columns into india/world (a US-markets story and a football opinion
+// column were sitting in India). Move the clear cases into the section they
+// belong to. Conservative by design: never touches major_events, and only moves
+// sport when the story is low-corroboration (so a genuinely major sport event is
+// never pulled off the front page).
+const RECLASS_MARKETS_RE = /\b(sensex|nifty|nasdaq|dow jones|s&p 500|stock market|stocks?|shares?|ipo|bourse|equities|bond yield|wall street|dalal street)\b/i;
+const RECLASS_SPORT_RE = /\b(world cup|fifa|uefa|la ?liga|serie a|bundesliga|premier league|champions league|europa league|test match|t20|odi|ipl|wicket|batsman|bowler|innings|grand prix|formula 1|f1|motogp|wimbledon|grand slam|olympics?|mbappe|messi|ronaldo)\b/i;
+function reclassifySecs(s: PoolItem): void {
+  const h = `${s.headline || ''} ${s.body || ''}`;
+  const has = (x: Section) => s._secs.indexOf(x) >= 0;
+  if (has('major_events')) return; // never disturb the curated front page
+  if (RECLASS_MARKETS_RE.test(h) && (has('india') || has('world'))) {
+    s._secs = s._secs.filter((x) => x !== 'india' && x !== 'world');
+    if (s._secs.indexOf('business') < 0) s._secs.push('business');
+    return;
+  }
+  if (RECLASS_SPORT_RE.test(h) && (has('india') || has('world')) && (s._eventCorr || 1) <= 2) {
+    s._secs = s._secs.filter((x) => x !== 'india' && x !== 'world');
+    if (s._secs.indexOf('sport') < 0) s._secs.push('sport');
+  }
+}
+
 async function embed(texts: string[]): Promise<number[][] | null> {
   const key = process.env.OPENAI_API_KEY;
   if (!key) return null;
@@ -593,6 +667,8 @@ export async function fetchStrategy_Rss(_universe?: any): Promise<RssPool> {
   // Bucket + rank (tier first, then recency). buildSubset re-ranks downstream too.
   const pool: any = {};
   for (const sec of SECTIONS) pool[sec] = [];
+  // Move feed-misfiled markets/sport columns into the right section first.
+  for (const s of kept) reclassifySecs(s);
   for (const s of kept) for (const sec of s._secs) if (pool[sec]) pool[sec].push(s);
 
   // Rank every section: highest source tier first, then most recent.
@@ -649,13 +725,37 @@ export async function fetchStrategy_Rss(_universe?: any): Promise<RssPool> {
   }
   const effCorr = (s: PoolItem): number => (s._eventCorr || s._corr || 1) * (s._isSport ? SPORT_LEAD_WEIGHT : 1);
 
-  // Front-page ranking = IMPORTANCE, not recency. Effective corroboration first
-  // (a story many outlets ran outranks a one-off; sport is down-weighted), then
-  // source tier, then recency. This is what stops a fresh-but-trivial
-  // single-source item (e.g. a resort fire) from leading over a widely-covered
-  // story — and now stops a World Cup result from leading over real news.
+  // Newsworthiness blend (Sprint 18.3). Score the realistic contenders (top of
+  // the corroboration ranking) for genuine significance, then rank the front
+  // page on nw × (1 + log2(1 + effective-corroboration)) — a story must be BOTH
+  // significant AND corroborated to lead, which demotes sensational-but-viral
+  // items. Fail-safe: if scoring is unavailable, leadScoreOf === effCorr (the
+  // prior behaviour exactly), so the front page still works.
+  const contenderMap = new Map<string, PoolItem>();
+  for (const s of [
+    ...(pool.major_events as PoolItem[]),
+    ...(pool.india as PoolItem[]),
+    ...(pool.world as PoolItem[]),
+  ]) {
+    const k = s.source_url.split('?')[0].replace(/\/$/, '');
+    if (!contenderMap.has(k)) contenderMap.set(k, s);
+  }
+  const contenders = Array.from(contenderMap.values()).sort(
+    (a, b) => (effCorr(b) - effCorr(a)) || (b._tier - a._tier),
+  );
+  const nwScores = await scoreNewsworthiness(contenders.slice(0, 30));
+  const nwAvailable = nwScores.size > 0;
+  const leadScoreOf = (s: PoolItem): number => {
+    const ec = effCorr(s);
+    if (!nwAvailable) return ec;
+    const nw = nwScores.has(s) ? (nwScores.get(s) as number) : 5; // neutral for the unscored tail
+    return nw * (1 + Math.log2(1 + ec));
+  };
+
+  // Front-page ranking = IMPORTANCE, not recency. Newsworthiness-blended score
+  // first, then source tier, then recency.
   const rankLead = (a: PoolItem, b: PoolItem) =>
-    (effCorr(b) - effCorr(a)) ||
+    (leadScoreOf(b) - leadScoreOf(a)) ||
     (b._tier - a._tier) ||
     ((Date.parse(b.published_at || '') || 0) - (Date.parse(a.published_at || '') || 0));
 
@@ -705,7 +805,7 @@ export async function fetchStrategy_Rss(_universe?: any): Promise<RssPool> {
   const sportLeadN = lead.filter((s) => s._isSport).length;
   console.log(
     `[fetch] RSS front page (lead ${lead.length}, sport-flagged ${sportLeadN}, SPORT_LEAD_WEIGHT=${SPORT_LEAD_WEIGHT}):\n` +
-    lead.map((s, i) => `  ${i + 1}. corr=${s._eventCorr || s._corr || 1}${(s._eventCorr || 1) > (s._corr || 1) ? `(src${s._corr || 1})` : ''}${s._isSport ? `→${effCorr(s).toFixed(1)} [sport]` : ''} · ${(s.headline || '').slice(0, 80)}`).join('\n'),
+    lead.map((s, i) => `  ${i + 1}. nw=${nwScores.has(s) ? nwScores.get(s) : '-'} corr=${s._eventCorr || s._corr || 1}${(s._eventCorr || 1) > (s._corr || 1) ? `(src${s._corr || 1})` : ''}${s._isSport ? `→${effCorr(s).toFixed(1)} [sport]` : ''} · ${(s.headline || '').slice(0, 80)}`).join('\n'),
   );
 
   // Strip internal fields -> clean RssStory.

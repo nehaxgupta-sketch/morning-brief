@@ -2853,6 +2853,17 @@ function rawToMicroStory(s: any): any {
 // aren't in the rendered section yet. Deduped by normalised source_url. The
 // caller re-validates and only keeps the result if it still passes Zod, so a
 // top-up can never ship invalid content.
+// Sprint 18.3 — compact per-section story counts, for tracing what the writer
+// produced vs what survived the whitelist strip vs what got padded. The reason
+// major_events read as canned templates is invisible without this.
+function dailySectionCountsStr(content: any): string {
+  const secs = ['major_events', 'india', 'world', 'business', 'technology', 'climate_health', 'sport', 'culture'];
+  return secs
+    .map((s) => `${s}=${Array.isArray(content?.[s]) ? content[s].length : 0}`)
+    .filter((x) => !x.endsWith('=0'))
+    .join(' ') || '(none)';
+}
+
 const TOPUP_SECTIONS_10MIN = ['major_events', 'india', 'world', 'business', 'technology', 'climate_health', 'sport', 'culture'];
 const TOPUP_SECTIONS_5MIN  = ['major_events', 'india', 'world'];
 
@@ -2864,21 +2875,28 @@ function backfillToSubsetCounts(content: any, edition: Edition, subset: RawStori
   if (sections.length === 0) return 0;
   const convert = edition === '5min' ? rawToMicroStory : rawToFullStory;
   let added = 0;
+  const padLog: string[] = [];
   for (const sec of sections) {
     const out = Array.isArray(content[sec]) ? content[sec] : [];
     const src = Array.isArray((subset as any)[sec]) ? ((subset as any)[sec] as any[]) : [];
     const target = src.length; // the subset already respects the per-section quota
     if (out.length >= target || target === 0) continue;
+    const writerHad = out.length;
     const present = new Set(out.map((s: any) => normaliseUrlForCompare(s?.source_url)));
+    let secAdded = 0;
     for (const raw of src) {
       if (out.length >= target) break;
       const key = normaliseUrlForCompare(raw?.source_url);
       if (key && present.has(key)) continue;
       out.push(convert(raw));
       present.add(key);
-      added++;
+      added++; secAdded++;
     }
     content[sec] = out;
+    if (secAdded > 0) padLog.push(`${sec}: had ${writerHad}/${target}, padded +${secAdded}`);
+  }
+  if (padLog.length > 0) {
+    console.warn(`[backfill] ${edition} top-up padded under-filled sections with RAW TEMPLATES (these render as canned "why it matters"): ${padLog.join(' · ')}`);
   }
   return added;
 }
@@ -3472,6 +3490,17 @@ async function runWriterForEdition(
     try {
       console.log(`Writing ${ed}${attempt === 2 ? ' (retry)' : ''}...`);
       const content = await writer(writerInput);
+      // Writer diagnostic (Sprint 18.3): what the model actually returned per
+      // section BEFORE any repair or top-up backfill. This is how we confirm the
+      // canned-"why it matters" symptom at its source — e.g. "major_events 1/5"
+      // means the writer under-produced and the rest is raw-template padding.
+      try {
+        const counts = Object.keys(writerInput as any)
+          .filter((k) => Array.isArray((writerInput as any)[k]))
+          .map((sec) => `${sec} ${Array.isArray((content as any)?.[sec]) ? (content as any)[sec].length : 0}/${(writerInput as any)[sec].length}`)
+          .join(' · ');
+        console.log(`[writer] ${ed} returned (written/supplied): ${counts}`);
+      } catch (e) { /* diagnostic only — never break the run */ }
       const repaired = repairCommonOmissions(content, ed, writerInput);
       const validation = validateBrief(repaired, ed);
       if (validation.ok) {
