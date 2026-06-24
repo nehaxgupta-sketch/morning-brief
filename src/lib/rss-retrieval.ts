@@ -743,13 +743,42 @@ export async function fetchStrategy_Rss(_universe?: any): Promise<RssPool> {
   const contenders = Array.from(contenderMap.values()).sort(
     (a, b) => (effCorr(b) - effCorr(a)) || (b._tier - a._tier),
   );
-  const nwScores = await scoreNewsworthiness(contenders.slice(0, 30));
+  // Sprint 19 P0 — score one story per EVENT CLUSTER, not the top-30 individual
+  // articles. `contenders` is de-duplicated only by URL, so the few big clusters
+  // (Iran, Gaza, Senate, heatwave) each contribute many high-corroboration
+  // members that ate all 30 scoring slots — leaving the smaller DISTINCT leads
+  // (Qatar blast, Lucknow fire) unscored (`nw=-`) and pinned at the neutral
+  // default, below sensational-but-viral listicles. Collapse to one
+  // representative per `_eventId` (the highest-effCorr member — first in the
+  // corroboration-sorted list); the 30 scored are then 30 distinct events, which
+  // covers the whole 12-slot front page. Items with no cluster id stay as their
+  // own singleton contender.
+  const distinctContenders: PoolItem[] = [];
+  const seenContenderEvents = new Set<number>();
+  for (const s of contenders) {
+    if (s._eventId != null) {
+      if (seenContenderEvents.has(s._eventId)) continue;
+      seenContenderEvents.add(s._eventId);
+    }
+    distinctContenders.push(s);
+  }
+  const nwScores = await scoreNewsworthiness(distinctContenders.slice(0, 30));
   const nwAvailable = nwScores.size > 0;
+  // Resolve newsworthiness by CLUSTER ID, so whichever member of a scored event
+  // becomes the displayed lead inherits its event's score (only the cluster
+  // representative was sent to the scorer). Falls back to object identity for a
+  // singleton, then to the neutral default for a genuinely unscored tail.
+  const nwByEvent = new Map<number, number>();
+  nwScores.forEach((sc, item) => { if (item._eventId != null) nwByEvent.set(item._eventId, sc); });
+  const nwOf = (s: PoolItem): number | undefined => {
+    if (s._eventId != null && nwByEvent.has(s._eventId)) return nwByEvent.get(s._eventId);
+    return nwScores.has(s) ? (nwScores.get(s) as number) : undefined;
+  };
   const leadScoreOf = (s: PoolItem): number => {
     const ec = effCorr(s);
     if (!nwAvailable) return ec;
-    const nw = nwScores.has(s) ? (nwScores.get(s) as number) : 5; // neutral for the unscored tail
-    return nw * (1 + Math.log2(1 + ec));
+    const nw = nwOf(s);
+    return (nw == null ? 5 : nw) * (1 + Math.log2(1 + ec)); // neutral 5 only for a genuinely unscored tail
   };
 
   // Front-page ranking = IMPORTANCE, not recency. Newsworthiness-blended score
@@ -805,7 +834,7 @@ export async function fetchStrategy_Rss(_universe?: any): Promise<RssPool> {
   const sportLeadN = lead.filter((s) => s._isSport).length;
   console.log(
     `[fetch] RSS front page (lead ${lead.length}, sport-flagged ${sportLeadN}, SPORT_LEAD_WEIGHT=${SPORT_LEAD_WEIGHT}):\n` +
-    lead.map((s, i) => `  ${i + 1}. nw=${nwScores.has(s) ? nwScores.get(s) : '-'} corr=${s._eventCorr || s._corr || 1}${(s._eventCorr || 1) > (s._corr || 1) ? `(src${s._corr || 1})` : ''}${s._isSport ? `→${effCorr(s).toFixed(1)} [sport]` : ''} · ${(s.headline || '').slice(0, 80)}`).join('\n'),
+    lead.map((s, i) => `  ${i + 1}. nw=${nwOf(s) ?? '-'} corr=${s._eventCorr || s._corr || 1}${(s._eventCorr || 1) > (s._corr || 1) ? `(src${s._corr || 1})` : ''}${s._isSport ? `→${effCorr(s).toFixed(1)} [sport]` : ''} · ${(s.headline || '').slice(0, 80)}`).join('\n'),
   );
 
   // Strip internal fields -> clean RssStory.

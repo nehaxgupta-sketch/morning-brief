@@ -3279,6 +3279,19 @@ const LIVENESS_SECTIONS: Record<string, string[]> = {
   // deep has no per-story source_urls in the same shape — skipped.
 };
 
+// Per-edition output schema for the writer diagnostic (Sprint 19 fix). The
+// writer's output shape differs by edition, so the first cut — which counted the
+// output against the raw INPUT section keys — logged false zeros for the
+// editions whose output is NOT section-aligned: `deep` emits
+// long_read/three_patterns/watching_this_week/signature, and `5min` folds
+// business/technology/climate_health/sport/culture into a single `topics` array.
+// Reporting each edition against the keys it actually emits keeps the log honest.
+const WRITER_DIAG_SECTIONS: Record<string, string[]> = {
+  '5min':  ['major_events', 'world', 'india', 'topics'],
+  '10min': ['major_events', 'world', 'india', 'business', 'technology', 'climate_health', 'sport', 'culture', 'politics', 'markets_news'],
+  'deep':  ['three_patterns', 'watching_this_week'],
+};
+
 async function dropDeadLinkStories(
   content: any,
   edition: Edition,
@@ -3495,9 +3508,18 @@ async function runWriterForEdition(
       // canned-"why it matters" symptom at its source — e.g. "major_events 1/5"
       // means the writer under-produced and the rest is raw-template padding.
       try {
-        const counts = Object.keys(writerInput as any)
-          .filter((k) => Array.isArray((writerInput as any)[k]))
-          .map((sec) => `${sec} ${Array.isArray((content as any)?.[sec]) ? (content as any)[sec].length : 0}/${(writerInput as any)[sec].length}`)
+        // Count the writer's output against the keys THIS edition actually emits
+        // (Sprint 19 schema fix). Where an output key aligns with an input
+        // section we show written/supplied; keys with no matching input array
+        // (5min `topics`, deep's long-form arrays) show the written count only —
+        // no more false `0/N` zeros for deep and the folded 5min sections.
+        const diagKeys = WRITER_DIAG_SECTIONS[ed] || [];
+        const counts = diagKeys
+          .map((sec) => {
+            const wrote = Array.isArray((content as any)?.[sec]) ? (content as any)[sec].length : 0;
+            const supplied = (writerInput as any)?.[sec];
+            return Array.isArray(supplied) ? `${sec} ${wrote}/${supplied.length}` : `${sec} ${wrote}`;
+          })
           .join(' · ');
         console.log(`[writer] ${ed} returned (written/supplied): ${counts}`);
       } catch (e) { /* diagnostic only — never break the run */ }
