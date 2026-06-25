@@ -48,7 +48,7 @@ import {
 import { attachLogCapture } from '@/lib/log-capture';
 import { applyCitySafety } from '@/lib/editorial-safety';
 // Sprint 15: the RSS retrieval engine (used when RETRIEVAL=rss; old path otherwise).
-import { fetchStrategy_Rss } from '@/lib/rss-retrieval';
+import { fetchStrategy_Rss, fetchStoriesFromFeeds } from '@/lib/rss-retrieval';
 
 // 300s = 5min. Vercel Pro caps at 300; Hobby with Fluid Compute enabled also
 // reaches 300. gpt-5 with reasoning web_search at 'low' effort runs ~150-200s.
@@ -2783,6 +2783,14 @@ async function callOpenAIChat(
 // silently lost. Runs inside repairCommonOmissions (before validation+strip),
 // so backfilled stories are schema-checked and whitelist-checked like any
 // other (subset stories already passed the fetch-time quality gate).
+// Sprint 19 — backfill template sentinels, extracted so the post-write rewrite
+// pass (rewriteTemplateWhys) can detect exactly which "why it matters" fields
+// were padded and replace them with real, story-specific analysis. Default ON;
+// set REWRITE_TEMPLATE_WHYS=false to disable the rewrite (sentinels then ship).
+const BACKFILL_WHY_FULL = 'Relevant context for Indian readers; see the linked report for detail.';
+const BACKFILL_WHY_MICRO = 'Relevant context for Indian readers; see the linked report.';
+const REWRITE_TEMPLATE_WHYS = (process.env.REWRITE_TEMPLATE_WHYS || 'true').toLowerCase() !== 'false';
+
 function rawToFullStory(s: any): any {
   const body = String(s?.body || s?.facts || '').trim();
   const sentences = body.split(/(?<=[.!?])\s+/).filter(Boolean);
@@ -2792,7 +2800,7 @@ function rawToFullStory(s: any): any {
     headline: String(s?.headline || '').trim() || 'Update',
     facts: facts || body || String(s?.headline || 'See the linked source for details.'),
     background: `Reported by ${s?.source || 'the source'}.`,
-    why_it_matters: why || 'Relevant context for Indian readers; see the linked report for detail.',
+    why_it_matters: why || BACKFILL_WHY_FULL,
     what_happens_next: 'Watch for follow-up coverage and official updates.',
     analysis: 'Included for completeness; see the linked source for the full account.',
     source: String(s?.source || '').trim(),
@@ -2834,7 +2842,7 @@ function rawToMicroStory(s: any): any {
   return {
     headline,
     what_happened: ensure(body || headline, 8, 'See the linked report for the full account.'),
-    why_it_matters: ensure(s?.why_it_matters, 8, 'Relevant context for Indian readers; see the linked report.'),
+    why_it_matters: ensure(s?.why_it_matters, 8, BACKFILL_WHY_MICRO),
     source: String(s?.source || '').trim() || 'Source',
     source_url: String(s?.source_url || '').trim(),
     industries: Array.isArray(s?.industries) ? s.industries : [],
@@ -2899,6 +2907,90 @@ function backfillToSubsetCounts(content: any, edition: Edition, subset: RawStori
     console.warn(`[backfill] ${edition} top-up padded under-filled sections with RAW TEMPLATES (these render as canned "why it matters"): ${padLog.join(' · ')}`);
   }
   return added;
+}
+
+// ─── Sprint 19 — real "why it matters" for backfilled stories ────────────────
+// When the writer under-produces a section, the top-up backfill pads it from
+// raw stories whose RSS summary is too short to derive a "why" from, so those
+// stories shipped the canned BACKFILL_WHY_* sentinel — identical boilerplate the
+// reader sees as a fake "why it matters" (the Sprint 18 regression). This pass
+// finds those sentinels in the FINAL brief and rewrites each with a real,
+// story-specific, India-anchored line via one cheap gpt-4o-mini call. Fail-safe:
+// on any error each sentinel is replaced by a line derived from the story's OWN
+// facts, so a padded story is never identical boilerplate and the field always
+// stays present and schema-valid (length >= the edition's minimum).
+async function rewriteTemplateWhys(content: any, edition: Edition): Promise<number> {
+  if (!REWRITE_TEMPLATE_WHYS || !content || typeof content !== 'object') return 0;
+  const minLen = edition === '5min' ? 8 : 15;
+  const isSentinel = (w: string): boolean => {
+    const t = (w || '').trim();
+    return t === BACKFILL_WHY_FULL || t === BACKFILL_WHY_MICRO
+        || t.endsWith(BACKFILL_WHY_FULL) || t.endsWith(BACKFILL_WHY_MICRO);
+  };
+  // Collect every padded story (sentinel "why") across all array sections.
+  const targets: any[] = [];
+  for (const key of Object.keys(content)) {
+    const arr = content[key];
+    if (!Array.isArray(arr)) continue;
+    for (const s of arr) {
+      if (s && typeof s === 'object' && typeof s.why_it_matters === 'string' && isSentinel(s.why_it_matters)) {
+        targets.push(s);
+      }
+    }
+  }
+  if (targets.length === 0) return 0;
+
+  // Deterministic, story-specific fallback — leads with the story's own first
+  // fact so it is never identical across stories; padded to the schema minimum.
+  const fallbackWhy = (s: any): string => {
+    const facts = String(s?.facts || s?.what_happened || '').trim();
+    const first = (facts.split(/(?<=[.!?])\s+/).filter(Boolean)[0] || facts).trim();
+    const line = first ? `For Indian readers: ${first}` : '';
+    return line.length >= minLen
+      ? line
+      : 'A notable development for Indian readers; see the linked report for the full account and context.';
+  };
+
+  try {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) throw new Error('no OPENAI_API_KEY');
+    const numbered = targets
+      .map((s, i) => `${i}: ${String(s.headline || '').trim().slice(0, 140)} — ${String(s.facts || s.what_happened || '').trim().slice(0, 220)}`)
+      .join('\n');
+    const prompt = `You are a wire editor for an India-focused daily news brief (urban professionals, 25-45). For each item write ONE "why it matters" line — the genuine consequence an Indian reader should take away. ANCHOR TO INDIA where possible: inflation, the rupee, food/fuel prices, RBI policy, jobs, urban life, India's strategic position, or sector impact on Indian companies/markets. A purely global takeaway is acceptable ONLY if no Indian angle exists. Do NOT restate the headline or facts — say why it matters. One sentence, 8-22 words.
+Return ONLY a JSON array, one object per item: [{"i":0,"why":"..."}]. No prose, no code fences.
+Items:
+${numbered}`;
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: process.env.BACKFILL_WHY_MODEL || 'gpt-4o-mini',
+        temperature: 0.2,
+        max_tokens: 1500,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const j: any = await res.json();
+    const txt: string = j?.choices?.[0]?.message?.content || '';
+    const m = txt.match(/\[[\s\S]*\]/);
+    if (!m) throw new Error('no JSON array in response');
+    const arr: any[] = JSON.parse(m[0]);
+    const byIdx = new Map<number, string>();
+    for (const o of arr) {
+      const idx = parseInt(o?.i, 10);
+      const why = String(o?.why || '').trim();
+      if (Number.isInteger(idx) && idx >= 0 && idx < targets.length && why.length >= minLen) byIdx.set(idx, why);
+    }
+    targets.forEach((s, i) => { s.why_it_matters = byIdx.has(i) ? (byIdx.get(i) as string) : fallbackWhy(s); });
+    console.log(`[backfill] ${edition} rewrote ${byIdx.size}/${targets.length} template "why it matters" via ${process.env.BACKFILL_WHY_MODEL || 'gpt-4o-mini'} (rest derived from own facts).`);
+    return targets.length;
+  } catch (e: any) {
+    targets.forEach((s) => { s.why_it_matters = fallbackWhy(s); });
+    console.warn(`[backfill] ${edition} template-why rewrite fell back to deterministic (${e?.message || e}); ${targets.length} derived from own facts.`);
+    return targets.length;
+  }
 }
 
 
@@ -3581,6 +3673,11 @@ async function runWriterForEdition(
         }
         // Save the FULL rawStories (not the subset) into the brief row so
         // downstream consumers see the same raw for every edition.
+        // Sprint 19 — replace any backfill template "why it matters" with real,
+        // story-specific analysis before saving, so padded stories never render
+        // as canned boilerplate (the Sprint 18 regression). Catches every
+        // backfill path (empty-section, post-strip top-up, post-coherence top-up).
+        await rewriteTemplateWhys(finalContent, ed);
         await saveBriefToSupabase(ed, rawStories, finalContent, lens, 'ready');
         return { status: 'ready', content: finalContent };
       }
@@ -4197,6 +4294,81 @@ function getTailModel(): string {
   return envModel && envModel.trim() ? envModel.trim() : TAIL_MODEL;
 }
 
+// ─── Sprint 19 — RSS personalization registries ─────────────────────────────
+// City-edition and topical feeds from WHITELISTED publishers, retrieved via the
+// engine (fetchStoriesFromFeeds), which whitelist-checks and freshness-filters
+// every story exactly like the main pool. Keys MATCH the REGIONAL_BY_CITY /
+// TOPIC_SOURCES keys (lowercased) so the tail finds them by the same costDetail.
+// This is a SEED list — tune it from the `[tail:rss ...]` reachability log: a
+// dead or wrong feed URL simply yields zero items (the section is then omitted),
+// and can NEVER produce a fabricated story URL (the engine only emits links it
+// actually pulled from a live feed). Confirmed URL patterns:
+//   The Hindu      : https://www.thehindu.com/news/cities/<City>/feeder/default.rss
+//   Indian Express : https://indianexpress.com/section/cities/<city>/feed/
+const thCity = (c: string) => `https://www.thehindu.com/news/cities/${c}/feeder/default.rss`;
+const ieCity = (c: string) => `https://indianexpress.com/section/cities/${c}/feed/`;
+const CITY_FEEDS: Record<string, string[]> = {
+  'mumbai':        [ieCity('mumbai'), thCity('mumbai')],
+  'delhi':         [ieCity('delhi'), thCity('Delhi')],
+  'delhi / ncr':   [ieCity('delhi'), thCity('Delhi')],
+  'bengaluru':     [ieCity('bangalore'), thCity('bangalore')],
+  'bangalore':     [ieCity('bangalore'), thCity('bangalore')],
+  'chennai':       [ieCity('chennai'), thCity('chennai')],
+  'hyderabad':     [ieCity('hyderabad'), thCity('Hyderabad')],
+  'kolkata':       [ieCity('kolkata')],
+  'pune':          [ieCity('pune')],
+  'ahmedabad':     [ieCity('ahmedabad')],
+  'jaipur':        [ieCity('jaipur')],
+  'lucknow':       [ieCity('lucknow'), thCity('Lucknow')],
+  'chandigarh':    [ieCity('chandigarh'), thCity('Chandigarh')],
+  'kochi':         [thCity('Kochi'), ieCity('kochi')],
+  'coimbatore':    [thCity('Coimbatore'), ieCity('coimbatore')],
+  'visakhapatnam': [thCity('Visakhapatnam'), ieCity('visakhapatnam')],
+  'indore':        [ieCity('indore')],
+  'bhopal':        [ieCity('bhopal')],
+  'nagpur':        [ieCity('nagpur')],
+  'surat':         [ieCity('surat')],
+  'vadodara':      [ieCity('vadodara')],
+  'guwahati':      [ieCity('guwahati')],
+};
+// Non-standard interests only (interests mapped to a standard section in
+// personalise-briefs.tsx are already served from the shared RSS brief and never
+// reach this path). Topics with no confident whitelisted feed are omitted →
+// that interest section is simply skipped rather than faked.
+const INTEREST_FEEDS: Record<string, string[]> = {
+  'food & travel':               ['https://www.thehindu.com/life-and-style/food/feeder/default.rss', 'https://indianexpress.com/section/lifestyle/food-wine/feed/'],
+  'personal finance':            ['https://www.thehindubusinessline.com/money-and-banking/feeder/default.rss', 'https://www.livemint.com/rss/money'],
+  'education':                   ['https://indianexpress.com/section/education/feed/', 'https://www.thehindu.com/education/feeder/default.rss'],
+  'law & policy':                ['https://www.barandbench.com/feed', 'https://www.livelaw.in/rss/top-stories'],
+  'startups & entrepreneurship': ['https://yourstory.com/feed', 'https://inc42.com/feed/'],
+  'climate':                     ['https://india.mongabay.com/feed/', 'https://www.downtoearth.org.in/rss/all'],
+  'health':                      ['https://www.thehindu.com/sci-tech/health/feeder/default.rss'],
+  'psychology':                  ['https://www.sciencedaily.com/rss/mind_brain/psychology.xml'],
+};
+
+// Default ON; set TAIL_RSS=false to revert the city/interest tails to Perplexity.
+const TAIL_RSS = (process.env.TAIL_RSS || 'true').toLowerCase() !== 'false';
+
+// Retrieve a tail section's candidates from real feeds. Returns up to `cap`
+// candidates (the downstream Claude-select / finalise step then picks and caps
+// to 3); why_it_matters is left for that step to derive, never fabricated here.
+async function fetchTailFromFeeds(label: string, feeds: string[], cap: number = 12): Promise<TailStory[]> {
+  try {
+    const { stories, reachability } = await fetchStoriesFromFeeds(feeds, { concurrency: 4 });
+    console.log(`[tail:rss ${label}] ${reachability}`);
+    return stories.slice(0, cap).map((s) => ({
+      headline: s.headline,
+      body: s.body || '',
+      source: s.source || wlPublisherLabel(s.source_url) || 'Source',
+      source_url: s.source_url,
+      published_at: s.published_at,
+    }));
+  } catch (e: any) {
+    console.warn(`[tail:rss ${label}] feed retrieval failed (${e?.message || e}) — section will be empty.`);
+    return [];
+  }
+}
+
 async function callTailFetch(
   prompt: string,
   label: string,
@@ -4204,6 +4376,19 @@ async function callTailFetch(
   costDetail: string,
   skipDomainFilter: boolean = false,
 ): Promise<TailStory[]> {
+  // Sprint 19 — RSS personalization. City and interest tails retrieve from real
+  // feeds (whitelisted, freshness-filtered) instead of Perplexity (which
+  // fabricated URLs). A key with no configured feed returns [] → the section is
+  // omitted, never faked. Industry and storyline keep their existing path.
+  if (TAIL_RSS && (costPhase === 'city' || costPhase === 'interest')) {
+    const fKey = (costDetail || '').toLowerCase().trim();
+    const feeds = costPhase === 'city' ? (CITY_FEEDS[fKey] || []) : (INTEREST_FEEDS[fKey] || []);
+    if (feeds.length === 0) {
+      console.log(`[tail:rss ${label}] no feed configured for "${fKey}" — omitting (no fabricated fallback).`);
+      return [];
+    }
+    return fetchTailFromFeeds(label, feeds);
+  }
   const model = getTailModel();
 
   // Sprint 14.7b: domain allowlist for this tail (city -> regional mastheads,

@@ -527,6 +527,54 @@ async function storeItems(items: RssStory[]): Promise<void> {
   } catch (e: any) { console.warn('[rss] storeItems threw (non-fatal):', e?.message || e); }
 }
 
+// ── Reusable feed retrieval (Sprint 19 — RSS personalization) ────────────────
+// A lean, exported version of the orchestrator's fetch→parse→dedupe loop for an
+// ARBITRARY list of feed URLs (city-edition and topical feeds for the tails),
+// so the personalization surface retrieves real stories from real feeds instead
+// of an LLM that fabricates URLs. Reuses parseFeed, so every story is already
+// whitelist-checked, link-extracted, and freshness-filtered exactly like the
+// main pool. Returns a per-feed reachability summary so the caller can log which
+// feeds resolve (and a wrong/dead feed URL simply yields zero items — never a
+// fabricated story URL). Internal fields are stripped → clean RssStory[].
+export async function fetchStoriesFromFeeds(
+  urls: string[],
+  opts?: { tier?: number; secs?: Section[]; concurrency?: number; perFeedTimeoutMs?: number },
+): Promise<{ stories: RssStory[]; reachability: string }> {
+  const secs: Section[] = opts?.secs || ['india'];
+  const timeout = opts?.perFeedTimeoutMs || 12000;
+  const seen = new Set<string>();
+  const feeds = (urls || []).filter((u) => {
+    const k = (u || '').trim();
+    if (!k || seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  if (feeds.length === 0) return { stories: [], reachability: 'feeds 0/0 (none configured)' };
+  let responded = 0, empty = 0, failed = 0;
+  const all: PoolItem[] = [];
+  let idx = 0;
+  const conc = Math.max(1, Math.min(opts?.concurrency || 4, feeds.length));
+  async function worker(): Promise<void> {
+    while (idx < feeds.length) {
+      const url = feeds[idx++];
+      const body = await fetchText(url, timeout);
+      if (body == null) { failed++; continue; }
+      responded++;
+      const tier = opts?.tier != null ? opts.tier : (sourceTier(url) || 3);
+      const { items } = parseFeed(body, publisherLabel(url) || url, tier, secs);
+      if (items.length === 0) empty++;
+      for (const it of items) all.push(it);
+    }
+  }
+  await Promise.all(Array.from({ length: conc }, () => worker()));
+  const { kept } = await dedupe(all);
+  const stories = kept.map(
+    ({ _tier, _secs, _w, _emb, _corr, _isSport, _eventCorr, _eventSig, _eventId, ...rest }) => rest as RssStory,
+  );
+  const reachability = `feeds ${responded}/${feeds.length} responded, ${empty} empty, ${failed} unreachable -> ${all.length} items -> ${stories.length} after dedupe`;
+  return { stories, reachability };
+}
+
 // ── orchestrator: the drop-in fetch strategy ─────────────────────────────────
 export async function fetchStrategy_Rss(_universe?: any): Promise<RssPool> {
   console.log('[fetch] RSS engine — polling feeds…');
