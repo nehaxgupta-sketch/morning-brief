@@ -1555,8 +1555,16 @@ async function fillEmptyFromTailBriefs(
 async function pruneDeadPersonalLinks(content: any, label: string): Promise<number> {
   if (!content || !Array.isArray(content.personal_sections)) return 0;
   let removed = 0;
+  const TRUST_RSS_TAILS = (process.env.TRUST_RSS_TAILS || 'true').toLowerCase() !== 'false';
   for (const sec of content.personal_sections) {
     if (!sec || !Array.isArray(sec.stories) || sec.stories.length === 0) continue;
+    // Sprint 19 — city and interest tails are now RSS-sourced (real publisher
+    // URLs, not LLM-fabricated), so the liveness check is counterproductive here:
+    // with the checker frequently blocked from Vercel it false-positives "dead"
+    // on real articles and trips the circuit breaker for nothing. Skip those;
+    // keep the check only for industry (still Perplexity-sourced).
+    const secId = String(sec.id || '').toLowerCase();
+    if (TRUST_RSS_TAILS && !secId.startsWith('industry')) continue;
     const r = await dropDeadStories(sec.stories, (s: any) => s?.source_url, { label: `${label}:${sec.id || 'section'}` });
     if (!r.circuitBroken && r.dead.length > 0) { sec.stories = r.kept; removed += r.dead.length; }
   }

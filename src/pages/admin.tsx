@@ -391,6 +391,194 @@ function downloadJSON(filename: string, payload: any) {
   URL.revokeObjectURL(url)
 }
 
+// Sprint 19 — markdown sibling of downloadJSON, for the RCA report download.
+function downloadText(filename: string, text: string) {
+  const blob = new Blob([text], { type: 'text/markdown' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+}
+
+// ─── Sprint 19 — in-browser pipeline RCA ─────────────────────────────────────
+// Parses the captured run-log lines (the same buffer the page mirrors and the
+// download-log button writes) into a leg-by-leg root-cause report, mirroring the
+// manual RCA: fetch reachability, dedup/front-page newsworthiness, writer
+// coverage + template rewrite + coherence, and the personalization tails. Needs
+// no Vercel fetch — every signal it reads is already in the run log.
+function buildRcaReport(rawLines: string[]): { report: any; markdown: string } {
+  const lines = rawLines.map((l) => l.replace(/^\[srv:[^\]]*\]\s*/, ''))
+  const first = (re: RegExp) => {
+    for (const l of lines) {
+      const m = l.match(re)
+      if (m) return m
+    }
+    return null
+  }
+  const all = (re: RegExp) => {
+    const out: RegExpMatchArray[] = []
+    for (const l of lines) {
+      const m = l.match(re)
+      if (m) out.push(m)
+    }
+    return out
+  }
+  const has = (sub: string) => lines.some((l) => l.indexOf(sub) >= 0)
+  const legs: Array<{ name: string; status: string; findings: string[] }> = []
+
+  // Leg 1 — Fetch
+  {
+    const reach = first(/RSS reachability — responded (\d+)\/(\d+).*?all-filtered (\d+)/)
+    const funnel = first(/RSS funnel — feeds \d+\/\d+, pulled (\d+) -> (\d+) \(url\) -> (\d+) \(near-dup\)/)
+    const secs = first(/RSS section counts — (.+)/)
+    const f: string[] = []
+    let status = 'na'
+    if (reach) {
+      f.push(`Reachability ${reach[1]}/${reach[2]} feeds responded; ${reach[3]} all-filtered (likely the dead Google query feeds).`)
+      status = Number(reach[1]) / Number(reach[2]) >= 0.8 ? 'ok' : 'warn'
+    }
+    if (funnel) f.push(`Funnel: pulled ${funnel[1]} → ${funnel[2]} (url) → ${funnel[3]} (near-dup).`)
+    if (secs) f.push(`Section counts: ${secs[1].trim()}`)
+    if (!reach && !funnel) f.push('No fetch signals in this run (fetch stage may not have run).')
+    legs.push({ name: 'Leg 1 — Fetch', status, findings: f })
+  }
+
+  // Leg 3 — Dedup & front page (newsworthiness)
+  {
+    const nw = first(/\[newsworthiness\] scored (\d+)\/(\d+)/)
+    const fp = lines.find((l) => l.indexOf('RSS front page') >= 0) || ''
+    const f: string[] = []
+    let status = 'na'
+    if (nw) {
+      f.push(`Newsworthiness scored ${nw[1]}/${nw[2]} contenders.`)
+      status = 'ok'
+    }
+    if (fp) {
+      const scored = (fp.match(/nw=\d+/g) || []).length
+      const unscored = (fp.match(/nw=-/g) || []).length
+      const lead = fp.match(/lead (\d+)/)
+      f.push(`Front page: ${lead ? lead[1] : scored + unscored} leads, ${scored} scored / ${unscored} unscored.`)
+      if (unscored > 0) {
+        f.push(`Warning: ${unscored} lead(s) fell back to neutral score — newsworthiness coverage gap.`)
+        status = 'warn'
+      }
+    }
+    legs.push({ name: 'Leg 3 — Dedup & front page', status, findings: f })
+  }
+
+  // Leg 4 — Write
+  {
+    const writers = all(/\[writer\] (\w+) returned \(written\/supplied\): (.+)/)
+    const f: string[] = []
+    let status = 'na'
+    const seen = new Set<string>()
+    for (const w of writers) {
+      const ed = w[1]
+      if (seen.has(ed)) continue
+      seen.add(ed)
+      const pairs = w[2].match(/\w+ \d+\/\d+/g) || []
+      let wrote = 0
+      let sup = 0
+      for (const p of pairs) {
+        const m = p.match(/(\d+)\/(\d+)/)
+        if (m) {
+          wrote += Number(m[1])
+          sup += Number(m[2])
+        }
+      }
+      if (sup > 0) {
+        const pct = Math.round((wrote / sup) * 100)
+        const low = pct < 70
+        f.push(`${ed}: wrote ${wrote}/${sup} supplied stories (${pct}% coverage)${low ? ' — under-producing' : ''}.`)
+        if (low) status = 'warn'
+        else if (status === 'na') status = 'ok'
+      } else {
+        f.push(`${ed}: ${w[2]}`)
+        if (status === 'na') status = 'ok'
+      }
+    }
+    const rewrote = first(/\[backfill\] (\w+) rewrote (\d+)\/(\d+) template/)
+    const padded = has('RAW TEMPLATES')
+    if (rewrote) f.push(`Template why-it-matters rewrite fired: ${rewrote[1]} rewrote ${rewrote[2]}/${rewrote[3]} into real analysis (no canned boilerplate shipped).`)
+    else if (padded) {
+      f.push('Warning: padding happened but no rewrite line — canned boilerplate may have shipped (check REWRITE_TEMPLATE_WHYS).')
+      status = 'warn'
+    }
+    const coh = all(/\[coherence:(\w+)\] (\d+) issue/)
+    const cohSeen = new Set<string>()
+    for (const c of coh) {
+      if (cohSeen.has(c[1])) continue
+      cohSeen.add(c[1])
+      if (Number(c[2]) > 0) {
+        f.push(`Warning: coherence — ${c[1]} shipped with ${c[2]} flagged issue(s).`)
+        if (status === 'ok') status = 'warn'
+      }
+    }
+    legs.push({ name: 'Leg 4 — Write', status, findings: f })
+  }
+
+  // Leg 5 — Personalize
+  {
+    const done = first(/\[tail-fetch\] Done\. Cities: (\d+)\/(\d+) ready\. Interests: (\d+)\/(\d+)\. Industries: (\d+)\/(\d+)/)
+    const rss = all(/\[tail:rss ([^\]]+)\] feeds (\d+)\/(\d+) responded.*?-> (\d+) after dedupe/)
+    const noFeed = all(/\[tail:rss ([^\]]+)\] no feed configured/)
+    const cb = all(/CIRCUIT BREAKER/)
+    const pers = all(/\[personalise:(\w+)\] universal=(\d+), personal=(\d+), total=(\d+), cap=(\d+)/)
+    const f: string[] = []
+    let status = 'na'
+    if (done) {
+      f.push(`Tails ready — cities ${done[1]}/${done[2]}, interests ${done[3]}/${done[4]}, industries ${done[5]}/${done[6]}.`)
+      status = Number(done[1]) === Number(done[2]) ? 'ok' : 'warn'
+      if (Number(done[1]) < Number(done[2])) f.push(`Warning: ${Number(done[2]) - Number(done[1])} city tail(s) not ready.`)
+    }
+    if (rss.length) {
+      const resolved = rss.filter((m) => Number(m[4]) > 0).length
+      f.push(`RSS tails: ${resolved}/${rss.length} feed-backed sections returned items (real publisher URLs — no fabrication).`)
+      for (const e of rss.filter((m) => Number(m[4]) === 0)) f.push(`Warning: ${e[1].trim()} — feeds responded but 0 items after dedupe; tune the feed URL.`)
+    }
+    if (noFeed.length) {
+      const uniq = Array.from(new Set(noFeed.map((m) => m[1].trim())))
+      f.push(`${uniq.length} interest(s) with no feed → served from shared sections, not tails.`)
+    }
+    if (cb.length) {
+      f.push(`Warning: circuit breaker fired ${cb.length}x — liveness checker likely blocked from Vercel; on RSS URLs this is a false positive (set TRUST_RSS_TAILS=false to keep checking).`)
+      if (status === 'ok' || status === 'na') status = 'warn'
+    }
+    const pSeen = new Set<string>()
+    for (const p of pers) {
+      if (pSeen.has(p[1])) continue
+      pSeen.add(p[1])
+      const total = Number(p[4])
+      const cap = Number(p[5])
+      f.push(`${p[1]} brief: ${p[2]} universal + ${p[3]} personal = ${total}/${cap}${total < cap ? ' (under cap)' : ''}.`)
+    }
+    legs.push({ name: 'Leg 5 — Personalize', status, findings: f })
+  }
+
+  const warns = legs.filter((l) => l.status === 'warn').length
+  const fails = legs.filter((l) => l.status === 'fail').length
+  const verdict = fails > 0 ? `${fails} leg(s) failing · ${warns} warning(s)` : warns > 0 ? `All legs running · ${warns} warning(s) to watch` : 'All legs healthy'
+  const generatedAt = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' IST'
+  const report = { generatedAt, verdict, logLines: lines.length, legs }
+
+  const g = (s: string) => (s === 'ok' ? 'OK' : s === 'warn' ? 'WARN' : s === 'fail' ? 'FAIL' : '--')
+  const mdLines: string[] = ['# Morning Brief — Pipeline RCA', `_Generated ${generatedAt} · ${lines.length} log lines · Verdict: ${verdict}_`, '']
+  for (const l of legs) {
+    mdLines.push(`## [${g(l.status)}] ${l.name}`)
+    if (l.findings.length) {
+      for (const x of l.findings) mdLines.push(`- ${x}`)
+    } else {
+      mdLines.push('- (no signals)')
+    }
+    mdLines.push('')
+  }
+  return { report, markdown: mdLines.join('\n') }
+}
+
 export default function AdminPage() {
   const [authorized, setAuthorized] = useState<boolean | null>(null)
   const [email, setEmail] = useState<string>('')
@@ -442,6 +630,7 @@ export default function AdminPage() {
   // Sprint 14.3: capture the admin page's own run output so it can be
   // downloaded as JSON without opening the browser console.
   const [adminLog, setAdminLog] = useState<LogEntry[]>([])
+  const [rca, setRca] = useState<{ report: any; markdown: string } | null>(null)
   const [showLog, setShowLog] = useState(false)
 
   const [masterStages, setMasterStages] = useState<StageState[]>(emptyStages())
@@ -1436,6 +1625,12 @@ export default function AdminPage() {
             padding: '10px 14px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
             letterSpacing: '1.5px', cursor: 'pointer', minHeight: '44px',
           }}>{showLog ? 'HIDE LOG' : `VIEW LOG (${adminLog.length})`}</button>
+          <button onClick={() => { const r = buildRcaReport(adminLog.map(e => e.msg)); setRca(r); console.info(`[admin] RCA generated from ${adminLog.length} log lines — ${r.report.verdict}`) }} disabled={adminLog.length === 0} style={{
+            background: 'none', border: `1px solid ${C.gold}`, color: C.gold,
+            padding: '10px 14px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
+            letterSpacing: '1.5px', cursor: adminLog.length === 0 ? 'not-allowed' : 'pointer',
+            opacity: adminLog.length === 0 ? 0.5 : 1, minHeight: '44px',
+          }}>⚙ RUN RCA</button>
           {exportResult && (
             <span style={{
               fontFamily: "'DM Mono', monospace", fontSize: '11px',
@@ -1443,6 +1638,59 @@ export default function AdminPage() {
             }}>{exportResult}</span>
           )}
         </div>
+
+        {/* ─── Sprint 19: pipeline RCA panel ──────────────────────────────
+            Renders the leg-by-leg report from buildRcaReport(adminLog). Runs
+            entirely off the captured run-log buffer — no Vercel fetch needed,
+            since every server log line is already mirrored into adminLog. The
+            two download buttons emit the same report as JSON and as markdown. */}
+        {rca && (
+          <div style={{ marginBottom: '28px', border: `1px solid ${C.gold}`, background: C.surfaceDeep }}>
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              padding: '12px 16px', borderBottom: `1px solid ${C.border}`,
+              fontFamily: "'DM Mono', monospace", fontSize: '10px', letterSpacing: '2px', color: C.gold,
+            }}>
+              <span>PIPELINE RCA · {rca.report.verdict}</span>
+              <span style={{ display: 'flex', gap: '8px' }}>
+                <button onClick={() => downloadJSON(`morning-brief-rca-${selectedDate}.json`, rca.report)} style={{
+                  background: 'none', border: `1px solid ${C.border}`, color: C.textSoft,
+                  padding: '4px 10px', fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                  letterSpacing: '1.5px', cursor: 'pointer',
+                }}>↓ JSON</button>
+                <button onClick={() => downloadText(`morning-brief-rca-${selectedDate}.md`, rca.markdown)} style={{
+                  background: 'none', border: `1px solid ${C.border}`, color: C.textSoft,
+                  padding: '4px 10px', fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                  letterSpacing: '1.5px', cursor: 'pointer',
+                }}>↓ MARKDOWN</button>
+                <button onClick={() => setRca(null)} style={{
+                  background: 'none', border: `1px solid ${C.border}`, color: C.textMute,
+                  padding: '4px 10px', fontFamily: "'DM Mono', monospace", fontSize: '10px',
+                  letterSpacing: '1.5px', cursor: 'pointer',
+                }}>CLOSE</button>
+              </span>
+            </div>
+            <div style={{ padding: '14px 16px' }}>
+              {rca.report.legs.map((leg: any, i: number) => (
+                <div key={i} style={{ marginBottom: '14px' }}>
+                  <div style={{
+                    fontFamily: "'DM Mono', monospace", fontSize: '12px', letterSpacing: '1px',
+                    marginBottom: '5px',
+                    color: leg.status === 'ok' ? '#3fb950' : leg.status === 'warn' ? C.gold : leg.status === 'fail' ? C.err : C.textMute,
+                  }}>
+                    {leg.status === 'ok' ? '✓' : leg.status === 'warn' ? '!' : leg.status === 'fail' ? '✕' : '–'} {leg.name} — {String(leg.status).toUpperCase()}
+                  </div>
+                  {leg.findings.map((fx: string, j: number) => (
+                    <div key={j} style={{
+                      fontFamily: "'DM Sans', sans-serif", fontSize: '13px', color: C.textSoft,
+                      lineHeight: 1.5, paddingLeft: '16px',
+                    }}>• {fx}</div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* ─── Sprint 14.3: admin run log (toggle) ──────────────────────── */}
         {/* Live mirror of everything the page logs — pipeline stages, fetch

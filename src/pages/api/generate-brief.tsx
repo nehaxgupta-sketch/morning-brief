@@ -2574,6 +2574,13 @@ ${JSON.stringify(rawStoriesForWriter(raw))}`;
 
 async function writeDailyEdition(raw: RawStories): Promise<BriefDaily> {
   const today = getISTDate();
+  // Sprint 19 — gpt-4o ignores the general "include EVERY story" instruction on
+  // large inputs and collapses sections to ~1 story each. Give it an EXPLICIT
+  // per-section count it must hit (models follow concrete numeric targets far
+  // more reliably than prose). Computed from the raw subset handed to the writer.
+  const reqCounts = ['major_events', 'world', 'india', 'business', 'markets_news', 'politics', 'technology', 'climate_health', 'sport', 'culture']
+    .map((k) => `${k}=${Array.isArray((raw as any)[k]) ? (raw as any)[k].length : 0}`)
+    .join(', ');
   const prompt = `You are writing THE DAILY — the 10-minute main edition of Morning Brief, a daily news digest for thoughtful Indian readers (urban, professional, 25-45). Today is ${today}.
 
 VOICE: calm, analytical, newspaper-like — the register of a serious Indian daily front page mixed with an Economist briefing. Declarative, sober sentences. Active voice. Plain English. Separate fact from interpretation. Where facts are developing, uncertain, or disputed, say so explicitly ("early reports", "officials have not yet confirmed", "analysts disagree"). No clickbait, no sensationalism, no conversational filler. Explain jargon simply when used.
@@ -2587,6 +2594,8 @@ FORMAT — each story has FIVE labelled fields:
 - analysis: 1-2 sentences. Concise interpretation, clearly marked as opinion. Acknowledge uncertainty where appropriate. Make a point rather than restating facts.
 
 SELECTION: Include EVERY story from the raw stories. Do not drop anything. Maintain the ordering from the raw stories within each section (raw is already impact-ordered). If raw stories has empty "sport" or "culture" arrays, output empty arrays for those keys — do NOT fabricate stories to fill them.
+
+REQUIRED OUTPUT COUNTS (NON-NEGOTIABLE): ${reqCounts}. Your output array for each section MUST contain EXACTLY that many story objects — one per raw story, in the same order. Writing fewer (e.g. collapsing a 5-story section down to 1) DROPS content the reader paid for and is a FAILURE. Do not summarize, merge, or "pick the best"; rewrite every single raw story into its own object. Before you finish, verify each section array's length equals the count above.
 
 POLITICS & MARKETS_NEWS (Sprint 14.2): raw stories may include "politics" and "markets_news" arrays — dedicated Indian-politics and market/finance article buckets. If present, output them as same-shape FullStory arrays under the "politics" and "markets_news" keys. If absent or empty, output empty arrays. Treat them like any other section: every field required, source_url verbatim, no fabrication.
 
@@ -4621,6 +4630,12 @@ Return ONLY a JSON object — no markdown, no commentary:
 async function fetchInterestTail(interest: string): Promise<TailStory[]> {
   const today = getISTDate();
   const interestKey = interest.toLowerCase().trim();
+  // Sprint 19 — with RSS tails on, only non-standard interests (those with a
+  // configured feed) need a tail; standard interests are served from the shared
+  // sections. Skip the rest entirely rather than calling callTailFetch twice
+  // (the first returns [], triggering the retry) and logging "no feed configured"
+  // for each attempt.
+  if (TAIL_RSS && !INTEREST_FEEDS[interestKey]) return [];
   const excludeUrls = await loadRecentUsedUrls('interest', interestKey);
 
   // Q4-C: 7-day window for interest tails. Allow features, analyses, and
