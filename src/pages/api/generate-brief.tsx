@@ -133,6 +133,9 @@ interface RawStory {
   topic_tags?: string[];
   // Day-of must-include flag:
   must_include?: boolean;
+  // Sprint 20 — newsworthiness 0-10, stamped by the RSS engine. Drives
+  // per-section selection in buildSubset (importance, not source tier).
+  nw?: number;
 }
 
 interface MarketIndex { name: string; change: string; }
@@ -2439,6 +2442,29 @@ function rankBySourceTier(arr: RawStory[]): RawStory[] {
     .map((d) => d.s);
 }
 
+// Sprint 20 — rank each section by NEWSWORTHINESS first (the nw score the RSS
+// engine now stamps on every story), then must_include, then source tier, then
+// the fetcher's order. This is the fix for "fluff led the section": a 50-year-
+// old evergreen (nw low) now sinks below a M6.9 earthquake (nw high) even if the
+// evergreen came from a higher-tier wire. Stories without a score (nw undefined,
+// e.g. the unscored tail, or when scoring was unavailable) sort as -1 and fall
+// back to the exact tier ordering above — so the change is fully fail-safe.
+// Gated by RANK_BY_NEWSWORTHINESS (default on).
+const RANK_BY_NW = (process.env.RANK_BY_NEWSWORTHINESS || 'on').toLowerCase() !== 'off';
+function rankByImportance(arr: RawStory[]): RawStory[] {
+  if (!Array.isArray(arr) || arr.length < 2) return Array.isArray(arr) ? arr : [];
+  if (!RANK_BY_NW) return rankBySourceTier(arr);
+  return arr
+    .map((s, i) => ({
+      s, i,
+      nw: typeof (s as any)?.nw === 'number' ? (s as any).nw : -1,
+      t: sourceTier((s as any)?.source_url),
+      m: (s as any)?.must_include ? 1 : 0,
+    }))
+    .sort((a, b) => (b.m - a.m) || (b.nw - a.nw) || (b.t - a.t) || (a.i - b.i))
+    .map((d) => d.s);
+}
+
 function buildSubset(raw: RawStories, cap: number): RawStories {
   // Per-section base quotas. Sum equals cap; topical sections always get >=1.
   const QUOTAS: Record<number, Record<string, number>> = {
@@ -2458,13 +2484,13 @@ function buildSubset(raw: RawStories, cap: number): RawStories {
   // Priority for slack redistribution (best-section-first).
   const PRIORITY = ['major_events', 'india', 'world', 'business', 'technology', 'climate_health', 'sport', 'culture'];
 
-  // Sprint 14.8 — rank each section by source tier ONCE so national agencies /
-  // papers of record (Times of India, PTI, The Hindu, Indian Express, HT, the
-  // global wires …) survive the quota ahead of regional/topical or weaker
-  // sources, instead of whatever order the fetcher returned. Used by both passes.
+  // Sprint 14.8 / 20 — rank each section by NEWSWORTHINESS first (Sprint 20),
+  // then must_include, then source tier (national agencies / papers of record),
+  // then the fetcher's order. Used by both passes. Falls back to pure tier order
+  // for any section whose stories have no nw score (fail-safe).
   const ranked: Record<string, RawStory[]> = {};
   for (const sec of PRIORITY) {
-    ranked[sec] = rankBySourceTier(((raw as any)[sec] || []) as RawStory[]);
+    ranked[sec] = rankByImportance(((raw as any)[sec] || []) as RawStory[]);
   }
 
   // First pass: take min(quota, available) per section.
@@ -2494,7 +2520,8 @@ function buildSubset(raw: RawStories, cap: number): RawStories {
     }
   }
 
-  console.log(`[subset:cap=${cap}] picked ${cap - slack} stories (slack=${slack}) — ` +
+  const nwScored = PRIORITY.reduce((n, sec) => n + (taken[sec] || []).filter((s: any) => typeof s?.nw === 'number').length, 0);
+  console.log(`[subset:cap=${cap}] picked ${cap - slack} stories (slack=${slack}, nw-ranked=${RANK_BY_NW}, nw-scored=${nwScored}/${cap - slack}) — ` +
     `major=${taken.major_events.length}, india=${taken.india.length}, world=${taken.world.length}, ` +
     `biz=${taken.business.length}, tech=${taken.technology.length}, climate=${taken.climate_health.length}, ` +
     `sport=${taken.sport.length}, culture=${taken.culture.length}`);

@@ -55,6 +55,11 @@ export interface RssStory {
   city_tags?: string[];
   topic_tags?: string[];
   must_include?: boolean;
+  // Sprint 20 — newsworthiness 0-10 (gpt-4o-mini). Stamped onto every story so
+  // downstream per-section selection (buildSubset) can rank by importance, not
+  // just source tier. Undefined for the unscored tail (selection then falls back
+  // to tier). A normal field, so it survives the `...rest` strip below.
+  nw?: number;
 }
 type Section =
   | 'major_events' | 'world' | 'india' | 'business'
@@ -331,42 +336,61 @@ async function scoreNewsworthiness(cands: PoolItem[]): Promise<Map<PoolItem, num
   const out = new Map<PoolItem, number>();
   const key = process.env.OPENAI_API_KEY;
   if (!key || cands.length === 0) return out;
-  const list = cands.slice(0, 30);
-  const numbered = list.map((s, i) => `${i}: ${(s.headline || '').slice(0, 160)}`).join('\n');
-  const prompt = `You are a senior wire editor for a serious daily news brief for Indian professionals (urban, 25-45). Rate each headline 0-10 for NEWSWORTHINESS — the genuine consequence a thoughtful reader needs to know — NOT how much coverage it got.
+  // Sprint 20 — score in batches so we can rate the top of EVERY section (not
+  // just the ~30 front-page contenders) and still bound cost/latency. MAX is a
+  // hard ceiling (the candidate list is pre-sorted with the most important items
+  // first, so a cap never starves the front page); BATCH is headlines per call.
+  // Defaults: 120 candidates / 40 per call = at most 3 gpt-4o-mini calls.
+  const MAX = Math.max(1, parseInt(process.env.NW_SCORE_MAX || '120', 10));
+  const BATCH = Math.max(1, parseInt(process.env.NW_SCORE_BATCH || '40', 10));
+  const all = cands.slice(0, MAX);
+  const model = process.env.NEWSWORTHINESS_MODEL || 'gpt-4o-mini';
+
+  const scoreBatch = async (list: PoolItem[]): Promise<void> => {
+    if (list.length === 0) return;
+    const numbered = list.map((s, i) => `${i}: ${(s.headline || '').slice(0, 160)}`).join('\n');
+    const prompt = `You are a senior wire editor for a serious daily news brief for Indian professionals (urban, 25-45). Rate each headline 0-10 for NEWSWORTHINESS — the genuine consequence a thoughtful reader needs to know — NOT how much coverage it got.
 HIGH (7-10): major geopolitics, war, defence, significant government policy or economy, central-bank or market-moving decisions, large-scale disasters, consequential India national developments, major science/technology shifts.
 MID (4-6): notable but second-order business, technology or world news.
 LOW (0-3): sensational crime (abductions, ransom notes, murders), celebrity news or deaths, "who is X" personality explainers, viral, lifestyle or listicle content, routine sport.
 Return ONLY a JSON array, one object per headline: [{"i":0,"score":7}, ...]. No prose, no code fences.
 Headlines:
 ${numbered}`;
-  try {
-    const res = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-      body: JSON.stringify({
-        model: process.env.NEWSWORTHINESS_MODEL || 'gpt-4o-mini',
-        temperature: 0,
-        messages: [{ role: 'user', content: prompt }],
-      }),
-    });
-    if (!res.ok) { console.warn(`[newsworthiness] HTTP ${res.status} — falling back to corroboration ranking.`); return out; }
-    const j: any = await res.json();
-    const txt: string = j?.choices?.[0]?.message?.content || '';
-    const m = txt.match(/\[[\s\S]*\]/);
-    if (!m) { console.warn('[newsworthiness] no JSON array in response — falling back to corroboration.'); return out; }
-    const arr: any[] = JSON.parse(m[0]);
-    for (const o of arr) {
-      const idx = parseInt(o?.i, 10);
-      const sc = Number(o?.score);
-      if (Number.isInteger(idx) && idx >= 0 && idx < list.length && Number.isFinite(sc)) {
-        out.set(list[idx], Math.max(0, Math.min(10, sc)));
+    try {
+      const res = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+        body: JSON.stringify({
+          model,
+          temperature: 0,
+          messages: [{ role: 'user', content: prompt }],
+        }),
+      });
+      if (!res.ok) { console.warn(`[newsworthiness] HTTP ${res.status} on a batch of ${list.length} — those stay unscored (tier fallback).`); return; }
+      const j: any = await res.json();
+      const txt: string = j?.choices?.[0]?.message?.content || '';
+      const m = txt.match(/\[[\s\S]*\]/);
+      if (!m) { console.warn('[newsworthiness] no JSON array in a batch — those stay unscored.'); return; }
+      const arr: any[] = JSON.parse(m[0]);
+      for (const o of arr) {
+        const idx = parseInt(o?.i, 10);
+        const sc = Number(o?.score);
+        if (Number.isInteger(idx) && idx >= 0 && idx < list.length && Number.isFinite(sc)) {
+          out.set(list[idx], Math.max(0, Math.min(10, sc)));
+        }
       }
+    } catch (e: any) {
+      console.warn(`[newsworthiness] non-fatal batch error: ${e?.message || e} — those stay unscored.`);
     }
-    console.log(`[newsworthiness] scored ${out.size}/${list.length} contenders via ${process.env.NEWSWORTHINESS_MODEL || 'gpt-4o-mini'}.`);
-  } catch (e: any) {
-    console.warn(`[newsworthiness] non-fatal error: ${e?.message || e} — falling back to corroboration.`);
+  };
+
+  // Sequential batches (avoid a rate spike; 3 calls is well within the fetch
+  // stage's own budget). A failed batch is non-fatal — its stories simply keep
+  // an undefined score and fall back to source-tier ordering downstream.
+  for (let i = 0; i < all.length; i += BATCH) {
+    await scoreBatch(all.slice(i, i + BATCH));
   }
+  console.log(`[newsworthiness] scored ${out.size}/${all.length} candidates via ${model}${all.length < cands.length ? ` (capped from ${cands.length})` : ''}.`);
   return out;
 }
 
@@ -810,7 +834,37 @@ export async function fetchStrategy_Rss(_universe?: any): Promise<RssPool> {
     }
     distinctContenders.push(s);
   }
-  const nwScores = await scoreNewsworthiness(distinctContenders.slice(0, 30));
+  // Sprint 20 — score not just the front-page contenders but the top of EVERY
+  // section, so the per-section selection downstream (buildSubset in
+  // generate-brief) can rank by importance instead of source tier. Previously
+  // only these ~30 front-page items were scored, so the topical sections were
+  // ordered by tier/recency — which let a 50-year-old evergreen lead World over
+  // a M6.9 earthquake. Front-page contenders go FIRST in the list so the MAX cap
+  // never starves the lead. Gated; NW_SECTION_SCORING=off restores the prior
+  // front-page-only behaviour exactly.
+  const SECTION_SCORING = (process.env.NW_SECTION_SCORING || 'on').toLowerCase() !== 'off';
+  const SECTION_TOPK = Math.max(1, parseInt(process.env.NW_SECTION_TOPK || '12', 10));
+  const scoreCands: PoolItem[] = [...distinctContenders];
+  if (SECTION_SCORING) {
+    const seenEvt = new Set<number>(seenContenderEvents);
+    const seenObj = new Set<PoolItem>(distinctContenders);
+    let added = 0;
+    for (const sec of SECTIONS) {
+      for (const s of (pool[sec] as PoolItem[]).slice(0, SECTION_TOPK)) {
+        if (s._eventId != null) {
+          if (seenEvt.has(s._eventId)) continue;
+          seenEvt.add(s._eventId);
+        } else if (seenObj.has(s)) {
+          continue;
+        }
+        seenObj.add(s);
+        scoreCands.push(s);
+        added++;
+      }
+    }
+    console.log(`[newsworthiness] section scoring on — front-page ${distinctContenders.length} + ${added} section candidates (top ${SECTION_TOPK}/section).`);
+  }
+  const nwScores = await scoreNewsworthiness(SECTION_SCORING ? scoreCands : distinctContenders.slice(0, 30));
   const nwAvailable = nwScores.size > 0;
   // Resolve newsworthiness by CLUSTER ID, so whichever member of a scored event
   // becomes the displayed lead inherits its event's score (only the cluster
@@ -884,6 +938,18 @@ export async function fetchStrategy_Rss(_universe?: any): Promise<RssPool> {
     `[fetch] RSS front page (lead ${lead.length}, sport-flagged ${sportLeadN}, SPORT_LEAD_WEIGHT=${SPORT_LEAD_WEIGHT}):\n` +
     lead.map((s, i) => `  ${i + 1}. nw=${nwOf(s) ?? '-'} corr=${s._eventCorr || s._corr || 1}${(s._eventCorr || 1) > (s._corr || 1) ? `(src${s._corr || 1})` : ''}${s._isSport ? `→${effCorr(s).toFixed(1)} [sport]` : ''} · ${(s.headline || '').slice(0, 80)}`).join('\n'),
   );
+
+  // Sprint 20 — stamp the resolved newsworthiness onto every story so the
+  // downstream per-section selection (buildSubset) can rank by importance.
+  // Cluster members inherit their event's score via nwOf(); the unscored tail
+  // is left undefined (selection falls back to source tier for those — the prior
+  // behaviour). `nw` is a normal field, so it survives the `...rest` strip below.
+  for (const sec of SECTIONS) {
+    for (const s of (pool[sec] as PoolItem[])) {
+      const v = nwOf(s);
+      if (v != null) (s as any).nw = v;
+    }
+  }
 
   // Strip internal fields -> clean RssStory.
   for (const sec of SECTIONS) {
