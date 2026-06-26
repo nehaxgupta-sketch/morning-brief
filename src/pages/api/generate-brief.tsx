@@ -2158,8 +2158,18 @@ function isSameEvent(a: Set<string>, b: Set<string>): boolean {
   return shared >= 3 && shared / small >= 0.6;
 }
 
+// Sprint 20.2 — the front page over-provisions to 12 leads for RANKING, but the
+// writer takes only the top ~5 into major_events. Deduping india/world against
+// all 12 ORPHANED the leads ranked 6-12: genuinely big India stories (a fatal
+// building collapse, a passport-policy ruling, a new IB chief) were lifted onto
+// the front page, deduped out of India, then never written because they didn't
+// make the major top-5. Cap the dedup set to the written depth so those stories
+// stay in their home section and get written. Default 6 (top-5 written + 1
+// ordering buffer); MAJOR_DEDUP_DEPTH=12 restores the prior behaviour. The
+// post-write cross-section dedup remains the backstop against any rare overlap.
+const MAJOR_DEDUP_DEPTH = Math.max(1, parseInt(process.env.MAJOR_DEDUP_DEPTH || '6', 10));
 function dropSemanticDuplicatesAgainstMajor(raw: any): { kept: any; droppedCount: number } {
-  const majorSets = (raw.major_events || []).map((s: any) => significantWords(s?.headline || ''));
+  const majorSets = (raw.major_events || []).slice(0, MAJOR_DEDUP_DEPTH).map((s: any) => significantWords(s?.headline || ''));
   if (majorSets.length === 0) return { kept: raw, droppedCount: 0 };
 
   let droppedCount = 0;
@@ -2191,7 +2201,7 @@ function enforceQualityRules(raw: any): RawStories {
   const { kept: rawAfterSemanticDedup, droppedCount: semanticDropped } =
     dropSemanticDuplicatesAgainstMajor(raw);
   if (semanticDropped > 0) {
-    console.log(`[enforce] Semantic dedup dropped ${semanticDropped} world/india stories overlapping major_events.`);
+    console.log(`[enforce] Semantic dedup dropped ${semanticDropped} world/india stories overlapping the top ${MAJOR_DEDUP_DEPTH} major_events leads.`);
   }
   raw = rawAfterSemanticDedup;
 

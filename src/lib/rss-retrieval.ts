@@ -350,9 +350,10 @@ async function scoreNewsworthiness(cands: PoolItem[]): Promise<Map<PoolItem, num
     if (list.length === 0) return;
     const numbered = list.map((s, i) => `${i}: ${(s.headline || '').slice(0, 160)}`).join('\n');
     const prompt = `You are a senior wire editor for a serious daily news brief for Indian professionals (urban, 25-45). Rate each headline 0-10 for NEWSWORTHINESS — the genuine consequence a thoughtful reader needs to know — NOT how much coverage it got.
-HIGH (7-10): major geopolitics, war, defence, significant government policy or economy, central-bank or market-moving decisions, large-scale disasters, consequential India national developments, major science/technology shifts.
-MID (4-6): notable but second-order business, technology or world news.
-LOW (0-3): sensational crime (abductions, ransom notes, murders), celebrity news or deaths, "who is X" personality explainers, viral, lifestyle or listicle content, routine sport.
+HIGH (7-10): major geopolitics, war, defence, significant government policy or legislation, landmark or precedent-setting court and regulatory rulings, central-bank or market-moving decisions, large-scale disasters, consequential India national developments, major science/technology shifts.
+MID (4-6): notable but second-order business, technology, world or legal news.
+LOW (0-3): sensational INDIVIDUAL crime (a single murder, abduction, or assault with no policy, precedent, or national consequence), celebrity news or deaths, "who is X" personality explainers, viral, lifestyle or listicle content, routine sport.
+A court case, ruling, or crime story that sets legal precedent, involves the state or public policy, or carries broad national consequence is NOT "sensational crime" — rate it on its actual consequence, not on the fact that it is legal or criminal in nature.
 Return ONLY a JSON array, one object per headline: [{"i":0,"score":7}, ...]. No prose, no code fences.
 Headlines:
 ${numbered}`;
