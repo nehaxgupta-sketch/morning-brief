@@ -3995,7 +3995,12 @@ async function fetchGroundTruthHeadlines(today: string): Promise<GroundTruth | n
 Return ONLY JSON: {"india":["headline", ...], "world":["headline", ...]}.
 - "india": the 8-10 biggest India stories today (politics, policy, economy, courts, RBI/markets, major civic or state events, big-city civic news).
 - "world": the 6-8 biggest non-India stories today (geopolitics, conflicts, foreign policy, major institutions).
-Each headline is a short, specific, factual title naming the concrete development that happened today — not a topic or a standing trend. No commentary, no markdown.`;
+CRITICAL — each headline MUST be specific and matchable:
+- Name the concrete actor and event that actually happened today: the person, body, company, court, place, scheme, bill, or number involved (e.g. "RBI holds repo rate at 5.5%", "Supreme Court strikes down X", "ED raids Y in Z case").
+- Each headline MUST contain at least one proper noun (a named person, organisation, place, or scheme) or a named institution/acronym (RBI, SEBI, SC, NCERT, ISRO…).
+- Do NOT return generic or templated phrasings such as "the government announces new measures", "agencies launch coordinated raids in multiple states", "a major power outage hits a large metropolitan area", "a panel submits a report", or "a court hears petitions". If you cannot name the specific actor and event, OMIT the item rather than padding the list to a count.
+- Each must be a real, concrete development from today — not a standing topic or trend.
+No commentary, no markdown.`;
   try {
     const text = await callPerplexity(prompt, 60_000);
     const parsed = extractJsonObject(text);
@@ -4030,18 +4035,51 @@ function collectBriefHeadlines(content: any): string[] {
 }
 
 // A reference headline is "covered" if it shares >=2 significant words with any
-// rendered headline. Returns the reference headlines the brief MISSED.
+// rendered headline, OR (Sprint 20.3) shares a distinctive ANCHOR — an acronym
+// (RBI, SEBI, NCERT, ISRO…) or salient number — with one. The word-overlap test
+// alone was too strict for cross-source headlines: "RBI keeps repo rate steady"
+// and "RBI holds policy meetings" share only {rbi} and were wrongly scored as a
+// miss, pinning coverage at 0 even when the brief covered the beat heavily.
 const COVERAGE_MATCH_THRESHOLD = 2;
+const COVERAGE_ANCHOR_MATCH = (process.env.COVERAGE_ANCHOR_MATCH || 'on').toLowerCase() !== 'off';
+
+// Distinctive tokens that strongly identify a specific story: 3-5 letter
+// uppercase acronyms and multi-digit numbers (tolls, ₹ amounts, percentages),
+// excluding bare years and a few non-distinctive words. 2-letter acronyms are
+// left out as too ambiguous (AI, SC, ED) — those still match via word overlap.
+const ANCHOR_STOP = new Set(['THE', 'AND', 'FOR', 'NEW', 'GOVT', 'WWW']);
+function anchorTokens(headline: string): Set<string> {
+  const out = new Set<string>();
+  if (!headline || typeof headline !== 'string') return out;
+  for (const a of headline.match(/\b[A-Z]{3,5}\b/g) || []) {
+    if (!ANCHOR_STOP.has(a)) out.add('@' + a.toLowerCase());
+  }
+  for (const n of headline.match(/\d{2,}/g) || []) {
+    if (!/^(19|20)\d{2}$/.test(n)) out.add('#' + n);
+  }
+  return out;
+}
 
 function missedReferenceHeadlines(content: any, gt: GroundTruth | null): string[] {
   if (!gt) return [];
-  const briefSets = collectBriefHeadlines(content).map(significantWords);
+  const briefHeads = collectBriefHeadlines(content);
+  const briefSets = briefHeads.map(significantWords);
+  const briefAnchors = COVERAGE_ANCHOR_MATCH ? briefHeads.map(anchorTokens) : [];
   const refs = [...gt.india, ...gt.world];
   const missed: string[] = [];
   for (const ref of refs) {
     const refSet = significantWords(ref);
     if (refSet.size === 0) continue;
-    const covered = briefSets.some((b) => semanticOverlap(refSet, b) >= COVERAGE_MATCH_THRESHOLD);
+    let covered = briefSets.some((b) => semanticOverlap(refSet, b) >= COVERAGE_MATCH_THRESHOLD);
+    if (!covered && COVERAGE_ANCHOR_MATCH) {
+      const refAnchors = anchorTokens(ref);
+      if (refAnchors.size > 0) {
+        covered = briefAnchors.some((ba) => {
+          for (const t of Array.from(refAnchors)) if (ba.has(t)) return true;
+          return false;
+        });
+      }
+    }
     if (!covered) missed.push(ref);
   }
   return missed;
