@@ -3979,44 +3979,215 @@ function emptySectionCount(edition: Edition, content: any): number {
 // (16-Jun run). Coverage's only real penalty was the empty-section check, which
 // fires on a STRUCTURALLY empty section, never on one full of filler.
 //
-// Fix: fetch an INDEPENDENT reference list of the day's real top India + world
-// headlines (one cheap Perplexity call, recency=day), then (a) hand it to the
-// LLM scorer as a coverage reference, and (b) apply a DETERMINISTIC coverage
-// penalty for reference headlines the brief omits — so a real miss always moves
-// the score. Gated by SCORE_GROUNDTRUTH ('off' skips the call and the penalty).
+// ─── Sprint 20 Drop 4 — HYBRID, FAIL-LOUD GROUND TRUTH ──────────────────────
+//
+// The original design fetched the reference with ONE Perplexity call. On the
+// 2026-06-26 run that call returned `{"india":[],"world":[]}` (24 chars, 9
+// output tokens): sonar-pro complied with the JSON contract but returned EMPTY
+// arrays, because the prompt's hard "MUST contain a proper noun / OMIT rather
+// than pad" rules taught it to return nothing on a marginal day. fetch then
+// returned null and the grader scored coverage ANYWAY — handing out dim_coverage
+// 8/9/9 with no penalty. The gauge had flipped from false-0 (Sprint 20 open) to
+// false-healthy. Both are lies.
+//
+// Drop 4 makes the gauge trustworthy in three layers:
+//   1. PRIMARY  — Perplexity, hardened: a prompt that PREFERS (not forces)
+//                 specific headlines and is told never to return an empty list;
+//                 a usable-count check on PARSED headlines (not just non-empty);
+//                 and one retry with a simpler prompt on a thin response.
+//   2. FALLBACK — an independent top-headlines news API (vendor-agnostic:
+//                 GNews / NewsData / NewsAPI, selected by two env vars). Truly
+//                 independent of both the RSS pool and Perplexity, and named by
+//                 nature. Fail-safe: unset or erroring ⇒ skipped, never throws.
+//   3. BACKSTOP — fail LOUD. If both layers come back empty the orchestrator
+//                 returns null and the grader WITHHOLDS coverage (see
+//                 scoreBriefWithLLM) instead of inventing a number. The silent 8
+//                 can never ship again.
+//
+// Gated by SCORE_GROUNDTRUTH ('off' skips the whole thing and the penalty).
 
 const SCORE_GROUNDTRUTH = (process.env.SCORE_GROUNDTRUTH || 'on').toLowerCase() !== 'off';
 
-type GroundTruth = { india: string[]; world: string[] };
+// Minimum parsed headlines (India + world) for a reference to count as "usable".
+// A response thinner than this triggers the Perplexity retry, then the fallback.
+const GROUNDTRUTH_MIN_HEADLINES = Math.max(
+  2,
+  parseInt(process.env.GROUNDTRUTH_MIN_HEADLINES || '4', 10) || 4,
+);
 
-async function fetchGroundTruthHeadlines(today: string): Promise<GroundTruth | null> {
-  if (!SCORE_GROUNDTRUTH) return null;
-  const prompt = `List the most important real news headlines for ${today} (IST). This is a neutral reference set for auditing a news brief's completeness.
+// Independent fallback source. BOTH must be set to enable it; otherwise the
+// fallback layer is cleanly skipped (Perplexity → fail-loud). The provider name
+// picks the adapter; the API key is the only other thing to set. One var to swap.
+const GROUNDTRUTH_NEWS_PROVIDER = (process.env.GROUNDTRUTH_NEWS_PROVIDER || '').trim().toLowerCase();
+const GROUNDTRUTH_NEWS_API_KEY = (process.env.GROUNDTRUTH_NEWS_API_KEY || '').trim();
+
+type GroundTruth = { india: string[]; world: string[]; source?: string };
+
+// Normalise a raw list of header-ish values into clean, deduped headline strings.
+function cleanHeadlineList(a: any): string[] {
+  if (!Array.isArray(a)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const x of a) {
+    const h = String(x || '').replace(/\s+/g, ' ').trim();
+    if (!h) continue;
+    const key = h.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(h);
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
+// ── Layer 1: Perplexity (hardened) ──────────────────────────────────────────
+function buildGroundTruthPrompt(today: string, simple: boolean): string {
+  if (simple) {
+    return `Return ONLY JSON: {"india":["headline", ...], "world":["headline", ...]}.
+List the 8 biggest India news headlines and the 6 biggest world (non-India) news headlines for ${today} (IST).
+Use real developments from today. Plain factual headlines. No commentary, no markdown, and never return empty arrays.`;
+  }
+  return `List the most important real news headlines for ${today} (IST). This is a neutral reference set used to audit a news brief's completeness.
 Return ONLY JSON: {"india":["headline", ...], "world":["headline", ...]}.
-- "india": the 8-10 biggest India stories today (politics, policy, economy, courts, RBI/markets, major civic or state events, big-city civic news).
+- "india": the 8-10 biggest India stories today (politics, policy, economy, courts, RBI/markets, major civic or state events).
 - "world": the 6-8 biggest non-India stories today (geopolitics, conflicts, foreign policy, major institutions).
-CRITICAL — each headline MUST be specific and matchable:
-- Name the concrete actor and event that actually happened today: the person, body, company, court, place, scheme, bill, or number involved (e.g. "RBI holds repo rate at 5.5%", "Supreme Court strikes down X", "ED raids Y in Z case").
-- Each headline MUST contain at least one proper noun (a named person, organisation, place, or scheme) or a named institution/acronym (RBI, SEBI, SC, NCERT, ISRO…).
-- Do NOT return generic or templated phrasings such as "the government announces new measures", "agencies launch coordinated raids in multiple states", "a major power outage hits a large metropolitan area", "a panel submits a report", or "a court hears petitions". If you cannot name the specific actor and event, OMIT the item rather than padding the list to a count.
-- Each must be a real, concrete development from today — not a standing topic or trend.
+Write each headline so it is specific and matchable:
+- Prefer headlines that name the concrete actor and event — the person, body, company, court, place, scheme, bill, or number (e.g. "RBI holds repo rate at 5.5%", "Supreme Court strikes down X", "ED raids Y in Z case").
+- Prefer a named proper noun or institution/acronym (RBI, SEBI, SC, NCERT, ISRO…) where you can, and avoid vague filler like "the government announces new measures" or "a court hears petitions".
+- Each must be a real development from today, not a standing trend.
+IMPORTANT: always return the day's biggest real stories — never return empty arrays, and aim for at least 5 India and 4 world headlines if any news exists today. If you are unsure of a specific detail, still include the story with the best concrete phrasing you can rather than dropping it.
 No commentary, no markdown.`;
-  try {
-    const text = await callPerplexity(prompt, 60_000);
-    const parsed = extractJsonObject(text);
-    const clean = (a: any): string[] =>
-      Array.isArray(a) ? a.map((x: any) => String(x || '').trim()).filter(Boolean).slice(0, 12) : [];
-    const gt: GroundTruth = { india: clean(parsed?.india), world: clean(parsed?.world) };
-    if (gt.india.length === 0 && gt.world.length === 0) {
-      console.warn('[score:groundtruth] reference fetch returned nothing usable — scoring without it.');
+}
+
+async function fetchGroundTruthFromPerplexity(today: string): Promise<GroundTruth | null> {
+  const attempt = async (simple: boolean): Promise<GroundTruth | null> => {
+    try {
+      const text = await callPerplexity(buildGroundTruthPrompt(today, simple), 60_000);
+      const parsed = extractJsonObject(text);
+      return {
+        india: cleanHeadlineList(parsed?.india),
+        world: cleanHeadlineList(parsed?.world),
+        source: 'perplexity',
+      };
+    } catch (e: any) {
+      console.warn(`[score:groundtruth:perplexity] call failed (${simple ? 'retry' : 'primary'}): ${e?.message || e}`);
       return null;
     }
-    console.log(`[score:groundtruth] reference: ${gt.india.length} India + ${gt.world.length} world headlines.`);
-    return gt;
-  } catch (e: any) {
-    console.warn(`[score:groundtruth] fetch failed (non-fatal): ${e?.message || e}`);
+  };
+
+  let gt = await attempt(false);
+  let count = gt ? gt.india.length + gt.world.length : 0;
+  if (count < GROUNDTRUTH_MIN_HEADLINES) {
+    console.warn(`[score:groundtruth:perplexity] thin response (${count} headline(s) < ${GROUNDTRUTH_MIN_HEADLINES}) — retrying with a simpler prompt.`);
+    const retry = await attempt(true);
+    const retryCount = retry ? retry.india.length + retry.world.length : 0;
+    if (retryCount > count) { gt = retry; count = retryCount; }
+  }
+  if (!gt || count < GROUNDTRUTH_MIN_HEADLINES) {
+    console.warn(`[score:groundtruth:perplexity] still unusable (${count} headline(s)) — handing off to the news-API fallback.`);
     return null;
   }
+  console.log(`[score:groundtruth:perplexity] reference: ${gt.india.length} India + ${gt.world.length} world headlines.`);
+  return gt;
+}
+
+// ── Layer 2: independent news API (vendor-agnostic) ─────────────────────────
+async function fetchJsonWithTimeout(url: string, timeoutMs: number, headers?: Record<string, string>): Promise<any> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { headers: headers || {}, signal: controller.signal });
+    if (res.status !== 200) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`status ${res.status}: ${body.slice(0, 200)}`);
+    }
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Each adapter returns two endpoint calls (India + world) and a picker mapping
+// the provider's JSON to a list of headline strings. To add a provider, add one
+// entry here — nothing else in the grader changes.
+type NewsApiAdapter = {
+  india: (key: string) => { url: string; headers?: Record<string, string> };
+  world: (key: string) => { url: string; headers?: Record<string, string> };
+  pick: (data: any) => any[];
+};
+
+const NEWS_API_ADAPTERS: Record<string, NewsApiAdapter> = {
+  // gnews.io — free tier allows server-side use. category=world for world feed.
+  gnews: {
+    india: (k) => ({ url: `https://gnews.io/api/v4/top-headlines?lang=en&country=in&category=general&max=10&apikey=${encodeURIComponent(k)}` }),
+    world: (k) => ({ url: `https://gnews.io/api/v4/top-headlines?lang=en&category=world&max=10&apikey=${encodeURIComponent(k)}` }),
+    pick: (d) => Array.isArray(d?.articles) ? d.articles.map((a: any) => a?.title) : [],
+  },
+  // newsdata.io — free tier allows server-side use.
+  newsdata: {
+    india: (k) => ({ url: `https://newsdata.io/api/1/latest?apikey=${encodeURIComponent(k)}&country=in&language=en&category=top` }),
+    world: (k) => ({ url: `https://newsdata.io/api/1/latest?apikey=${encodeURIComponent(k)}&language=en&category=world` }),
+    pick: (d) => Array.isArray(d?.results) ? d.results.map((a: any) => a?.title) : [],
+  },
+  // newsapi.org — NOTE: free tier is dev-only (blocks production hosts). Useful
+  // for local testing; expect 426/429 from Vercel on the free plan.
+  newsapi: {
+    india: (k) => ({ url: `https://newsapi.org/v2/top-headlines?country=in&pageSize=10`, headers: { 'X-Api-Key': k } }),
+    world: (k) => ({ url: `https://newsapi.org/v2/top-headlines?language=en&category=general&pageSize=10`, headers: { 'X-Api-Key': k } }),
+    pick: (d) => Array.isArray(d?.articles) ? d.articles.map((a: any) => a?.title) : [],
+  },
+};
+
+async function fetchGroundTruthFromNewsApi(_today: string): Promise<GroundTruth | null> {
+  if (!GROUNDTRUTH_NEWS_PROVIDER || !GROUNDTRUTH_NEWS_API_KEY) {
+    console.log('[score:groundtruth:newsapi] not configured (set GROUNDTRUTH_NEWS_PROVIDER + GROUNDTRUTH_NEWS_API_KEY) — skipping fallback.');
+    return null;
+  }
+  const adapter = NEWS_API_ADAPTERS[GROUNDTRUTH_NEWS_PROVIDER];
+  if (!adapter) {
+    console.warn(`[score:groundtruth:newsapi] unknown provider "${GROUNDTRUTH_NEWS_PROVIDER}" (known: ${Object.keys(NEWS_API_ADAPTERS).join(', ')}) — skipping fallback.`);
+    return null;
+  }
+  try {
+    const indiaReq = adapter.india(GROUNDTRUTH_NEWS_API_KEY);
+    const worldReq = adapter.world(GROUNDTRUTH_NEWS_API_KEY);
+    const [indiaData, worldData] = await Promise.all([
+      fetchJsonWithTimeout(indiaReq.url, 15_000, indiaReq.headers).catch((e) => { console.warn(`[score:groundtruth:newsapi] india fetch failed: ${e?.message || e}`); return null; }),
+      fetchJsonWithTimeout(worldReq.url, 15_000, worldReq.headers).catch((e) => { console.warn(`[score:groundtruth:newsapi] world fetch failed: ${e?.message || e}`); return null; }),
+    ]);
+    const gt: GroundTruth = {
+      india: cleanHeadlineList(indiaData ? adapter.pick(indiaData) : []).slice(0, 10),
+      world: cleanHeadlineList(worldData ? adapter.pick(worldData) : []).slice(0, 8),
+      source: `newsapi:${GROUNDTRUTH_NEWS_PROVIDER}`,
+    };
+    const count = gt.india.length + gt.world.length;
+    if (count < GROUNDTRUTH_MIN_HEADLINES) {
+      console.warn(`[score:groundtruth:newsapi] provider=${GROUNDTRUTH_NEWS_PROVIDER} returned only ${count} usable headline(s) — treating as no reference.`);
+      return null;
+    }
+    console.log(`[score:groundtruth:newsapi] provider=${GROUNDTRUTH_NEWS_PROVIDER} reference: ${gt.india.length} India + ${gt.world.length} world headlines.`);
+    return gt;
+  } catch (e: any) {
+    console.warn(`[score:groundtruth:newsapi] fallback failed (non-fatal): ${e?.message || e}`);
+    return null;
+  }
+}
+
+// ── Orchestrator: primary → fallback → fail-loud ────────────────────────────
+async function fetchGroundTruthHeadlines(today: string): Promise<GroundTruth | null> {
+  if (!SCORE_GROUNDTRUTH) return null;
+
+  const primary = await fetchGroundTruthFromPerplexity(today);
+  if (primary) return primary;
+
+  const fallback = await fetchGroundTruthFromNewsApi(today);
+  if (fallback) return fallback;
+
+  // Backstop: neither source produced a usable reference. Return null so the
+  // grader WITHHOLDS the coverage score instead of inventing one (see
+  // scoreBriefWithLLM). This is the loud failure that replaces the silent 8.
+  console.error('[score:groundtruth] NO usable reference from Perplexity OR the news-API fallback — coverage will be WITHHELD (unverified) this run, not scored. Check PERPLEXITY_API_KEY / GROUNDTRUTH_NEWS_PROVIDER + GROUNDTRUTH_NEWS_API_KEY.');
+  return null;
 }
 
 // Collect every headline the brief actually rendered (across all story sections).
@@ -4042,6 +4213,19 @@ function collectBriefHeadlines(content: any): string[] {
 // miss, pinning coverage at 0 even when the brief covered the beat heavily.
 const COVERAGE_MATCH_THRESHOLD = 2;
 const COVERAGE_ANCHOR_MATCH = (process.env.COVERAGE_ANCHOR_MATCH || 'on').toLowerCase() !== 'off';
+
+// Sprint 20 Drop 4 — what dim_coverage becomes when there is NO ground-truth
+// reference at all (Perplexity + news-API fallback both unavailable). Default
+// `null` = withheld/unverified, which is the honest reading and what surfaces in
+// the snapshot. If your `brief_scores.dim_coverage` column is NOT NULL, set
+// COVERAGE_UNVERIFIED_VALUE to a number (e.g. 0) so the upsert still writes; the
+// loud "⚠ COVERAGE UNVERIFIED" note is stamped either way.
+const COVERAGE_UNVERIFIED_VALUE: number | null = (() => {
+  const raw = (process.env.COVERAGE_UNVERIFIED_VALUE || 'null').trim().toLowerCase();
+  if (raw === 'null' || raw === '') return null;
+  const n = parseInt(raw, 10);
+  return isNaN(n) ? null : Math.max(0, Math.min(10, n));
+})();
 
 // Distinctive tokens that strongly identify a specific story: 3-5 letter
 // uppercase acronyms and multi-digit numbers (tolls, ₹ amounts, percentages),
@@ -4090,7 +4274,7 @@ async function scoreBriefWithLLM(
   content: any,
   groundTruth?: GroundTruth | null,
 ): Promise<{
-  dim_coverage: number;
+  dim_coverage: number | null;
   dim_field_completeness: number;
   dim_india_anchor: number;
   dim_source_quality: number;
@@ -4187,8 +4371,25 @@ OUTPUT — return ONLY this JSON, no preamble, no markdown:
   const missCount = missedRefs.length;
   const missPenalty = Math.min(6, Math.round(missCount * 1.5));
 
-  const dim_coverage           = Math.max(0, dim_coverage_raw - penalty - missPenalty);
   const dim_field_completeness = Math.max(0, dim_field_raw - penalty);
+
+  // Sprint 20 Drop 4 — fail LOUD when there is no reference at all. If neither
+  // Perplexity nor the news-API fallback returned a usable ground truth then
+  // `groundTruth` is null and coverage was NEVER checked against the day's real
+  // headlines. We do NOT pass the LLM's coverage number through (that was the
+  // silent-8 bug) — we WITHHOLD it (null by default; COVERAGE_UNVERIFIED_VALUE
+  // can override) and stamp the note so the snapshot shows the gap honestly.
+  const coverageVerified = !!groundTruth;
+  let dim_coverage: number | null;
+  let unverifiedNote = '';
+  if (coverageVerified) {
+    dim_coverage = Math.max(0, dim_coverage_raw - penalty - missPenalty);
+  } else {
+    dim_coverage = COVERAGE_UNVERIFIED_VALUE;
+    unverifiedNote = `⚠ COVERAGE UNVERIFIED — no ground-truth reference was available this run (Perplexity + news-API fallback both unavailable), so coverage was NOT scored against the day's real headlines; treat this edition's coverage as unknown until the reference source is fixed.`;
+    console.error(`[score:${edition}] ⚠ COVERAGE UNVERIFIED — no ground-truth reference; dim_coverage withheld (${dim_coverage === null ? 'null' : dim_coverage}). This is the loud-fail path, not a real coverage reading.`);
+  }
+
   if (emptySections > 0) {
     console.warn(`[score:${edition}] ${emptySections} empty section(s) → -${penalty} on coverage and field_completeness.`);
   }
@@ -4197,7 +4398,8 @@ OUTPUT — return ONLY this JSON, no preamble, no markdown:
   }
 
   const total =
-    dim_coverage + dim_field_completeness + dim_india_anchor +
+    (typeof dim_coverage === 'number' ? dim_coverage : 0) +
+    dim_field_completeness + dim_india_anchor +
     dim_source_quality + dim_editorial_sharpness + dim_currentness + dim_relevance;
 
   return {
@@ -4209,7 +4411,8 @@ OUTPUT — return ONLY this JSON, no preamble, no markdown:
     dim_currentness,
     dim_relevance,
     total,
-    notes: (typeof parsed?.notes === 'string' ? parsed.notes.slice(0, 800) : '')
+    notes: (unverifiedNote ? unverifiedNote + ' ' : '')
+      + (typeof parsed?.notes === 'string' ? parsed.notes.slice(0, 800) : '')
       + (emptySections > 0 ? ` [auto-penalty: ${emptySections} empty section(s), -${penalty} on coverage & field completeness]` : '')
       + (missPenalty > 0 ? ` [coverage-gap: missed ${missCount} of the day's top headlines, -${missPenalty} on coverage]` : ''),
   };
