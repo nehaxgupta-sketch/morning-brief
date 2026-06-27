@@ -2341,6 +2341,17 @@ function enforceQualityRules(raw: any): RawStories {
     return out;
   }
 
+  // Sprint 20 Drop #5 — order the SPORT section by home-audience priority BEFORE
+  // the publisher cap, so India's own results (cricket) aren't capped out by a
+  // flooding foreign event (FIFA). Scoped to sport (that's where the flood is);
+  // stable, so only India-cricket stories move and everything else keeps order.
+  if (HOME_AUDIENCE_BOOST && Array.isArray((cleaned as any).sport) && (cleaned as any).sport.length > 1) {
+    (cleaned as any).sport = ((cleaned as any).sport as any[])
+      .map((s, i) => ({ s, i, hb: homeAudienceBonus(s), m: (s as any)?.must_include ? 1 : 0 }))
+      .sort((x, y) => (y.m - x.m) || (y.hb - x.hb) || (x.i - y.i))
+      .map((d) => d.s);
+  }
+
   // Cap each section independently — no cross-section coupling.
   for (const sec of priority) {
     (cleaned as any)[sec] = applyPublisherCap((cleaned as any)[sec] || [], sec);
@@ -2461,6 +2472,30 @@ function rankBySourceTier(arr: RawStory[]): RawStory[] {
 // back to the exact tier ordering above — so the change is fully fail-safe.
 // Gated by RANK_BY_NEWSWORTHINESS (default on).
 const RANK_BY_NW = (process.env.RANK_BY_NEWSWORTHINESS || 'on').toLowerCase() !== 'off';
+
+// ─── Sprint 20 Drop #5 — home-audience priority for sport ───────────────────
+// The FIFA World Cup floods every sport feed; the per-publisher section cap then
+// keeps each masthead's first 4 (all FIFA football), capping out India's OWN
+// cricket results before they can be selected. On the 2026-06-26 run "India beat
+// Bangladesh in the T20 World Cup" was dropped 4× by the cap while a Turkey-US
+// dead rubber took the single sport slot. This deterministic bonus lifts India
+// national-team results in marquee cricket events so they (a) survive the
+// publisher cap and (b) lead the sport slot in selection. It fires ~only on
+// India cricket (returns 0 otherwise), so it reshuffles sport without disturbing
+// any other section. Gated by HOME_AUDIENCE_BOOST (default on).
+const HOME_AUDIENCE_BOOST = (process.env.HOME_AUDIENCE_BOOST || 'on').toLowerCase() !== 'off';
+function homeAudienceBonus(story: any): number {
+  if (!HOME_AUDIENCE_BOOST) return 0;
+  const h = `${(story as any)?.headline || ''} ${(story as any)?.summary || (story as any)?.body || ''}`;
+  if (!/\b(india|indian|team india)\b/i.test(h)) return 0;
+  if (!/\b(cricket|t20i?|odi|test match|icc|bcci|world cup)\b/i.test(h)) return 0;
+  const result = /\b(beat|beats|won|win|wins|defeat|defeats|thrash\w*|advance\w*|qualif\w*|knockout|semi-?final|final|clinch\w*|seal\w*|chase\w*)\b/i.test(h);
+  let b = result ? 2 : 1;
+  if (/\b(world cup|icc|champions trophy)\b/i.test(h)) b += 1;       // marquee event
+  if (/\b(india a|under-?19|u-?19|ranji|domestic|maharaja trophy|tg20)\b/i.test(h)) b = Math.min(b, 1); // dampen minor cricket
+  return Math.min(3, b);
+}
+
 function rankByImportance(arr: RawStory[]): RawStory[] {
   if (!Array.isArray(arr) || arr.length < 2) return Array.isArray(arr) ? arr : [];
   if (!RANK_BY_NW) return rankBySourceTier(arr);
@@ -2468,10 +2503,11 @@ function rankByImportance(arr: RawStory[]): RawStory[] {
     .map((s, i) => ({
       s, i,
       nw: typeof (s as any)?.nw === 'number' ? (s as any).nw : -1,
+      hb: homeAudienceBonus(s),
       t: sourceTier((s as any)?.source_url),
       m: (s as any)?.must_include ? 1 : 0,
     }))
-    .sort((a, b) => (b.m - a.m) || (b.nw - a.nw) || (b.t - a.t) || (a.i - b.i))
+    .sort((a, b) => (b.m - a.m) || (b.hb - a.hb) || (b.nw - a.nw) || (b.t - a.t) || (a.i - b.i))
     .map((d) => d.s);
 }
 
@@ -2482,8 +2518,8 @@ function buildSubset(raw: RawStories, cap: number): RawStories {
       major_events: 4, india: 4, world: 3,
       business: 1, technology: 1, climate_health: 1, sport: 0, culture: 1,
     },
-    20: { // 10min — broader coverage for the full edition
-      major_events: 5, india: 5, world: 3,
+    20: { // 10min + (Drop #4) 5min — broader coverage; world floored at 4
+      major_events: 5, india: 4, world: 4,
       business: 2, technology: 2, climate_health: 1, sport: 1, culture: 1,
     },
   };
@@ -3625,11 +3661,13 @@ async function runWriterForEdition(
   : ed === '10min' ? writeDailyEdition
   :                  writeEditorialEdition;
 
-  // Per Sprint 9 spec: 5min capped at 15 stories, 10min capped at 20. Both
-  // are deterministic subsets of the raw pool, computed in code (not LLM) so
-  // 5min ⊆ 10min by construction. Deep gets the full raw pool unchanged.
+  // Per Sprint 9 spec: 5min capped at 15, 10min at 20. Sprint 20 Drop #4 raises
+  // the 5-min shared provisioning to 20 (flag FIVE_MIN_FILL, default on; 'off'
+  // restores 15) so the personalised 5-min edition can fill to its 20-story cap
+  // instead of shipping thin (~13/20). Both are deterministic code subsets.
+  const FIVE_MIN_FILL = (process.env.FIVE_MIN_FILL || 'on').toLowerCase() !== 'off';
   const writerInput =
-    ed === '5min'  ? buildSubset(rawStories, 15)
+    ed === '5min'  ? buildSubset(rawStories, FIVE_MIN_FILL ? 20 : 15)
   : ed === '10min' ? buildSubset(rawStories, 20)
   :                  rawStories;
 
@@ -4055,7 +4093,7 @@ Write each headline so it is specific and matchable:
 - Prefer headlines that name the concrete actor and event — the person, body, company, court, place, scheme, bill, or number (e.g. "RBI holds repo rate at 5.5%", "Supreme Court strikes down X", "ED raids Y in Z case").
 - Prefer a named proper noun or institution/acronym (RBI, SEBI, SC, NCERT, ISRO…) where you can, and avoid vague filler like "the government announces new measures" or "a court hears petitions".
 - Each must be a real development from today, not a standing trend.
-IMPORTANT: always return the day's biggest real stories — never return empty arrays, and aim for at least 5 India and 4 world headlines if any news exists today. If you are unsure of a specific detail, still include the story with the best concrete phrasing you can rather than dropping it.
+IMPORTANT: always return the day's biggest real stories — never return empty arrays, and aim for at least 5 India and 4 world headlines if any news exists today. If you cannot name the specific actor, body, place, scheme, or number behind an item, OMIT that one item (do not pad it with vague phrasing) — but still return all the other, specific headlines. Drop weak items, never the whole list.
 No commentary, no markdown.`;
 }
 
@@ -4244,12 +4282,54 @@ function anchorTokens(headline: string): Set<string> {
   return out;
 }
 
+// ─── Sprint 20 Drop 4.1 — make coverage honest, not binary ──────────────────
+// Drop 4 fixed the *supply* of a reference. Drop 4.1 fixes two things the
+// 2026-06-26 18:08 run exposed once the reference was flowing:
+//   (a) NOISY REFERENCE — a loose prompt let generic filler ("Centre announces
+//       nationwide rollout plan", "raids across 16 states") into the reference.
+//       Filler matches no specific brief headline, so it false-misses.
+//       `looksSpecific` drops the clearly-unmatchable filler before scoring
+//       (belt-and-suspenders behind the tightened prompt).
+//   (b) SATURATING PENALTY — the old penalty (−1.5/miss, capped −6) zeroed
+//       coverage at just 4 misses and scored 3-of-16 the same as 11-of-12. The
+//       new penalty scales with the MISS RATE so coverage degrades proportionally
+//       instead of cratering (see the penalty block in scoreBriefWithLLM).
+// Both gated by COVERAGE_V2 (default on; 'off' restores Drop-4 behaviour).
+const COVERAGE_V2 = (process.env.COVERAGE_V2 || 'on').toLowerCase() !== 'off';
+const COVERAGE_MISS_SCALE = parseInt(process.env.COVERAGE_MISS_SCALE || '8', 10) || 8;
+const COVERAGE_MISS_CAP = parseInt(process.env.COVERAGE_MISS_CAP || '7', 10) || 7;
+
+// A reference headline is "specific" (matchable) if it carries an anchor token
+// (acronym/number) OR names a proper noun beyond the first word. Pure templated
+// filler with neither ("centre announces nationwide rollout plan") is dropped so
+// it can't false-miss. Conservative — only drops the clearly unmatchable.
+function looksSpecific(headline: string): boolean {
+  if (!headline || typeof headline !== 'string') return false;
+  if (anchorTokens(headline).size > 0) return true;
+  const words = headline.trim().split(/\s+/);
+  let propers = 0;
+  for (let i = 1; i < words.length; i++) {
+    if (/^[A-Z][a-z'’]+/.test(words[i])) propers++;
+  }
+  return propers >= 1;
+}
+
+// The reference list actually used for scoring. Under COVERAGE_V2, drop filler;
+// if that would leave too little to be meaningful, keep the raw list (never
+// inflate coverage by emptying the reference).
+function effectiveRefs(gt: GroundTruth): string[] {
+  const all = [...(gt.india || []), ...(gt.world || [])];
+  if (!COVERAGE_V2) return all;
+  const specific = all.filter(looksSpecific);
+  return specific.length >= 2 ? specific : all;
+}
+
 function missedReferenceHeadlines(content: any, gt: GroundTruth | null): string[] {
   if (!gt) return [];
   const briefHeads = collectBriefHeadlines(content);
   const briefSets = briefHeads.map(significantWords);
   const briefAnchors = COVERAGE_ANCHOR_MATCH ? briefHeads.map(anchorTokens) : [];
-  const refs = [...gt.india, ...gt.world];
+  const refs = effectiveRefs(gt);
   const missed: string[] = [];
   for (const ref of refs) {
     const refSet = significantWords(ref);
@@ -4369,7 +4449,16 @@ OUTPUT — return ONLY this JSON, no preamble, no markdown:
   // at -6, so stark omissions move the score even if the LLM is generous. This
   // is what makes "the score not reflecting misses" impossible going forward.
   const missCount = missedRefs.length;
-  const missPenalty = Math.min(6, Math.round(missCount * 1.5));
+  // Sprint 20 Drop 4.1 — proportional, non-saturating coverage penalty. Scales
+  // with the SHARE of reference headlines missed (not the raw count): a few
+  // misses dent coverage, a near-total miss still lands hard, and one real miss
+  // no longer counts the same as ten filler misses. COVERAGE_V2='off' restores
+  // the old saturating behaviour (−1.5/miss capped −6).
+  const totalRefs = groundTruth ? effectiveRefs(groundTruth).length : 0;
+  const missRate = totalRefs > 0 ? missCount / totalRefs : 0;
+  const missPenalty = COVERAGE_V2
+    ? Math.min(COVERAGE_MISS_CAP, Math.round(missRate * COVERAGE_MISS_SCALE))
+    : Math.min(6, Math.round(missCount * 1.5));
 
   const dim_field_completeness = Math.max(0, dim_field_raw - penalty);
 
@@ -4394,7 +4483,7 @@ OUTPUT — return ONLY this JSON, no preamble, no markdown:
     console.warn(`[score:${edition}] ${emptySections} empty section(s) → -${penalty} on coverage and field_completeness.`);
   }
   if (missPenalty > 0) {
-    console.warn(`[score:${edition}] ${missCount} reference headline(s) missed → -${missPenalty} on coverage. Missed: ${missedRefs.slice(0, 6).map((h) => `"${h.slice(0, 60)}"`).join('; ')}`);
+    console.warn(`[score:${edition}] ${missCount}/${totalRefs} reference headline(s) missed (${Math.round(missRate * 100)}%) → -${missPenalty} on coverage. Missed: ${missedRefs.slice(0, 6).map((h) => `"${h.slice(0, 60)}"`).join('; ')}`);
   }
 
   const total =

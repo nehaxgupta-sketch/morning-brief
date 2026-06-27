@@ -50,6 +50,13 @@ const ANTHROPIC_CITY_MODEL = process.env.ANTHROPIC_CITY_MODEL || 'claude-sonnet-
 const EDITIONS = ['5min', '10min', 'deep'] as const;
 type Edition = (typeof EDITIONS)[number];
 
+// Sprint 20 Drop #4 — when on, the personalised 5-min edition backfills its
+// remaining slot budget (up to the 20-story cap) with the highest-scored topical
+// stories from the shared brief's `topics` bucket, instead of discarding them and
+// shipping thin (~13/20). Pairs with FIVE_MIN_FILL in generate-brief.tsx, which
+// provisions the shared 5-min brief to 20. Default on; 'off' restores old behaviour.
+const FIVE_MIN_FILL = (process.env.FIVE_MIN_FILL || 'on').toLowerCase() !== 'off';
+
 // Sprint 12: feature flag. When true, this endpoint becomes a pure code-only
 // transform — no OpenAI calls. City/interest/industry stories are read from
 // the `tail_briefs` table (populated by generate-brief.tsx mode=tail-fetch).
@@ -1021,6 +1028,29 @@ function buildQuickPersonalised(
     if (section) {
       personal.push(section);
       personalBudget -= section.stories.length;
+    }
+  }
+
+  // Sprint 20 Drop #4 — fill the 5-min edition to its 20-story cap. The shared
+  // 5-min brief carries a `topics` bucket (business/tech/climate/sport/culture)
+  // that the personalised shape previously discarded, leaving the brief thin
+  // (~13/20). Backfill the remaining budget with the highest-scored topical
+  // stories as one "More today" section. It rides personal_sections (already
+  // rendered + deduped), so no frontend change is needed and duplicates of a
+  // topic already surfaced as an interest are stripped below. Gated by
+  // FIVE_MIN_FILL (default on; 'off' restores the old drop-topics behaviour).
+  if (FIVE_MIN_FILL && personalBudget > 0) {
+    const topicPool = reorderByScore((shared.topics || []) as any[], scorer);
+    const fill = topicPool.slice(0, personalBudget);
+    if (fill.length > 0) {
+      personal.push({
+        id: 'more_today',
+        label: 'More today',
+        icon: '🗞️',
+        kind: 'list',
+        stories: fill,
+      });
+      personalBudget -= fill.length;
     }
   }
 
