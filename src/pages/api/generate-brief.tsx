@@ -2803,6 +2803,18 @@ ${JSON.stringify(rawStoriesForWriter(raw))}`;
   return callOpenAIChat('gpt-4o', prompt, 12000, 'The Editorial (deep)', 'deep');
 }
 
+// Sprint 20.1 — parse OpenAI's suggested wait from a 429/5xx response so backoff
+// matches the server's rolling-window hint. Falls back to a Retry-After header,
+// then to a sane default. Returns milliseconds.
+function retryAfterMsFromBody(body: string, headerSeconds: number): number {
+  if (!isNaN(headerSeconds) && headerSeconds > 0) return Math.round(headerSeconds * 1000);
+  const ms = body.match(/try again in\s+([\d.]+)\s*ms/i);
+  if (ms) return Math.max(0, Math.round(parseFloat(ms[1])));
+  const s = body.match(/try again in\s+([\d.]+)\s*s/i);
+  if (s) return Math.max(0, Math.round(parseFloat(s[1]) * 1000));
+  return 6000;
+}
+
 async function callOpenAIChat(
   model: string,
   prompt: string,
@@ -2810,41 +2822,84 @@ async function callOpenAIChat(
   label: string,
   costPhase?: '5min' | '10min' | 'deep' | 'score' | 'storyline',
 ): Promise<any> {
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: maxTokens,
-      response_format: { type: 'json_object' },
-    }),
-  });
+  // Sprint 20.1 — 429/5xx-aware backoff. The 5min/10min/deep writers are fired
+  // as separate invocations by the run orchestrator; on the lowest OpenAI tier
+  // (gpt-4o 30k TPM) their combined demand rate-limits whichever lands last
+  // (usually deep), which previously failed BOTH writer attempts in the same
+  // minute and shipped yesterday's brief (status=fallback). Each write has its
+  // own ~60s function budget, so we wait out the rolling token window here and
+  // recover. Bounded by BUDGET_MS so we never trip the Vercel 60s cap; if the
+  // window can't clear in time we throw a tagged RATE_LIMITED error so the
+  // caller skips its redundant retry and falls back cleanly.
+  const MAX_ATTEMPTS = 5;
+  const BUDGET_MS = 30000;
+  const started = Date.now();
+  let lastDetail = '';
 
-  const data = await response.json();
-  console.log(`${label} status:`, response.status, 'model:', model);
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    let response: Awaited<ReturnType<typeof fetch>>;
+    try {
+      response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: maxTokens,
+          response_format: { type: 'json_object' },
+        }),
+      });
+    } catch (netErr: any) {
+      lastDetail = `network: ${netErr?.message || netErr}`;
+      const waitMs = Math.min(4000 + attempt * 2000, 10000);
+      if (attempt >= MAX_ATTEMPTS || Date.now() - started + waitMs > BUDGET_MS) break;
+      console.warn(`${label} ${lastDetail} (attempt ${attempt}/${MAX_ATTEMPTS}) — retrying in ${Math.round(waitMs / 1000)}s.`);
+      await sleep(waitMs);
+      continue;
+    }
 
-  // Sprint 11: log cost. Fire-and-forget.
-  if (costPhase) {
-    const usage = extractUsageFromChatCompletion(data);
-    void logOpenAICost({
-      phase: costPhase,
-      model,
-      inputTokens: usage.inputTokens,
-      outputTokens: usage.outputTokens,
-      reasoningTokens: usage.reasoningTokens,
-      detail: label,
-    });
+    // Retryable: rate limit (429) and transient server errors (500/502/503).
+    if (response.status === 429 || response.status === 500 || response.status === 502 || response.status === 503) {
+      const headerSeconds = parseFloat(response.headers.get('retry-after') || '');
+      let bodyText = '';
+      try { bodyText = await response.text(); } catch { /* ignore */ }
+      lastDetail = `${response.status}: ${bodyText.slice(0, 200)}`;
+      const waitMs = Math.min(Math.max(Math.round(retryAfterMsFromBody(bodyText, headerSeconds) * 1.5), 5000), 12000);
+      console.warn(`${label} status: ${response.status} model: ${model} — rate-limited/transient (attempt ${attempt}/${MAX_ATTEMPTS}); backing off ${Math.round(waitMs / 1000)}s.`);
+      if (attempt >= MAX_ATTEMPTS || Date.now() - started + waitMs > BUDGET_MS) break;
+      await sleep(waitMs);
+      continue;
+    }
+
+    const data = await response.json();
+    console.log(`${label} status:`, response.status, 'model:', model);
+
+    // Sprint 11: log cost. Fire-and-forget.
+    if (costPhase) {
+      const usage = extractUsageFromChatCompletion(data);
+      void logOpenAICost({
+        phase: costPhase,
+        model,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        reasoningTokens: usage.reasoningTokens,
+        detail: label,
+      });
+    }
+
+    const text = data.choices?.[0]?.message?.content;
+    if (!text) {
+      throw new Error(`No response writing ${label}. Raw: ${JSON.stringify(data).slice(0, 800)}`);
+    }
+    return extractJsonObject(text);
   }
 
-  const text = data.choices?.[0]?.message?.content;
-  if (!text) {
-    throw new Error(`No response writing ${label}. Raw: ${JSON.stringify(data).slice(0, 800)}`);
-  }
-  return extractJsonObject(text);
+  // Retries/budget exhausted on a rate-limit/transient error. Tagged so the
+  // writer's outer loop skips its redundant immediate retry and falls back.
+  throw new Error(`RATE_LIMITED: ${label} could not complete after ${MAX_ATTEMPTS} attempt(s) within ${Math.round(BUDGET_MS / 1000)}s. Last: ${lastDetail}`);
 }
 
 // ─── Pre-validation repair ──────────────────────────────────────────────────
@@ -3772,6 +3827,14 @@ async function runWriterForEdition(
     } catch (err: any) {
       lastError = err.message;
       console.warn(`[${ed}] Attempt ${attempt} threw: ${err.message}`);
+      // Sprint 20.1 — callOpenAIChat now does its own bounded 429 backoff. A
+      // tagged RATE_LIMITED error means the token window did not clear within the
+      // function budget; an immediate second attempt would only fail again and
+      // risk the 60s cap, so stop and fall back cleanly.
+      if (typeof err?.message === 'string' && err.message.startsWith('RATE_LIMITED')) {
+        console.warn(`[${ed}] rate limit persisted past in-call backoff — skipping redundant retry, using fallback.`);
+        break;
+      }
     }
   }
 
@@ -4324,6 +4387,85 @@ function effectiveRefs(gt: GroundTruth): string[] {
   return specific.length >= 2 ? specific : all;
 }
 
+// ─── Sprint 20.1 — COVERAGE_V3: honest, weighted, edition-scoped coverage ────
+// The 2026-06-27 run shipped dim_coverage=0 on BOTH shared editions while the
+// 10-min brief actually carried 15 India stories. Three compounding causes:
+//   (1) every reference headline counted equally (a state-election schedule ==
+//       "Delhi HC directs MCD");
+//   (2) the SAME reference graded the 5-min, which structurally has no markets
+//       desk — so RBI/SEBI were "missed" by format, not by omission;
+//   (3) the LLM was shown the missed list AND told to "penalise heavily", then
+//       a deterministic penalty subtracted again — double-counting to 0.
+// V3 replaces the LLM coverage score (for the story editions) with a direct,
+// deterministic measurement: of the day's IMPORTANCE-WEIGHTED, EDITION-SCOPED
+// reference headlines, what share did the brief actually cover? Grounded in the
+// independent reference (Principle IV — honest before flattering), free (no
+// extra model call — deliberately, to avoid adding load to the very phase we
+// just hardened against rate limits), reverts to V2 with COVERAGE_V3=off. Deep
+// (a synthesis edition with no story headlines to match) always keeps V2.
+const COVERAGE_V3 = (process.env.COVERAGE_V3 || 'on').toLowerCase() !== 'off';
+
+// Importance of a reference headline, 1 (minor/regional/process) to 3
+// (day-defining national news). Deterministic + transparent; tune freely.
+function referenceImportance(headline: string): number {
+  if (!headline || typeof headline !== 'string') return 1;
+  let w = 1;
+  if (anchorTokens(headline).size > 0) w += 1; // names an acronym or salient number
+  const t = headline.toLowerCase();
+  const major = /\b(parliament|supreme court|election commission|cabinet|union (home|finance|cabinet)|home ministry|finance ministry|prime minister|\bpm\b|rbi|sebi|war|strikes?|killed|dead|earthquake|ceasefire|treaty|verdict|banned|nationwide|budget|gdp|repo rate|inflation|sensex|nifty)\b/;
+  if (major.test(t)) w += 1;
+  return Math.min(3, Math.max(1, w));
+}
+
+// The reference list a given edition should be graded against. 10-min/deep use
+// the full (de-filler) list. The 5-min carries major/india/world + a folded
+// topics bucket but no dedicated markets desk, so pure-corporate refs are
+// dropped from its yardstick (macro — RBI/inflation/budget — stays, it belongs
+// in any edition). Never empties the list (falls back to the full set).
+function scopedRefs(gt: GroundTruth, edition: Edition): string[] {
+  const base = effectiveRefs(gt);
+  if (edition !== '5min') return base;
+  const corporateOnly = /\b(ipo|shares?|stocks?|bourse|listing|circuit|brokerage|mutual fund|disclosure norms|q[1-4]\b|earnings)\b/i;
+  const macro = /\b(rbi|repo rate|inflation|gdp|fiscal|budget)\b/i;
+  const scoped = base.filter((h) => !(corporateOnly.test(h) && !macro.test(h)));
+  return scoped.length >= 2 ? scoped : base;
+}
+
+type CoverageV3Result = { score: number; missed: string[]; totalScoped: number; weightedMissRate: number };
+
+// Deterministic coverage: weighted share of the edition-scoped reference the
+// brief covered, mapped to 0-10. Uses the SAME match test as V2 (word overlap
+// OR a shared anchor) so a beat covered with different phrasing still counts.
+function measureCoverageV3(content: any, gt: GroundTruth, edition: Edition): CoverageV3Result {
+  const refs = scopedRefs(gt, edition);
+  const briefHeads = collectBriefHeadlines(content);
+  const briefSets = briefHeads.map(significantWords);
+  const briefAnchors = COVERAGE_ANCHOR_MATCH ? briefHeads.map(anchorTokens) : [];
+  let totalW = 0;
+  let missedW = 0;
+  const missed: string[] = [];
+  for (const ref of refs) {
+    const refSet = significantWords(ref);
+    if (refSet.size === 0) continue;
+    const w = referenceImportance(ref);
+    totalW += w;
+    let covered = briefSets.some((b) => semanticOverlap(refSet, b) >= COVERAGE_MATCH_THRESHOLD);
+    if (!covered && COVERAGE_ANCHOR_MATCH) {
+      const refAnchors = anchorTokens(ref);
+      if (refAnchors.size > 0) {
+        covered = briefAnchors.some((ba) => {
+          for (const tok of Array.from(refAnchors)) if (ba.has(tok)) return true;
+          return false;
+        });
+      }
+    }
+    if (!covered) { missedW += w; missed.push(ref); }
+  }
+  const weightedMissRate = totalW > 0 ? missedW / totalW : 0;
+  const score = Math.max(0, Math.min(10, Math.round((1 - weightedMissRate) * 10)));
+  return { score, missed, totalScoped: refs.length, weightedMissRate };
+}
+
 function missedReferenceHeadlines(content: any, gt: GroundTruth | null): string[] {
   if (!gt) return [];
   const briefHeads = collectBriefHeadlines(content);
@@ -4444,34 +4586,46 @@ OUTPUT — return ONLY this JSON, no preamble, no markdown:
   const emptySections = emptySectionCount(edition, content);
   const penalty = emptySections * 5;
 
-  // Sprint 14.8: deterministic coverage penalty for the day's real top stories
-  // the brief MISSED entirely (independent reference set). -1.5 per miss, capped
-  // at -6, so stark omissions move the score even if the LLM is generous. This
-  // is what makes "the score not reflecting misses" impossible going forward.
-  const missCount = missedRefs.length;
-  // Sprint 20 Drop 4.1 — proportional, non-saturating coverage penalty. Scales
-  // with the SHARE of reference headlines missed (not the raw count): a few
-  // misses dent coverage, a near-total miss still lands hard, and one real miss
-  // no longer counts the same as ten filler misses. COVERAGE_V2='off' restores
-  // the old saturating behaviour (−1.5/miss capped −6).
-  const totalRefs = groundTruth ? effectiveRefs(groundTruth).length : 0;
-  const missRate = totalRefs > 0 ? missCount / totalRefs : 0;
-  const missPenalty = COVERAGE_V2
-    ? Math.min(COVERAGE_MISS_CAP, Math.round(missRate * COVERAGE_MISS_SCALE))
-    : Math.min(6, Math.round(missCount * 1.5));
-
+  // ── Coverage assembly ──────────────────────────────────────────────────────
+  // dim_field_completeness keeps the deterministic empty-section penalty.
   const dim_field_completeness = Math.max(0, dim_field_raw - penalty);
 
   // Sprint 20 Drop 4 — fail LOUD when there is no reference at all. If neither
   // Perplexity nor the news-API fallback returned a usable ground truth then
   // `groundTruth` is null and coverage was NEVER checked against the day's real
   // headlines. We do NOT pass the LLM's coverage number through (that was the
-  // silent-8 bug) — we WITHHOLD it (null by default; COVERAGE_UNVERIFIED_VALUE
-  // can override) and stamp the note so the snapshot shows the gap honestly.
+  // silent-8 bug) — we WITHHOLD it and stamp the note so the gap shows honestly.
   const coverageVerified = !!groundTruth;
+  // V3 (default) measures coverage deterministically for the story editions;
+  // deep and COVERAGE_V3=off keep the V2 LLM-score-minus-penalty path.
+  const useV3 = coverageVerified && COVERAGE_V3 && (edition === '5min' || edition === '10min');
+
   let dim_coverage: number | null;
   let unverifiedNote = '';
-  if (coverageVerified) {
+
+  // Logging/notes fields, populated by whichever path runs.
+  let missCount = missedRefs.length;
+  let totalRefs = 0;
+  let missRate = 0;
+  let missPenalty = 0; // V2 only; V3 measures coverage rather than penalising it
+  let missedForNote: string[] = missedRefs;
+
+  if (useV3) {
+    const cov = measureCoverageV3(content, groundTruth as GroundTruth, edition);
+    // An empty section is itself a coverage failure — keep that deterministic hit.
+    dim_coverage = Math.max(0, cov.score - penalty);
+    missCount = cov.missed.length;
+    totalRefs = cov.totalScoped;
+    missRate = cov.weightedMissRate;
+    missedForNote = cov.missed;
+  } else if (coverageVerified) {
+    // Sprint 20 Drop 4.1 — proportional, non-saturating penalty over the full
+    // reference (COVERAGE_V2='off' restores the old saturating −1.5/miss capped −6).
+    totalRefs = effectiveRefs(groundTruth as GroundTruth).length;
+    missRate = totalRefs > 0 ? missCount / totalRefs : 0;
+    missPenalty = COVERAGE_V2
+      ? Math.min(COVERAGE_MISS_CAP, Math.round(missRate * COVERAGE_MISS_SCALE))
+      : Math.min(6, Math.round(missCount * 1.5));
     dim_coverage = Math.max(0, dim_coverage_raw - penalty - missPenalty);
   } else {
     dim_coverage = COVERAGE_UNVERIFIED_VALUE;
@@ -4482,8 +4636,10 @@ OUTPUT — return ONLY this JSON, no preamble, no markdown:
   if (emptySections > 0) {
     console.warn(`[score:${edition}] ${emptySections} empty section(s) → -${penalty} on coverage and field_completeness.`);
   }
-  if (missPenalty > 0) {
-    console.warn(`[score:${edition}] ${missCount}/${totalRefs} reference headline(s) missed (${Math.round(missRate * 100)}%) → -${missPenalty} on coverage. Missed: ${missedRefs.slice(0, 6).map((h) => `"${h.slice(0, 60)}"`).join('; ')}`);
+  if (useV3) {
+    console.warn(`[score:${edition}] coverage v3 — covered ${totalRefs - missCount}/${totalRefs} scoped reference headline(s) (weighted miss ${Math.round(missRate * 100)}%) → dim_coverage ${typeof dim_coverage === 'number' ? dim_coverage : 'n/a'}${penalty > 0 ? ` (after -${penalty} empty-section)` : ''}.${missedForNote.length ? ` Missed: ${missedForNote.slice(0, 6).map((h) => `"${h.slice(0, 60)}"`).join('; ')}` : ''}`);
+  } else if (missPenalty > 0) {
+    console.warn(`[score:${edition}] ${missCount}/${totalRefs} reference headline(s) missed (${Math.round(missRate * 100)}%) → -${missPenalty} on coverage. Missed: ${missedForNote.slice(0, 6).map((h) => `"${h.slice(0, 60)}"`).join('; ')}`);
   }
 
   const total =
@@ -4503,7 +4659,9 @@ OUTPUT — return ONLY this JSON, no preamble, no markdown:
     notes: (unverifiedNote ? unverifiedNote + ' ' : '')
       + (typeof parsed?.notes === 'string' ? parsed.notes.slice(0, 800) : '')
       + (emptySections > 0 ? ` [auto-penalty: ${emptySections} empty section(s), -${penalty} on coverage & field completeness]` : '')
-      + (missPenalty > 0 ? ` [coverage-gap: missed ${missCount} of the day's top headlines, -${missPenalty} on coverage]` : ''),
+      + (useV3
+          ? ` [coverage v3: covered ${totalRefs - missCount}/${totalRefs} of the day's scoped top headlines (importance-weighted); dim_coverage ${typeof dim_coverage === 'number' ? dim_coverage : 'n/a'}/10]`
+          : (missPenalty > 0 ? ` [coverage-gap: missed ${missCount} of the day's top headlines, -${missPenalty} on coverage]` : '')),
   };
 }
 
