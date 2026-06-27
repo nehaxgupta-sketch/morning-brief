@@ -296,6 +296,61 @@ const STAGE_DEFS: { id: StageId; label: string }[] = [
   { id: 'extras',      label: '8 · Score personalised + storylines' },
 ]
 
+// Sprint 20.1 — per-step "run just this step" metadata. Each stage maps to the
+// same architecture the full pipeline runs; this powers the RUN BY STEP panel so
+// a sprint that touches one stage can be re-run in isolation. `does` and
+// `refresh` are written for the operator, not the system.
+const STEP_META: Record<StageId, { endpoint: string; does: string; running: string; refresh: string }> = {
+  fetch: {
+    endpoint: "POST /api/generate-brief · mode: 'fetch'",
+    does: 'Pulls the day’s news, dedups, scores newsworthiness, and saves the raw pool all 3 editions write from.',
+    running: 'fetching news (~40s)…',
+    refresh: 'Refresh when a sprint touches feeds, the source whitelist, dedup, newsworthiness, or front-page / edition selection.',
+  },
+  write: {
+    endpoint: "POST /api/generate-brief · mode: 'write' (5min → 10min → deep, one at a time)",
+    does: 'Writes the 3 editions from the saved pool — one at a time, so the heaviest (deep) doesn’t hit the OpenAI rate limit.',
+    running: 'writing 5min → 10min → deep…',
+    refresh: 'Refresh when a sprint touches writer prompts, validation, repair/backfill, coherence, or subset/fill. (Sprint 20.1 writer 429-backoff lives here.)',
+  },
+  personalise: {
+    endpoint: 'POST /api/personalise-briefs',
+    does: 'Builds each subscribed user’s personalised edition from the shared briefs.',
+    running: 'building personalised editions…',
+    refresh: 'Refresh when a sprint touches personalisation assembly or per-user section logic. Needs the briefs written first.',
+  },
+  tail: {
+    endpoint: "POST /api/generate-brief · mode: 'tail-fetch'",
+    does: 'Fetches the per-city / per-interest / per-industry stories that feed personalised editions.',
+    running: 'fetching city / interest / industry stories…',
+    refresh: 'Refresh when a sprint touches tail-fetch sources or the city / interest / industry logic.',
+  },
+  storylines: {
+    endpoint: "POST /api/generate-brief · mode: 'storylines'",
+    does: 'Tags stories into ongoing storylines and creates / updates / concludes them.',
+    running: 'tagging + updating storylines…',
+    refresh: 'Refresh when a sprint touches storyline tagging, creation, or the “so far” updates.',
+  },
+  score: {
+    endpoint: "POST /api/generate-brief · mode: 'score'",
+    does: 'Scores all 3 editions on the 7-dimension rubric and writes brief_scores.',
+    running: 'scoring 3 editions…',
+    refresh: 'Refresh when a sprint touches the scorer, the rubric, ground-truth, or coverage. (Sprint 20.1 COVERAGE_V3 lives here.)',
+  },
+  desks: {
+    endpoint: 'POST /api/generate-desks',
+    does: 'Generates the subscribed desks that don’t yet have today’s edition (2 at a time).',
+    running: 'generating subscribed desks…',
+    refresh: 'Refresh when a sprint touches desk generation, the desk writer, or desk scoring.',
+  },
+  extras: {
+    endpoint: 'POST /api/score-extras',
+    does: 'Scores a personalised sample + storylines — the tail of the quality picture.',
+    running: 'scoring personalised sample + storylines…',
+    refresh: 'Refresh after personalise or storylines change, to update their quality scores.',
+  },
+}
+
 function emptyStages(): StageState[] {
   return STAGE_DEFS.map(s => ({ id: s.id, label: s.label, status: 'pending', detail: '' }))
 }
@@ -634,6 +689,16 @@ export default function AdminPage() {
   const [showLog, setShowLog] = useState(false)
 
   const [masterStages, setMasterStages] = useState<StageState[]>(emptyStages())
+
+  // Sprint 20.1 — RUN BY STEP: per-stage state so any single step can be run in
+  // isolation (e.g. re-run just the step a sprint touched). Independent of the
+  // full-pipeline stage cards above.
+  const [stepStates, setStepStates] = useState<Record<StageId, StageState>>(() => {
+    const m = {} as Record<StageId, StageState>
+    for (const s of STAGE_DEFS) m[s.id] = { id: s.id, label: s.label, status: 'pending', detail: '' }
+    return m
+  })
+  const [stepBusy, setStepBusy] = useState<StageId | null>(null)
   const [masterFinishedAt, setMasterFinishedAt] = useState<number | null>(null)
 
   useEffect(() => {
@@ -752,25 +817,32 @@ export default function AdminPage() {
         }
         await loadBriefs() // shows pending rows
 
-        // Stage 2 — writes (parallel)
-        setRegenResult(
-          'Stage 1/2 — fetch ✓\n' +
-          'sections: ' + JSON.stringify(fetchData.sections) + '\n\n' +
-          'Stage 2/2 — writing 5min, 10min, deep in parallel (~25s)…'
-        )
-        const writeResults = await Promise.all(
-          (['5min', '10min', 'deep'] as const).map(async (ed) => {
-            try {
-              return await safeJsonFetch('/api/generate-brief', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ mode: 'write', edition: ed }),
-              })
-            } catch (err: any) {
-              return { edition: ed, ok: false, error: err.message }
-            }
-          })
-        )
+        // Stage 2 — writes (SEQUENTIAL). Sprint 20.1: the three editions used
+        // to be written in parallel, which on the lowest OpenAI tier (gpt-4o
+        // 30k TPM) rate-limited the heaviest edition (deep) — it 429'd and
+        // shipped yesterday's brief. Writing one edition at a time (5min →
+        // 10min → deep) keeps each write inside its own token window so deep
+        // lands cleanly. ~25-30s per edition; three in series is fine for a
+        // manual run.
+        const writeResults: any[] = []
+        for (const ed of ['5min', '10min', 'deep'] as const) {
+          setRegenResult(
+            'Stage 1/2 — fetch ✓\n' +
+            'sections: ' + JSON.stringify(fetchData.sections) + '\n\n' +
+            'Stage 2/2 — writing ' + ed + ' (one at a time)…\n' +
+            writeResults.map((r: any) => `  ${r.edition}: ${r.ok ? (r.status || 'ready') : 'FAILED'}`).join('\n')
+          )
+          try {
+            const r = await safeJsonFetch('/api/generate-brief', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ mode: 'write', edition: ed }),
+            })
+            writeResults.push({ ...r, edition: ed })
+          } catch (err: any) {
+            writeResults.push({ edition: ed, ok: false, error: err.message })
+          }
+        }
 
         setRegenResult(JSON.stringify({
           fetch: { ok: fetchData.ok, sections: fetchData.sections, lens_ok: fetchData.lens_ok },
@@ -1278,21 +1350,32 @@ export default function AdminPage() {
       })
       await loadBriefs()
 
-      // ─── Stage 2: write 3 editions in parallel ───────────────────────
-      setStage('write', { status: 'running', detail: 'writing 5min, 10min, deep…', startedAt: Date.now() })
-      const writeResults = await Promise.all(
-        (['5min', '10min', 'deep'] as const).map(async (ed) => {
-          try {
-            return await safeJsonFetch('/api/generate-brief', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ mode: 'write', edition: ed }),
-            })
-          } catch (err: any) {
-            return { edition: ed, ok: false, error: err.message }
-          }
+      // ─── Stage 2: write 3 editions, SEQUENTIALLY ─────────────────────
+      // Sprint 20.1: parallel writes rate-limited the heaviest edition (deep)
+      // on the 30k-TPM tier — it 429'd and shipped yesterday's brief. Writing
+      // one edition at a time (5min → 10min → deep) keeps each inside its own
+      // token window so deep lands cleanly. Each write is still its own ~60s
+      // invocation; three in series fits a manual run comfortably.
+      setStage('write', { status: 'running', detail: 'writing 5min → 10min → deep…', startedAt: Date.now() })
+      const writeStart = Date.now()
+      const writeResults: any[] = []
+      for (const ed of ['5min', '10min', 'deep'] as const) {
+        setStage('write', {
+          status: 'running',
+          detail: `writing ${ed}… ${writeResults.map((r: any) => `${r.edition}:${r.ok ? 'ok' : 'fail'}`).join(' ')}`.trim(),
+          startedAt: writeStart,
         })
-      )
+        try {
+          const r = await safeJsonFetch('/api/generate-brief', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode: 'write', edition: ed }),
+          })
+          writeResults.push({ ...r, edition: ed })
+        } catch (err: any) {
+          writeResults.push({ edition: ed, ok: false, error: err.message })
+        }
+      }
       const writeOK = writeResults.filter((r: any) => r?.ok).length
       const writeFailed = writeResults.length - writeOK
       if (writeFailed === writeResults.length) {
@@ -1301,10 +1384,10 @@ export default function AdminPage() {
         return
       }
       setStage('write', {
-        status: writeFailed === 0 ? 'ok' : 'ok',
+        status: 'ok',
         detail: writeFailed === 0
-          ? `${writeOK}/3 editions ready`
-          : `${writeOK}/3 editions ready · ${writeFailed} failed (continuing)`,
+          ? `${writeOK}/3 editions ready (sequential)`
+          : `${writeOK}/3 ready · ${writeFailed} failed (continuing)`,
         endedAt: Date.now(),
       })
       await loadBriefs()
@@ -1459,6 +1542,87 @@ export default function AdminPage() {
     // Total elapsed log — useful when the operator screenshots the panel.
     const elapsedSec = Math.round((Date.now() - pipelineStart) / 1000)
     console.log(`[admin] Full pipeline finished in ${elapsedSec}s.`)
+  }
+
+  // ─── Sprint 20.1 — run a single pipeline step in isolation ───────────────
+  // Same endpoints the full pipeline uses, callable one stage at a time so a
+  // sprint that touches one stage can be re-run without rebuilding everything.
+  // Writes run sequentially (5min → 10min → deep) — the deep-429 fix. Only one
+  // step runs at a time (stepBusy gates the buttons) so steps never collide.
+  const patchStep = (id: StageId, patch: Partial<StageState>) =>
+    setStepStates((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }))
+
+  async function runStep(id: StageId) {
+    if (stepBusy) return
+    setStepBusy(id)
+    patchStep(id, { status: 'running', detail: STEP_META[id].running, startedAt: Date.now(), endedAt: undefined })
+    console.info(`[step:${id}] running — ${STEP_META[id].running}`)
+    try {
+      let detail = ''
+      if (id === 'fetch') {
+        const d = await safeJsonFetch('/api/generate-brief', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'fetch' }) })
+        if (!d?.ok) throw new Error(d?.error || 'fetch returned ok=false')
+        const s = d.sections || {}
+        detail = `major=${s.major_events ?? '?'}, world=${s.world ?? '?'}, india=${s.india ?? '?'}`
+        await loadBriefs()
+      } else if (id === 'write') {
+        // Sequential — one edition at a time so deep doesn't hit the rate limit.
+        const results: any[] = []
+        for (const ed of ['5min', '10min', 'deep'] as const) {
+          patchStep('write', { status: 'running', detail: `writing ${ed}… ${results.map((r) => `${r.edition}:${r.ok ? 'ok' : 'fail'}`).join(' ')}`.trim() })
+          try {
+            const r = await safeJsonFetch('/api/generate-brief', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'write', edition: ed }) })
+            results.push({ ...r, edition: ed })
+          } catch (e: any) {
+            results.push({ edition: ed, ok: false, error: e.message })
+          }
+        }
+        const ok = results.filter((r) => r?.ok).length
+        if (ok === 0) throw new Error('all 3 writers failed — ' + results.map((r) => `${r.edition}:${r.error || r.reason || 'failed'}`).join(' · '))
+        detail = results.map((r) => `${r.edition}:${r.ok ? (r.status || 'ready') : 'FAILED'}`).join(' · ')
+        await loadBriefs(); await loadCostAndScoreData()
+      } else if (id === 'personalise') {
+        const d = await safeJsonFetch('/api/personalise-briefs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) })
+        detail = `users=${d?.users_processed ?? d?.users ?? '?'}, ready=${d?.ready ?? d?.editions_ready ?? '?'}`
+        await loadPersonalisedStats()
+      } else if (id === 'tail') {
+        const d = await safeJsonFetch('/api/generate-brief', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'tail-fetch' }) })
+        const s = d?.summary || {}
+        const f = (x: any) => (x ? `${x.ready ?? '?'}/${x.total ?? '?'}` : '?')
+        detail = `cities ${f(s.cities)} · interests ${f(s.interests)} · industries ${f(s.industries)}`
+        await loadTailBriefsStatus()
+      } else if (id === 'storylines') {
+        const d = await safeJsonFetch('/api/generate-brief', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'storylines' }) })
+        if (!d?.ok) throw new Error(d?.error || 'storylines returned ok=false')
+        detail = `tagged=${d.tagged ?? '?'} created=${d.created ?? '?'} regen=${d.regenerated ?? '?'}`
+        await loadStorylines()
+      } else if (id === 'score') {
+        const d = await safeJsonFetch('/api/generate-brief', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'score' }) })
+        if (!d?.ok) throw new Error(d?.error || 'score returned ok=false')
+        detail = 'rubric written to brief_scores'
+        await loadCostAndScoreData()
+      } else if (id === 'desks') {
+        const d = await safeJsonFetch('/api/generate-desks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) })
+        if (!d?.ok) throw new Error(d?.error || 'desks returned ok=false')
+        const s = d.summary || {}
+        detail = `ready=${s.ready ?? 0} thin=${s.thin ?? 0} failed=${s.failed ?? 0} deferred=${s.deferred ?? 0}`
+        await loadDesksPanel(); await loadCostAndScoreData()
+      } else if (id === 'extras') {
+        const d = await safeJsonFetch('/api/score-extras', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) })
+        if (!d?.ok) throw new Error(d?.error || 'extras returned ok=false')
+        const p = d.personalised?.results ? Object.keys(d.personalised.results).length : 0
+        const s = d.storylines?.results ? Object.keys(d.storylines.results).length : 0
+        detail = `personalised=${p}, storylines=${s}`
+        await loadCostAndScoreData()
+      }
+      patchStep(id, { status: 'ok', detail, endedAt: Date.now() })
+      console.info(`[step:${id}] ok — ${detail}`)
+    } catch (e: any) {
+      patchStep(id, { status: 'failed', detail: e.message, endedAt: Date.now() })
+      console.error(`[step:${id}] failed — ${e.message}`)
+    } finally {
+      setStepBusy(null)
+    }
   }
 
   if (authorized === null) return <CenteredMsg>Checking access…</CenteredMsg>
@@ -1775,7 +1939,7 @@ export default function AdminPage() {
             300s timeout applies per stage, not to the whole pipeline.
           </div>
 
-          <button onClick={runFullPipeline} disabled={masterRunning} style={{
+          <button onClick={runFullPipeline} disabled={masterRunning || stepBusy !== null} style={{
             background: C.gold, color: '#0E0E0E', border: 'none',
             padding: '16px 28px', fontFamily: "'DM Mono', monospace", fontSize: '12px',
             letterSpacing: '2px', fontWeight: 700,
@@ -1819,6 +1983,79 @@ export default function AdminPage() {
                     fontFamily: "'DM Mono', monospace", fontSize: '10px',
                     color: C.textDim, textAlign: 'right',
                   }}>{dur}</div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+
+        {/* ─── Sprint 20.1: RUN BY STEP PANEL ──────────────────────────── */}
+        {/* Mirrors the RCA's leg-by-leg flow: every pipeline stage as its own
+            runnable step, so the operator can re-run just the part a sprint
+            touched instead of the whole pipeline. */}
+        <div style={{
+          marginBottom: '36px', padding: '22px',
+          border: `1px solid ${C.borderHi}`, background: C.surface,
+        }}>
+          <div style={{
+            fontFamily: "'DM Mono', monospace", fontSize: '11px',
+            letterSpacing: '2.5px', color: C.gold, marginBottom: '8px',
+          }}>RUN BY STEP · ONE STAGE AT A TIME</div>
+          <div style={{
+            fontFamily: "'DM Sans', sans-serif", fontSize: '13px',
+            color: C.textSoft, lineHeight: 1.55, marginBottom: '18px',
+          }}>
+            The same stages the full pipeline runs, each on its own. After a change, run only the step it
+            touched — each card says what it refreshes. Steps run against{' '}
+            <span style={{ color: C.gold }}>{selectedDate}</span> and share state, so when rebuilding from
+            scratch run them top to bottom.
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            {STAGE_DEFS.map((def) => {
+              const st = stepStates[def.id]
+              const meta = STEP_META[def.id]
+              const busy = stepBusy === def.id
+              const anyBusy = stepBusy !== null || masterRunning
+              const dur = (st.startedAt && st.endedAt)
+                ? `${Math.round((st.endedAt - st.startedAt) / 1000)}s`
+                : (busy ? '…' : '')
+              return (
+                <div key={def.id} style={{
+                  padding: '14px 16px',
+                  border: `1px solid ${C.border}`,
+                  background: busy ? C.surface2 : C.surfaceDeep,
+                  borderLeft: `3px solid ${stageColor(st.status)}`,
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '14px' }}>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px', flexWrap: 'wrap' }}>
+                        <span style={{ fontFamily: "'DM Mono', monospace", fontSize: '13px', color: stageColor(st.status), fontWeight: 700 }}>{stageGlyph(st.status)}</span>
+                        <span style={{ fontFamily: "'DM Mono', monospace", fontSize: '11px', color: C.textSoft, letterSpacing: '1px' }}>{def.label}</span>
+                        {dur && <span style={{ fontFamily: "'DM Mono', monospace", fontSize: '10px', color: C.textDim }}>{dur}</span>}
+                      </div>
+                      <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '13px', color: C.textSoft, lineHeight: 1.5, marginBottom: '4px' }}>{meta.does}</div>
+                      <div style={{ fontFamily: "'DM Sans', sans-serif", fontSize: '12px', color: C.textMute, lineHeight: 1.45, marginBottom: '5px' }}>{meta.refresh}</div>
+                      <div style={{ fontFamily: "'DM Mono', monospace", fontSize: '10px', color: C.textDim, letterSpacing: '0.5px', wordBreak: 'break-word' }}>{meta.endpoint}</div>
+                      {st.detail && (
+                        <div style={{
+                          marginTop: '8px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
+                          color: st.status === 'failed' ? C.err : (st.status === 'ok' ? C.ok : C.textMute),
+                          lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                        }}>{st.status === 'failed' ? '✗ ' : st.status === 'ok' ? '✓ ' : ''}{st.detail}</div>
+                      )}
+                    </div>
+                    <button onClick={() => runStep(def.id)} disabled={anyBusy} style={{
+                      flexShrink: 0,
+                      background: busy ? C.surface2 : 'transparent',
+                      color: busy ? C.gold : C.text,
+                      border: `1px solid ${busy ? C.gold : C.borderHi}`,
+                      padding: '10px 16px', fontFamily: "'DM Mono', monospace", fontSize: '11px',
+                      letterSpacing: '1.5px', fontWeight: 700,
+                      cursor: anyBusy ? 'not-allowed' : 'pointer',
+                      opacity: anyBusy && !busy ? 0.4 : 1, minWidth: '96px',
+                    }}>{busy ? 'RUNNING…' : 'RUN STEP'}</button>
+                  </div>
                 </div>
               )
             })}
