@@ -88,63 +88,100 @@ export interface QueryTemplate {
 export const WIRE_FEEDS: QueryTemplate[] = [];
 export const NEW_SOURCE_QUERY_FEEDS: QueryTemplate[] = [];
 
-/** The 6 live desks as fixed query bundles (§5.5); SECTION_FEEDS supply the rest. */
-// ⚠ Sprint 21: these run via googleNewsFeed() → currently `nolink`. Migrate Sprint 22.
-export const DESK_QUERIES: Record<string, string[]> = {
-  markets:       ['(Sensex OR Nifty OR rupee OR FII) when:1d'],
-  business:      ['(earnings OR M&A OR IPO OR results) India when:2d'],
-  tech:          ['(AI OR chips OR cybersecurity OR big tech OR data centre) when:2d'],
-  entertainment: ['(Bollywood OR OTT OR box office OR music OR film) India when:2d'],
-  sport:         ['cricket when:2d', 'football when:2d', 'tennis when:2d', 'F1 when:2d', 'badminton when:2d'],
-  politics:      ['(Parliament OR Modi OR Supreme Court OR election OR policy) India when:2d'],
+// ════════════════════════════════════════════════════════════════════════════
+// Sprint 22 — UNIFIED section model (no "standard" vs "personalised" backend).
+//
+// A section is just: a SELECTOR over the one RSS pool + a label/icon + a
+// 'why it matters' framing. "Standard" = preselected for everyone, general
+// framing. "Personalised" = user-chosen, personal framing. Same fetch, cluster,
+// dedup, precedence, floor budget. Perplexity (URL hallucinations) and Google
+// News (nolink) are both retired here.
+//
+// Three selector kinds — most personalisation is a SELECTOR over the pool we
+// already fetch (no extra feed); only cities (hyperlocal) and a couple of niche
+// topics carry their own RSS feed:
+//   • section  → pull from a standard section's slice of the pool (its sec: tag)
+//   • feedTag  → pull items carrying a dedicated feed's tag (e.g. interest:startups)
+//   • keywords → match the pool on these terms (spans sections; e.g. "AI")
+// A def may combine them; the consumer (generate-brief) unions the matches.
+// ════════════════════════════════════════════════════════════════════════════
+
+export interface PersonalSectionDef {
+  label: string;
+  icon: string;
+  section?: Section;   // pool-selector: this standard section's items
+  feedTag?: string;    // dedicated-feed selector: items carrying this tag
+  keywords?: string[]; // keyword selector over the pool (lowercased contains-match)
+  why: string;         // 'why it matters' framing hint passed to the writer
+}
+
+// ── Cities — validated IE pattern (pfeedcheck 2026-06-28): all metros 200 items,
+//    on-domain links. cityFeed(city) → the IE city RSS; unknown cities fall back
+//    to their slug, and (at fetch) to REGIONAL_BY_CITY mastheads if IE lacks them.
+const IE_CITY_SLUG: Record<string, string> = {
+  bengaluru: 'bangalore', bangalore: 'bangalore', bombay: 'mumbai', mumbai: 'mumbai',
+  'new delhi': 'delhi', delhi: 'delhi', ncr: 'delhi', 'delhi / ncr': 'delhi',
+  calcutta: 'kolkata', kolkata: 'kolkata', madras: 'chennai', chennai: 'chennai',
+  pune: 'pune', hyderabad: 'hyderabad', ahmedabad: 'ahmedabad', lucknow: 'lucknow',
+  jaipur: 'jaipur', chandigarh: 'chandigarh',
+};
+export function citySlug(city: string): string {
+  const key = String(city || '').trim().toLowerCase();
+  return IE_CITY_SLUG[key] || key.replace(/[^a-z]+/g, '-').replace(/^-|-$/g, '');
+}
+export function cityFeed(city: string): string {
+  return `https://indianexpress.com/section/cities/${citySlug(city)}/feed/`;
+}
+
+// ── Interests — keyed by the display name the user picks (a fixed taxonomy). ──
+export const INTEREST_SECTIONS: Record<string, PersonalSectionDef> = {
+  'Business & Economy':       { label: 'Business & Economy', icon: '💼', section: 'business', why: 'how it moves the economy, companies, and prices' },
+  'Markets & Investing':      { label: 'Markets & Investing', icon: '📈', section: 'markets_news', feedTag: 'sec:markets', why: 'what it means for your portfolio and savings' },
+  'Technology':               { label: 'Technology', icon: '💻', section: 'technology', why: 'how the tech shift reshapes work and daily life' },
+  'Artificial Intelligence':  { label: 'AI & Technology', icon: '🤖', section: 'technology', keywords: ['ai', 'artificial intelligence', 'llm', 'openai', 'anthropic', 'machine learning', 'chip', 'semiconductor', 'data centre', 'data center'], why: 'where AI is actually landing, beyond the hype' },
+  'Science':                  { label: 'Science & Tech', icon: '🔬', section: 'technology', keywords: ['research', 'study', 'scientists', 'space', 'isro', 'discovery', 'physics', 'biology'], why: 'the science worth understanding this week' },
+  'Environment & Climate':    { label: 'Climate', icon: '🌱', section: 'climate_health', why: 'the climate and environment stakes for India' },
+  'Health & Wellness':        { label: 'Health', icon: '🩺', section: 'climate_health', keywords: ['health', 'hospital', 'disease', 'medical', 'drug', 'vaccine', 'mental health'], why: 'what it means for your health and care' },
+  'Sport':                    { label: 'Sport', icon: '🏏', section: 'sport', why: "the day's results and what they set up" },
+  'Cricket':                  { label: 'Cricket & Sport', icon: '🏏', section: 'sport', keywords: ['cricket', 'bcci', 'icc', 'test', 'odi', 't20', 'ipl', 'ranji'], why: "the cricket that matters, plus the day's sport" },
+  'Football':                 { label: 'Football & Sport', icon: '⚽', section: 'sport', keywords: ['football', 'fifa', 'premier league', 'isl', 'champions league', 'la liga'], why: 'football news, plus the wider sport day' },
+  'Formula 1':                { label: 'F1 & Sport', icon: '🏎️', section: 'sport', keywords: ['formula 1', 'f1', 'grand prix', 'verstappen', 'mclaren', 'ferrari'], why: 'the F1 picture, plus the wider sport day' },
+  'Culture & Arts':           { label: 'Culture & Arts', icon: '🎭', section: 'culture', why: 'the culture conversation worth following' },
+  'Film & OTT':               { label: 'Film & OTT', icon: '🎬', section: 'culture', keywords: ['film', 'movie', 'ott', 'netflix', 'bollywood', 'box office', 'streaming', 'series'], why: "what's worth watching and why it matters" },
+  'Music':                    { label: 'Music', icon: '🎵', section: 'culture', keywords: ['music', 'album', 'concert', 'song', 'singer', 'band'], why: 'the music news worth your time' },
+  'Books & Literature':       { label: 'Books', icon: '📚', section: 'culture', keywords: ['book', 'author', 'novel', 'literature', 'publishing', 'writer'], why: 'books and ideas worth knowing about' },
+  'World Affairs':            { label: 'World', icon: '🌍', section: 'world', why: 'the global shifts that reach India' },
+  'Indian Politics':          { label: 'Politics & Policy', icon: '🏛️', section: 'india', keywords: ['parliament', 'modi', 'election', 'bjp', 'congress', 'policy', 'supreme court', 'cabinet'], why: 'the politics and policy that affect you' },
+  'Startups':                 { label: 'Startups', icon: '🚀', feedTag: 'interest:startups', keywords: ['startup', 'funding', 'venture capital', 'seed', 'series a', 'unicorn', 'founder'], why: 'the startup moves shaping the ecosystem' },
+  'Geopolitics':              { label: 'Geopolitics', icon: '🗺️', section: 'world', keywords: ['geopolitics', 'diplomacy', 'foreign policy', 'sanctions', 'border', 'treaty', 'summit', 'tariff'], why: 'the power shifts and what they mean for India' },
+  'Personal Finance':         { label: 'Personal Finance', icon: '💰', section: 'business', keywords: ['mutual fund', 'tax', 'savings', 'loan', 'emi', 'rbi rate', 'upi', 'insurance', 'fd'], why: 'the money decisions this affects' },
 };
 
-/** Named city seeds (§5.2). Any other city falls back to CITY_PATTERN. Tag city:<name>. */
-// ⚠ Sprint 21: via googleNewsFeed() → currently `nolink`. Migrate Sprint 22.
-export const CITY_QUERIES: Record<string, string> = {
-  mumbai:    '"Mumbai" (BMC OR water OR local trains OR civic) when:2d',
-  delhi:     '"Delhi" (MCD OR pollution OR civic OR Metro) when:2d',
-  bengaluru: '"Bengaluru" (BBMP OR BWSSB OR traffic OR water) when:2d',
-  hyderabad: '"Hyderabad" (GHMC OR civic OR Metro) when:2d',
-  chennai:   '"Chennai" (civic OR water OR Metro) when:2d',
-  pune:      '"Pune" (PMC OR civic OR traffic) when:2d',
+// ── Professions — keyed by the profession value on the profile. ──
+export const PROFESSION_SECTIONS: Record<string, PersonalSectionDef> = {
+  healthcare: { label: 'Healthcare', icon: '🩺', section: 'climate_health', keywords: ['hospital', 'drug', 'icmr', 'medical', 'health', 'clinical', 'pharma', 'usfda', 'patient'], why: 'for healthcare professionals — practice, policy, and pipeline' },
+  legal:      { label: 'Law & Courts', icon: '⚖️', feedTag: 'prof:legal', keywords: ['supreme court', 'high court', 'judgment', 'legal', 'bench', 'litigation', 'bar council', 'verdict'], why: 'for legal professionals — judgments and the practice of law' },
+  finance:    { label: 'Finance', icon: '🏦', section: 'business', keywords: ['rbi', 'banking', 'npa', 'fintech', 'upi', 'sebi', 'nbfc', 'bond', 'liquidity'], why: 'for finance professionals — rates, regulation, and flows' },
+  tech:       { label: 'Tech Industry', icon: '💻', section: 'technology', keywords: ['it industry', 'software', 'layoffs', 'hiring', 'cloud', 'saas', 'startup', 'developer'], why: 'for tech professionals — the industry and the work' },
+  pharma:     { label: 'Pharma', icon: '💊', section: 'climate_health', keywords: ['pharma', 'usfda', 'drug pricing', 'clinical trial', 'api', 'generics', 'biotech'], why: 'for pharma professionals — approvals, pricing, and trials' },
+  education:  { label: 'Education', icon: '🎓', section: 'india', keywords: ['education', 'nep', 'university', 'exam', 'ugc', 'school', 'college', 'iit'], why: 'for education professionals — policy and the sector' },
+  marketing:  { label: 'Marketing & Media', icon: '📣', section: 'business', keywords: ['advertising', 'media', 'brand', 'd2c', 'marketing', 'campaign', 'agency'], why: 'for marketing professionals — brands, media, and spend' },
 };
-export const CITY_PATTERN = '"{name}" (civic OR municipal OR water OR transport) when:2d';
 
-/**
- * Named interest seeds (§5.3). Tag interest:<slug>.
- * Standard interests that already map to a shared section (Business, World, …)
- * need NO extra feed — they reuse SECTION_FEEDS.
- */
-// ⚠ Sprint 21: via googleNewsFeed() → currently `nolink`. Migrate Sprint 22.
-export const INTEREST_QUERIES: Record<string, string> = {
-  ai:          '(artificial intelligence OR AI) (India OR global) when:2d',
-  cricket:     'cricket (India OR ICC OR Test OR ODI) when:2d',
-  football:    '(football OR FIFA OR "Champions League") when:2d',
-  startups:    '(startup OR "venture capital" OR funding) India when:2d',
-  climate:     '(climate OR environment OR monsoon OR pollution) India when:2d',
-  finance:     '("personal finance" OR mutual funds OR tax OR RBI rates) India when:2d',
-  cinema:      '(Bollywood OR OTT OR film release OR streaming) India when:2d',
-  geopolitics: '(geopolitics OR foreign policy OR diplomacy) India when:2d',
-};
-export const INTEREST_PATTERN = '({terms}) India when:2d';
+// City 'why it matters' framing is generic (per resident); the writer fills the city name.
+export const CITY_WHY = 'how this affects daily life — commute, costs, civic services — for a {city} resident';
 
-/** Named profession seeds (§5.4). Tag prof:<slug>. */
-// ⚠ Sprint 21: via googleNewsFeed() → currently `nolink`. Migrate Sprint 22.
-export const PROFESSION_QUERIES: Record<string, string> = {
-  healthcare: '(healthcare OR hospital OR drug approval OR ICMR OR medical) India when:2d',
-  legal:      '(Supreme Court OR High Court OR judgment OR legal) India when:2d',
-  finance:    '(RBI OR banking OR NPA OR fintech OR UPI) India when:2d',
-  tech:       '(IT industry OR software OR layoffs OR hiring OR cloud) India when:2d',
-  pharma:     '(pharma OR USFDA OR drug pricing OR clinical trial) India when:2d',
-  education:  '(education policy OR NEP OR university OR exam) India when:2d',
-  marketing:  '(advertising OR media OR brand OR D2C) India when:2d',
-};
-export const PROFESSION_PATTERN = '({terms}) India when:2d';
-
-/** A followed story = a persisted query feed (§5.6); capped at 25 active. Tag follow:<storyId>. */
-// ⚠ Sprint 21: via googleNewsFeed() → currently `nolink`. Migrate Sprint 22.
-export const FOLLOW_PATTERN = '{terms} when:7d';
+// ── RETIRED (Sprint 22): the Google-News query templates. Personalisation is now
+//    RSS + pool-selectors (above). Kept as empty exports so importers don't break;
+//    remove once nothing reads them (Stages 2–4). ─────────────────────────────
+export const DESK_QUERIES: Record<string, string[]> = {};
+export const CITY_QUERIES: Record<string, string> = {};
+export const CITY_PATTERN = '';
+export const INTEREST_QUERIES: Record<string, string> = {};
+export const INTEREST_PATTERN = '';
+export const PROFESSION_QUERIES: Record<string, string> = {};
+export const PROFESSION_PATTERN = '';
+export const FOLLOW_PATTERN = '{terms} when:7d'; // follows TBD in the unified model
 
 export interface MarketTicker { symbol: string; label: string; }
 export const MARKET_TICKERS: MarketTicker[] = [
@@ -282,6 +319,18 @@ export const SECTION_FEEDS: SectionFeed[] = [
     sections: ['climate_health'], tags: ['src:dialogue', 'sec:climate'], verified: true },
   { source: 'BOOM', tier: 2, url: 'https://www.boomlive.in/feed',
     sections: ['india'], tags: ['src:boom', 'sec:india'], verified: true },
+
+  // ==== Sprint 22 — niche personalisation feeds (validated 2026-06-28, pfeedcheck) ====
+  // They carry interest:/prof: tags the personalisation selectors pull on, and
+  // also enrich the shared pool's business/india/markets slices.
+  { source: 'Inc42', tier: 2, url: 'https://inc42.com/feed/',
+    sections: ['business', 'technology'], tags: ['src:inc42', 'interest:startups', 'sec:business'], verified: true },
+  { source: 'YourStory', tier: 2, url: 'https://yourstory.com/feed',
+    sections: ['business'], tags: ['src:yourstory', 'interest:startups', 'sec:business'], verified: true },
+  { source: 'Bar & Bench', tier: 2, url: 'https://www.barandbench.com/feed',
+    sections: ['india'], tags: ['src:barandbench', 'prof:legal', 'interest:legal', 'sec:india'], verified: true },
+  { source: 'Moneycontrol', tier: 2, url: 'https://www.moneycontrol.com/rss/latestnews.xml',
+    sections: ['business', 'markets_news'], tags: ['src:moneycontrol', 'sec:markets'], verified: true },
 ];
 
 /**

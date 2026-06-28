@@ -34,6 +34,12 @@ import { dropDeadStories } from '@/lib/liveness';
 import { logOpenAICost, extractUsageFromResponses } from '@/lib/cost-log';
 import { attachLogCapture } from '@/lib/log-capture';
 import { applyCitySafety } from '@/lib/editorial-safety';
+// Sprint 22 (Stage 4) — RSS personalisation: fetch city/interest candidates from
+// real feeds via the existing engine helper instead of Perplexity, killing the
+// URL hallucinations. Same Claude editorial + finalise layers; only the source
+// changes. Behind PERSONAL_RSS (default off); Perplexity stays as the fallback.
+import { fetchStoriesFromFeeds } from '@/lib/rss-retrieval';
+import { cityFeed, INTEREST_SECTIONS, SECTION_FEEDS, type PersonalSectionDef } from '@/lib/retrieval/feeds.config';
 
 export const config = { maxDuration: 60 };
 
@@ -202,6 +208,90 @@ interface CityStory {
 // 1-week window and (b) treat the masthead list as a PREFERENCE: try it first,
 // and if it returns little, retry with a broad search. Claude + the expanded
 // whitelist keep quality and demote tragedy either way.
+// ════════════════════════════════════════════════════════════════════════════
+// Sprint 22 (Stage 4) — RSS personalisation. When PERSONAL_RSS is on, city and
+// interest candidates come from real RSS feeds (the existing fetchStoriesFromFeeds
+// engine) instead of Perplexity. The Claude selection + finalise layers below are
+// unchanged — they just receive a real, non-hallucinated candidate set. Cities use
+// the validated IE city pattern; interests use their taxonomy selector (dedicated
+// feed and/or the standard section's feeds, keyword-filtered). Default off.
+// NOTE: this is the DIRECT path (USE_TAIL_BRIEFS=false). On the tail path the
+// source lives in generate-brief mode=tail-fetch (Stage 3b), so set
+// USE_TAIL_BRIEFS=false for PERSONAL_RSS to take effect.
+// ════════════════════════════════════════════════════════════════════════════
+const PERSONAL_RSS = (process.env.PERSONAL_RSS || '').toLowerCase() === 'on';
+
+// RssStory already carries { headline, body, source, source_url, published_at } —
+// exactly the candidate shape the Claude selectors consume.
+function rssToCandidate(s: any): any {
+  return {
+    headline: s?.headline,
+    summary: s?.body,
+    body: s?.body,
+    source: s?.source,
+    source_url: s?.source_url,
+    published_at: s?.published_at,
+  };
+}
+
+async function rssCityCandidates(city: string): Promise<any[]> {
+  try {
+    const { stories, reachability } = await fetchStoriesFromFeeds([cityFeed(city)], { secs: ['india'], concurrency: 2 });
+    console.log(`[city:${city}] RSS ${reachability}`);
+    return stories.map(rssToCandidate).filter((c) => c.headline && c.source_url);
+  } catch (e: any) {
+    console.warn(`[city:${city}] RSS fetch error: ${e?.message || e}`);
+    return [];
+  }
+}
+
+// Look up an interest's taxonomy def (case-insensitive); null if not in the list
+// (those interests fall back to Perplexity so nothing silently goes missing).
+function interestDef(interest: string): PersonalSectionDef | null {
+  const map = INTEREST_SECTIONS as Record<string, PersonalSectionDef>;
+  if (map[interest]) return map[interest];
+  const lc = String(interest || '').toLowerCase().trim();
+  for (const k of Object.keys(map)) if (k.toLowerCase() === lc) return map[k];
+  return null;
+}
+
+// Resolve a selector to the SECTION_FEEDS urls that back it: its dedicated feed
+// tag and/or the standard section's feeds.
+function feedUrlsForDef(def: PersonalSectionDef): string[] {
+  const urls = new Set<string>();
+  for (const f of SECTION_FEEDS) {
+    if (!f?.url) continue;
+    const tags = f.tags || [];
+    const secs = (f.sections || []) as any[];
+    if (def.feedTag && tags.includes(def.feedTag)) urls.add(f.url);
+    if (def.section && secs.includes(def.section)) urls.add(f.url);
+  }
+  return Array.from(urls);
+}
+
+function matchesKeywords(s: any, keywords?: string[]): boolean {
+  if (!keywords || keywords.length === 0) return true;
+  const hay = `${s?.headline || ''} ${s?.body || s?.summary || ''}`.toLowerCase();
+  return keywords.some((k) => hay.includes(k));
+}
+
+async function rssInterestCandidates(interest: string, def: PersonalSectionDef): Promise<any[]> {
+  const urls = feedUrlsForDef(def);
+  if (urls.length === 0) {
+    console.log(`[interest:${interest}] no RSS feeds resolved for selector — empty (will fall through).`);
+    return [];
+  }
+  try {
+    const { stories, reachability } = await fetchStoriesFromFeeds(urls, { secs: [(def.section as any) || 'india'], concurrency: 4 });
+    const filtered = stories.filter((s) => matchesKeywords(s, def.keywords));
+    console.log(`[interest:${interest}] RSS ${reachability}; ${filtered.length} after keyword filter.`);
+    return filtered.map(rssToCandidate).filter((c) => c.headline && c.source_url).slice(0, 8);
+  } catch (e: any) {
+    console.warn(`[interest:${interest}] RSS fetch error: ${e?.message || e}`);
+    return [];
+  }
+}
+
 async function pplxCandidates(
   label: string,
   costPhase: 'city' | 'interest',
@@ -403,7 +493,9 @@ function coerceCandidates(city: string, candidates: any[]): CityStory[] {
 }
 
 async function fetchCityStories(city: string): Promise<CityStory[]> {
-  const candidates = await perplexityCityCandidates(city);
+  const candidates = PERSONAL_RSS
+    ? await rssCityCandidates(city)
+    : await perplexityCityCandidates(city);
   if (candidates.length === 0) return [];
   return claudeSelectCityStories(city, candidates);
 }
@@ -484,7 +576,7 @@ Return ONLY this JSON, no markdown, no commentary:
   return arr;
 }
 
-async function claudeSelectInterestStories(interest: string, candidates: any[]): Promise<InterestStory[]> {
+async function claudeSelectInterestStories(interest: string, candidates: any[], framing?: string): Promise<InterestStory[]> {
   if (candidates.length === 0) return [];
   if (!ANTHROPIC_API_KEY) {
     console.warn(`[interest:${interest}] ANTHROPIC_API_KEY not set — using retrieved candidates directly.`);
@@ -502,7 +594,7 @@ SELECTION
 
 RULES
 - Use ONLY the candidates below. Copy "source" and "source_url" VERBATIM from the candidate you choose. NEVER invent a URL or a source name.
-- Headline: your own factual summary (max 120 chars), not the original title verbatim. Body: 2-3 plain, paraphrased sentences (no long quotes). why_it_matters: ONE concrete sentence naming the specific stake for someone who follows ${interest}.
+- Headline: your own factual summary (max 120 chars), not the original title verbatim. Body: 2-3 plain, paraphrased sentences (no long quotes). why_it_matters: ONE concrete sentence naming the specific stake for someone who follows ${interest}${framing ? ` — frame it around: ${framing}` : ''}.
 - If none of the candidates is genuinely newsworthy for ${interest}, return an empty "stories" array. Do not pad.
 
 CANDIDATES
@@ -594,9 +686,12 @@ function coerceInterestCandidates(interest: string, candidates: any[]): Interest
 }
 
 async function fetchInterestStories(interest: string): Promise<InterestStory[]> {
-  const candidates = await perplexityInterestCandidates(interest);
+  const def = PERSONAL_RSS ? interestDef(interest) : null;
+  const candidates = def
+    ? await rssInterestCandidates(interest, def)
+    : await perplexityInterestCandidates(interest);
   if (candidates.length === 0) return [];
-  return claudeSelectInterestStories(interest, candidates);
+  return claudeSelectInterestStories(interest, candidates, def?.why);
 }
 
 async function buildInterestCache(
@@ -943,6 +1038,234 @@ interface BuildResult {
   };
 }
 
+// ─── Sprint 22 — per-user FLOOR budget (PLACEMENT_V2, personalised side) ─────
+//
+// Replaces the old greedy "keep major/world/india in full, then add personal
+// sections until the budget runs out" assembly. The greedy version was order-
+// dependent (late interest sections got 0) and never deduped personal sections
+// against the standard spine. This allocator:
+//   • guarantees a FLOOR (minimum) for every section the user actually sees,
+//     capped only by how many stories truly exist for it (no padding);
+//   • shares the remaining budget up to PERSONAL_TARGET round-robin in the
+//     per-user PRECEDENCE order — so a user with few sections gets MORE in each,
+//     and a user with many gets ~floor in each, both landing at ~20 (floors, not
+//     ceilings);
+//   • caps major_events at MAJOR_CAP (the front page);
+//   • dedups personal sections against the standard spine, then within personal.
+//
+// Wired into the 5-min and 10-min builders behind PERSONAL_FLOORS (default off so
+// it ships dark — flip on for one test user/edition, verify the distribution in
+// the [personalise:*:floors] log line, then make it the default). Deep is a
+// synthesis edition, so floors do not apply there.
+const PERSONAL_FLOORS = (process.env.PERSONAL_FLOORS || '').toLowerCase() === 'on';
+
+const PERSONAL_TARGET = 20;       // story total we aim each personalised brief at
+const MAJOR_CAP = 5;              // front-page capacity (Sprint 22 decision)
+
+// Per-section FLOORS. Every section the user has is guaranteed at least this many
+// (capped by real availability). Tune here — these sum low enough that the
+// round-robin surplus does the real shaping.
+const SECTION_FLOORS: Record<string, number> = {
+  major_events: 3, india: 3, world: 2,
+  your_city: 1, your_home_city: 1, industry: 1, interest: 1,
+};
+
+// Per-user precedence (Sprint 22 decision): drives BOTH surplus distribution and
+// cross-section dedup priority. Personal sections are woven in by relevance.
+//   major_events → india → your_city → world → your_home_city → industry → interests
+// Interest sections keep the user's own listed order (their stated priority).
+
+const FLOOR_STOP = new Set([
+  'the','a','an','of','in','on','at','to','for','and','or','but','with','by','from',
+  'as','is','are','was','were','be','been','has','have','had','will','would','new',
+  'says','said','after','before','amid','over','india','indian','today','live','updates',
+]);
+function floorSigWords(h: string): Set<string> {
+  return new Set(
+    String(h || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/)
+      .filter((w) => w.length >= 4 && !FLOOR_STOP.has(w)),
+  );
+}
+function floorSameStory(a: string, b: string): boolean {
+  const A = floorSigWords(a), B = floorSigWords(b);
+  let n = 0; for (const w of Array.from(A)) if (B.has(w)) n++;
+  const small = Math.max(1, Math.min(A.size, B.size));
+  return n >= 4 || (n >= 3 && n / small >= 0.6);
+}
+
+// Remove personal-section stories that duplicate a story already in the standard
+// spine (major/world/india). URL match first, then headline word-overlap (the
+// Perplexity-sourced personal story usually has a different URL for the same event).
+function dropPersonalDupesOfStandard(personalSecs: PersonalSection[], standardStories: any[]): number {
+  const stdUrls = new Set(
+    standardStories.map((s) => (s?.source_url || '').toLowerCase().split('?')[0]).filter(Boolean),
+  );
+  const stdHeads = standardStories.map((s) => s?.headline || '').filter(Boolean);
+  let removed = 0;
+  for (const sec of personalSecs) {
+    sec.stories = (sec.stories || []).filter((st: any) => {
+      const u = (st?.source_url || '').toLowerCase().split('?')[0];
+      if (u && stdUrls.has(u)) { removed++; return false; }
+      for (const h of stdHeads) if (floorSameStory(st?.headline || '', h)) { removed++; return false; }
+      return true;
+    });
+  }
+  return removed;
+}
+
+// Round-robin floor allocator. Floors first (capped by availability), then share
+// the surplus up to `target` by walking the candidate list (already in precedence
+// order) one slot at a time. No ceilings — only real availability stops a section.
+function allocateFloors(cands: { key: string; floor: number; avail: number }[], target: number): Record<string, number> {
+  const alloc: Record<string, number> = {};
+  let total = 0;
+  for (const c of cands) { alloc[c.key] = Math.min(c.floor, c.avail); total += alloc[c.key]; }
+  let guard = 0;
+  while (total < target && guard++ < 1000) {
+    let progressed = false;
+    for (const c of cands) {
+      if (total >= target) break;
+      if (alloc[c.key] < c.avail) { alloc[c.key] += 1; total += 1; progressed = true; }
+    }
+    if (!progressed) break;
+  }
+  return alloc;
+}
+
+// The floor-budget assembly, shared by the 5-min and 10-min builders.
+function buildWithFloors(
+  shared: any,
+  profile: any,
+  edition: '5min' | '10min',
+  cityStories: CityStory[],
+  homeCityStories: CityStory[],
+  interestCache: Map<string, InterestStory[]>,
+  industryCache: Map<string, InterestStory[]>,
+): BuildResult {
+  const shape: 'micro' | 'full' = edition === '5min' ? 'micro' : 'full';
+  const cityMap = shape === 'micro' ? cityToMicro : cityToFull;
+  const scorer = (s: any) => scoreStory(s, profile);
+
+  // Standard spine — full available, score-ordered; major capped at MAJOR_CAP.
+  const major = reorderByScore(shared.major_events || [], scorer).slice(0, MAJOR_CAP);
+  const world = reorderByScore(shared.world || [], scorer);
+  const india = reorderByScore(shared.india || [], scorer);
+
+  // Personal candidate sections — built with FULL availability; sliced later.
+  const personal: PersonalSection[] = [];
+  const usersCity = normaliseStr(profile?.city_current);
+  if (usersCity && cityStories.length > 0) {
+    personal.push({ id: 'your_city', label: usersCity, icon: '📍', kind: 'list', stories: cityStories.map(cityMap) });
+  }
+  const usersHome = normaliseStr(profile?.city_home);
+  if (usersHome && usersHome.toLowerCase() !== usersCity.toLowerCase() && homeCityStories.length > 0) {
+    personal.push({ id: 'your_home_city', label: `${usersHome} (home)`, icon: '🏡', kind: 'list', stories: homeCityStories.map(cityMap) });
+  }
+  const usersIndustry = normaliseStr(profile?.industry);
+  if (usersIndustry) {
+    const indSec = makeIndustrySection(usersIndustry, industryCache, shape, 3);
+    if (indSec) personal.push(indSec);
+  }
+  for (const interest of (profile?.interests || []) as string[]) {
+    const sec = makeInterestSection(interest, shared, interestCache, shape, 3);
+    if (sec) personal.push(sec);
+  }
+
+  // Cross-pool dedup: personal must not repeat the spine, then dedup within personal.
+  const spine = [...major, ...world, ...india];
+  const crossRemoved = dropPersonalDupesOfStandard(personal, spine);
+  const dd = dedupPersonalSections(personal.filter((p) => (p.stories || []).length > 0));
+  if (crossRemoved > 0 || dd.removed > 0) {
+    console.log(`[personalise:${edition}:floors] dedup — vs-spine ${crossRemoved}, within-personal ${dd.removed}`);
+  }
+  let live = dd.sections.filter((p) => (p.stories || []).length > 0);
+
+  // Sprint 13.2 parity: a Markets-mapped interest gets the real markets grid, not
+  // the flattened "Markets today" pseudo-story — drop that pseudo section here too.
+  const hasMarketsInterest = ((profile?.interests || []) as string[])
+    .some((i) => STANDARD_INTEREST_MAP[i]?.section === 'markets');
+  if (hasMarketsInterest) {
+    live = live.filter((sec) => !(
+      sec.id.startsWith('interest_') && sec.stories.length === 1 &&
+      (sec.stories[0] as any)?.headline === 'Markets today'
+    ));
+  }
+
+  const citySec = live.find((p) => p.id === 'your_city');
+  const homeSec = live.find((p) => p.id === 'your_home_city');
+  const indSecLive = live.find((p) => p.id.startsWith('industry_'));
+  const interestSecs = live.filter((p) => p.id.startsWith('interest_'));
+
+  // Candidate list in PRECEDENCE order with floors + availability.
+  const cands: { key: string; floor: number; avail: number }[] = [];
+  cands.push({ key: 'major_events', floor: SECTION_FLOORS.major_events, avail: major.length });
+  cands.push({ key: 'india', floor: SECTION_FLOORS.india, avail: india.length });
+  if (citySec) cands.push({ key: 'your_city', floor: SECTION_FLOORS.your_city, avail: citySec.stories.length });
+  cands.push({ key: 'world', floor: SECTION_FLOORS.world, avail: world.length });
+  if (homeSec) cands.push({ key: 'your_home_city', floor: SECTION_FLOORS.your_home_city, avail: homeSec.stories.length });
+  if (indSecLive) cands.push({ key: indSecLive.id, floor: SECTION_FLOORS.industry, avail: indSecLive.stories.length });
+  for (const isec of interestSecs) cands.push({ key: isec.id, floor: SECTION_FLOORS.interest, avail: isec.stories.length });
+
+  const alloc = allocateFloors(cands, PERSONAL_TARGET);
+
+  // Slice to allocation.
+  const majorF = major.slice(0, alloc['major_events'] ?? major.length);
+  const worldF = world.slice(0, alloc['world'] ?? world.length);
+  const indiaF = india.slice(0, alloc['india'] ?? india.length);
+
+  // Re-emit personal sections in precedence order, sliced to their allocation.
+  const personalOut: PersonalSection[] = [];
+  const emit = (sec?: PersonalSection) => {
+    if (!sec) return;
+    const n = alloc[sec.id] ?? sec.stories.length;
+    const sliced = { ...sec, stories: sec.stories.slice(0, n) };
+    if (sliced.stories.length > 0) personalOut.push(sliced);
+  };
+  emit(citySec);
+  emit(homeSec);
+  emit(indSecLive);
+  for (const isec of interestSecs) emit(isec);
+
+  const total = majorF.length + worldF.length + indiaF.length +
+    personalOut.reduce((n, p) => n + p.stories.length, 0);
+  console.log(`[personalise:${edition}:floors] total=${total}/${PERSONAL_TARGET} ` +
+    `major=${majorF.length} india=${indiaF.length} world=${worldF.length} ` +
+    `city=${alloc['your_city'] || 0} home=${alloc['your_home_city'] || 0} ` +
+    `industry=${indSecLive ? (alloc[indSecLive.id] || 0) : 0} interests=${interestSecs.length}`);
+
+  const picks: string[] = [];
+  if (majorF[0]?.headline) picks.push(majorF[0].headline);
+  if (indiaF[0]?.headline) picks.push(indiaF[0].headline);
+  if (personalOut[0]?.stories?.[0]?.headline) picks.push(personalOut[0].stories[0].headline);
+
+  const content: any = {
+    edition,
+    date: shared.date,
+    major_events: majorF,
+    world: worldF,
+    india: indiaF,
+    personal_sections: personalOut,
+  };
+  if (edition === '10min') {
+    content.closer = shared.closer;
+    content.quick_personal_relevance = buildQuickPersonalRelevance(profile, picks);
+    if (hasMarketsInterest && shared.markets) content.markets = shared.markets;
+  }
+
+  return {
+    content,
+    stats: {
+      sectionsKept: 3,
+      sectionsDropped: edition === '10min' ? 6 : 1,
+      personalSectionsAdded: personalOut.length,
+      citySpliced: !!citySec,
+      homeCitySpliced: !!homeSec,
+      interestSectionsAdded: interestSecs.length,
+      relevanceParagraph: edition === '10min',
+    },
+  };
+}
+
 function buildQuickPersonalRelevance(profile: any, picks: string[]): string {
   // Template — no LLM. Picks are 2-3 headlines we surface.
   const name = (profile?.full_name || '').split(' ')[0] || '';
@@ -975,6 +1298,8 @@ function buildQuickPersonalised(
   interestCache: Map<string, InterestStory[]>,
   industryCache: Map<string, InterestStory[]> = new Map(),
 ): BuildResult {
+  if (PERSONAL_FLOORS) return buildWithFloors(shared, profile, '5min', cityStories, homeCityStories, interestCache, industryCache);
+
   // The Brief (5min) personalised shape — per Sprint 9 spec:
   //  - major_events (universal, reordered) — KEEP ALL
   //  - world (universal, reordered) — KEEP ALL
@@ -1097,6 +1422,8 @@ function buildDailyPersonalised(
   interestCache: Map<string, InterestStory[]>,
   industryCache: Map<string, InterestStory[]> = new Map(),
 ): BuildResult {
+  if (PERSONAL_FLOORS) return buildWithFloors(shared, profile, '10min', cityStories, homeCityStories, interestCache, industryCache);
+
   // The Daily (10min) personalised shape — per Sprint 9 spec:
   //  - major_events (universal, reordered) — KEEP ALL
   //  - world (universal, reordered) — KEEP ALL

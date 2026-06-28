@@ -2168,6 +2168,71 @@ function isSameEvent(a: Set<string>, b: Set<string>): boolean {
 // ordering buffer); MAJOR_DEDUP_DEPTH=12 restores the prior behaviour. The
 // post-write cross-section dedup remains the backstop against any rare overlap.
 const MAJOR_DEDUP_DEPTH = Math.max(1, parseInt(process.env.MAJOR_DEDUP_DEPTH || '6', 10));
+// ─── Sprint 22 — PLACEMENT_V2: one event → one home, by the engine's eventId ──
+//
+// Replaces the four uncoordinated fuzzy matchers (semantic-vs-major, exact
+// fingerprint, within-section eventSignature, post-write URL) with a single
+// structural invariant: every story carries the engine's event-cluster id
+// (rss-retrieval stamps it), so an event is placed in exactly ONE section and a
+// duplicate becomes impossible by construction — not by tuning a threshold.
+//
+// Behind PLACEMENT_V2 (default off — ships dark; flip on, run on the shared
+// brief, confirm the [placement-v2] log, then default it). When on, matcher 1
+// (the over-aggressive false-dropper) is skipped; the exact/near-dup passes are
+// left as harmless subsets; this pass is authoritative and runs last.
+const PLACEMENT_V2 = (process.env.PLACEMENT_V2 || '').toLowerCase() === 'on';
+const PLACEMENT_MAJOR_CAP = 5; // front-page capacity (Sprint 22 decision)
+// Shared-brief precedence (decided): india above world for the audience.
+const PLACEMENT_ORDER = ['major_events', 'india', 'world', 'business', 'technology', 'climate_health', 'sport', 'culture'];
+
+function placeByEventId(cleaned: any): void {
+  // 1. Trim the front page to capacity FIRST, so an event ranked below the cut is
+  //    not "claimed" by major_events and then left unwritten — it falls back to
+  //    its topical home instead (this is what fixes the orphaning, e.g. the
+  //    earthquake that was deduped out of india yet never written into major).
+  if (Array.isArray(cleaned.major_events) && cleaned.major_events.length > PLACEMENT_MAJOR_CAP) {
+    cleaned.major_events = cleaned.major_events.slice(0, PLACEMENT_MAJOR_CAP);
+  }
+
+  // 2. One event → one home: walk sections in precedence; the first section to
+  //    carry an event keeps it, every later occurrence (cross- OR within-section)
+  //    is dropped. Stories with no eventId can't be matched, so they're kept.
+  const claimed = new Map<number, string>();
+  let removed = 0;
+  for (const sec of PLACEMENT_ORDER) {
+    const arr = cleaned[sec];
+    if (!Array.isArray(arr)) continue;
+    const kept: any[] = [];
+    for (const s of arr) {
+      const id = (s && typeof s.eventId === 'number') ? s.eventId : null;
+      if (id == null) { kept.push(s); continue; }
+      if (claimed.has(id)) { removed++; continue; }
+      claimed.set(id, sec);
+      kept.push(s);
+    }
+    cleaned[sec] = kept;
+  }
+
+  // 3. Phase-D assert — holds by construction; log loudly if ever violated so a
+  //    clustering regression is a single named line, not silent duplication.
+  const homeOf = new Map<number, string>();
+  let collisions = 0;
+  for (const sec of PLACEMENT_ORDER) {
+    for (const s of (cleaned[sec] || [])) {
+      const id = (s && typeof s.eventId === 'number') ? s.eventId : null;
+      if (id == null) continue;
+      const prev = homeOf.get(id);
+      if (prev && prev !== sec) collisions++;
+      else homeOf.set(id, sec);
+    }
+  }
+  if (collisions > 0) {
+    console.error(`[placement-v2] ASSERT FAILED — ${collisions} event(s) in >1 section after placement.`);
+  } else {
+    console.log(`[placement-v2] one-event-one-home ok — ${claimed.size} events placed, ${removed} cross/within-section dupe(s) removed, major≤${PLACEMENT_MAJOR_CAP}.`);
+  }
+}
+
 function dropSemanticDuplicatesAgainstMajor(raw: any): { kept: any; droppedCount: number } {
   const majorSets = (raw.major_events || []).slice(0, MAJOR_DEDUP_DEPTH).map((s: any) => significantWords(s?.headline || ''));
   if (majorSets.length === 0) return { kept: raw, droppedCount: 0 };
@@ -2198,12 +2263,17 @@ function dropSemanticDuplicatesAgainstMajor(raw: any): { kept: any; droppedCount
 
 function enforceQualityRules(raw: any): RawStories {
   // First pass: semantic dedup of world/india against major_events.
-  const { kept: rawAfterSemanticDedup, droppedCount: semanticDropped } =
-    dropSemanticDuplicatesAgainstMajor(raw);
-  if (semanticDropped > 0) {
-    console.log(`[enforce] Semantic dedup dropped ${semanticDropped} world/india stories overlapping the top ${MAJOR_DEDUP_DEPTH} major_events leads.`);
+  // Sprint 22: PLACEMENT_V2's eventId one-home pass supersedes this word-overlap
+  // matcher (more reliable, and it never false-drops a distinct story) — skip it
+  // when the flag is on.
+  if (!PLACEMENT_V2) {
+    const { kept: rawAfterSemanticDedup, droppedCount: semanticDropped } =
+      dropSemanticDuplicatesAgainstMajor(raw);
+    if (semanticDropped > 0) {
+      console.log(`[enforce] Semantic dedup dropped ${semanticDropped} world/india stories overlapping the top ${MAJOR_DEDUP_DEPTH} major_events leads.`);
+    }
+    raw = rawAfterSemanticDedup;
   }
-  raw = rawAfterSemanticDedup;
 
   const dropped: { section: string; reason: string; headline?: string; url?: string }[] = [];
   const seenFingerprints = new Set<string>();
@@ -2413,6 +2483,12 @@ function enforceQualityRules(raw: any): RawStories {
       for (const s of (cleaned as any)[sec]) if (s.must_include) mustCount++;
     }
   }
+  // Sprint 22 (PLACEMENT_V2) — authoritative one-event-one-home placement by the
+  // engine's eventId, run last so it operates on the final per-section lists
+  // (after dedup, cap, and near-dup collapse). Guarantees no event appears in two
+  // sections; trims the front page to capacity with fallback-to-home.
+  if (PLACEMENT_V2) placeByEventId(cleaned);
+
   console.log(`Quality enforcement complete. Must-includes: ${mustCount}/5. Dropped: ${dropped.length}`);
   if (dropped.length > 0) console.log('Dropped:', JSON.stringify(dropped, null, 2).slice(0, 1500));
 

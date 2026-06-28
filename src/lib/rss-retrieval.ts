@@ -60,6 +60,12 @@ export interface RssStory {
   // just source tier. Undefined for the unscored tail (selection then falls back
   // to tier). A normal field, so it survives the `...rest` strip below.
   nw?: number;
+  // Sprint 22 (PLACEMENT_V2) — the engine's event-cluster id and cross-source
+  // corroboration count, carried through so generate-brief can place one event in
+  // exactly ONE section (one eventId → one home) instead of re-deriving "same
+  // story" with four fuzzy matchers. Normal fields, so they survive the strip.
+  eventId?: number;
+  eventCorr?: number;
 }
 type Section =
   | 'major_events' | 'world' | 'india' | 'business'
@@ -952,9 +958,12 @@ export async function fetchStrategy_Rss(_universe?: any): Promise<RssPool> {
     }
   }
 
-  // Strip internal fields -> clean RssStory.
+  // Strip internal fields -> clean RssStory. Sprint 22: keep the event-cluster id
+  // and corroboration (as eventId/eventCorr) so generate-brief can do one-event-
+  // one-home placement; drop only the truly internal scratch fields.
   for (const sec of SECTIONS) {
-    pool[sec] = (pool[sec] as PoolItem[]).map(({ _tier, _secs, _w, _emb, _corr, _isSport, _eventCorr, _eventSig, _eventId, ...rest }) => rest as RssStory);
+    pool[sec] = (pool[sec] as PoolItem[]).map(({ _tier, _secs, _w, _emb, _corr, _isSport, _eventCorr, _eventSig, _eventId, ...rest }) =>
+      ({ ...rest, eventId: _eventId, eventCorr: _eventCorr } as RssStory));
   }
 
   // Markets (real numbers) + a mechanical lens (no fabrication).
