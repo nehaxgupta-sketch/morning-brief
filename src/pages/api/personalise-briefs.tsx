@@ -1143,7 +1143,7 @@ function buildWithFloors(
   industryCache: Map<string, InterestStory[]>,
 ): BuildResult {
   const shape: 'micro' | 'full' = edition === '5min' ? 'micro' : 'full';
-  const cityMap = shape === 'micro' ? cityToMicro : cityToFull;
+  const cityMap: (s: CityStory) => any = shape === 'micro' ? cityToMicro : cityToFull;
   const scorer = (s: any) => scoreStory(s, profile);
 
   // Standard spine — full available, score-ordered; major capped at MAJOR_CAP.
