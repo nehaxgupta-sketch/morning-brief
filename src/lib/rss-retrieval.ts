@@ -315,20 +315,70 @@ function sameEventSig(a: Set<string>, b: Set<string>): boolean {
 const pubOfItem = (s: PoolItem): string => (publisherLabel(s.source_url) || s.source || s.source_url || 'unknown').toLowerCase();
 
 // Greedy single-link clustering of reworded variants → distinct-publisher count
-// per event, stored as _eventCorr for ranking. Same greedy approach dedupe()
-// uses; over/under-grouping only nudges ranking, never section contents.
-type EventCluster = { id: number; sig: Set<string>; pubs: Set<string>; members: PoolItem[] };
+// per event, stored as _eventCorr for ranking AND _eventId for PLACEMENT_V2's
+// one-home placement.
+//
+// Sprint 24 — embeddings-first. The old path clustered ONLY by eventSig word
+// overlap (≥4 shared folded tokens), which provably cannot merge two headlines
+// that describe the same event in different words: "US, Iran to pause strikes"
+// vs "Iran strikes tanker in Hormuz after US airstrikes" share 2 tokens; the two
+// Venezuela-quake headlines shared 0 ("venezuela"≠"venezuelan"). Both surfaced
+// as separate _eventIds and PLACEMENT_V2 — working exactly as designed — gave
+// each its own home, so the SAME event appeared twice (and contradictory leads
+// reached major_events). Event identity is a semantic question, so when the
+// pool carries embeddings (_emb, computed once in dedupe) we cluster by cosine
+// against each cluster's CENTROID — closer to one event than the conservative
+// near-dup threshold, because same-event stories differ by angle, not wording.
+// When _emb is absent (embeddings failed) we fall back to the exact prior
+// eventSig path — never worse than before. EVENT_SIM_THRESHOLD tunes it.
+type EventCluster = { id: number; sig: Set<string>; pubs: Set<string>; members: PoolItem[]; centroid?: number[]; n: number };
 function assignEventCorr(items: PoolItem[]): void {
+  const EVENT_SIM = parseFloat(process.env.EVENT_SIM_THRESHOLD || '0.78');
   const clusters: EventCluster[] = [];
+  let embCount = 0;
   for (const s of items) {
     const sig = eventSig(s.headline);
     s._eventSig = sig;
     let hit: EventCluster | undefined;
-    for (const c of clusters) { if (sameEventSig(sig, c.sig)) { hit = c; break; } }
-    if (hit) { hit.pubs.add(pubOfItem(s)); hit.members.push(s); sig.forEach((w) => hit!.sig.add(w)); }
-    else clusters.push({ id: clusters.length, sig: new Set(Array.from(sig)), pubs: new Set([pubOfItem(s)]), members: [s] });
+
+    if (s._emb) {
+      // Semantic event match: nearest cluster centroid above the threshold.
+      let best = -1;
+      for (const c of clusters) {
+        if (!c.centroid) continue;
+        const sim = cosine(s._emb, c.centroid);
+        if (sim >= EVENT_SIM && sim > best) { best = sim; hit = c; }
+      }
+    } else {
+      // Word-overlap fallback (unchanged legacy behaviour).
+      for (const c of clusters) { if (sameEventSig(sig, c.sig)) { hit = c; break; } }
+    }
+
+    if (hit) {
+      hit.pubs.add(pubOfItem(s));
+      hit.members.push(s);
+      sig.forEach((w) => hit!.sig.add(w));
+      if (s._emb && hit.centroid) {
+        // Incremental running mean of the cluster's member vectors.
+        const c = hit.centroid, n = hit.n;
+        for (let i = 0; i < c.length; i++) c[i] = (c[i] * n + s._emb[i]) / (n + 1);
+        hit.n = n + 1;
+      }
+    } else {
+      clusters.push({
+        id: clusters.length,
+        sig: new Set(Array.from(sig)),
+        pubs: new Set([pubOfItem(s)]),
+        members: [s],
+        centroid: s._emb ? Array.from(s._emb) : undefined,
+        n: 1,
+      });
+    }
+    if (s._emb) embCount++;
   }
   for (const c of clusters) { const n = c.pubs.size; for (const m of c.members) { m._eventCorr = n; m._eventId = c.id; } }
+  const mode = embCount === items.length ? 'embeddings' : embCount === 0 ? 'word-overlap' : `mixed (${embCount}/${items.length} embedded)`;
+  console.log(`[event-cluster] ${clusters.length} event(s) from ${items.length} stories via ${mode} (sim≥${EVENT_SIM}).`);
 }
 
 // ── Newsworthiness scoring (Sprint 18.3) ───────────────────────────────────
@@ -425,19 +475,47 @@ function reclassifySecs(s: PoolItem): void {
   }
 }
 
+// Embeds an arbitrary list of texts via OpenAI text-embedding-3-small.
+// Hardened (Sprint 24): (1) logs the REAL reason on failure instead of a silent
+// null — a missing key, an HTTP error body, or a malformed payload were all
+// previously indistinguishable, which is why "embeddings unavailable" went
+// undiagnosed for sprints; (2) batches at 256 inputs/request (well under
+// OpenAI's 2048 ceiling) so a large pool can't blow the request limit and
+// null the whole run; (3) preserves input order across batches. Returns null
+// only if it genuinely cannot embed, so every caller's word-overlap fallback
+// still triggers exactly as before.
 async function embed(texts: string[]): Promise<number[][] | null> {
   const key = process.env.OPENAI_API_KEY;
-  if (!key) return null;
+  if (!key) { console.warn('[embed] no OPENAI_API_KEY — cannot embed; caller falls back to word-overlap.'); return null; }
+  if (!texts.length) return [];
+  const BATCH = 256;
+  const out: number[][] = [];
   try {
-    const res = await fetch('https://api.openai.com/v1/embeddings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
-      body: JSON.stringify({ model: 'text-embedding-3-small', input: texts.map((t) => t.slice(0, 400)) }),
-    });
-    const j: any = await res.json();
-    if (!Array.isArray(j?.data)) return null;
-    return j.data.map((d: any) => d.embedding as number[]);
-  } catch { return null; }
+    for (let i = 0; i < texts.length; i += BATCH) {
+      const slice = texts.slice(i, i + BATCH).map((t) => (t || '').slice(0, 400) || ' ');
+      const res = await fetch('https://api.openai.com/v1/embeddings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+        body: JSON.stringify({ model: 'text-embedding-3-small', input: slice }),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        console.warn(`[embed] HTTP ${res.status} on batch ${i}-${i + slice.length} — ${body.slice(0, 160)}`);
+        return null;
+      }
+      const j: any = await res.json();
+      if (!Array.isArray(j?.data) || j.data.length !== slice.length) {
+        console.warn(`[embed] malformed response on batch ${i} (got ${j?.data?.length ?? 'none'} of ${slice.length}).`);
+        return null;
+      }
+      for (const d of j.data) out.push(d.embedding as number[]);
+    }
+    console.log(`[embed] ok — ${out.length} vector(s) via text-embedding-3-small.`);
+    return out;
+  } catch (e: any) {
+    console.warn(`[embed] threw — ${String(e?.message || e).slice(0, 160)}; caller falls back to word-overlap.`);
+    return null;
+  }
 }
 function cosine(a: number[], b: number[]): number {
   let dot = 0, na = 0, nb = 0;
@@ -459,13 +537,21 @@ async function dedupe(items: PoolItem[]): Promise<{ kept: PoolItem[]; pulled: nu
   }
   noUrl.sort((a, b) => b._tier - a._tier);
 
-  const useEmb = (process.env.CLUSTER || 'words').toLowerCase() === 'embeddings';
+  // Sprint 24 — embeddings now power BOTH near-dup merge here AND the _eventId
+  // clustering in assignEventCorr (the id PLACEMENT_V2 uses for one-home). They
+  // are computed ONCE, here, and the _emb vectors ride on the kept items into
+  // assignEventCorr — no second API call. EVENT_EMBEDDINGS (default on) is the
+  // master switch; the legacy CLUSTER=embeddings still forces it for back-compat.
+  // Word-overlap remains the automatic fallback whenever embeddings return null,
+  // so a key/quota failure degrades to exactly the prior behaviour, never worse.
+  const EVENT_EMBEDDINGS = (process.env.EVENT_EMBEDDINGS || 'on').toLowerCase() !== 'off';
+  const useEmb = EVENT_EMBEDDINGS || (process.env.CLUSTER || 'words').toLowerCase() === 'embeddings';
   const threshold = parseFloat(process.env.CLUSTER_THRESHOLD || '0.86');
   let embs: number[][] | null = null;
   if (useEmb) {
     embs = await embed(noUrl.map((s) => `${s.headline}. ${s.body}`));
     if (embs) noUrl.forEach((s, i) => { s._emb = embs![i]; });
-    else console.warn('[rss] embeddings unavailable — falling back to word-overlap de-dup.');
+    else console.warn('[rss] embeddings unavailable — falling back to word-overlap for both near-dup AND event clustering.');
   }
 
   const kept: PoolItem[] = [];
