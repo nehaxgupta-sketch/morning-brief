@@ -632,8 +632,45 @@ OR, if no suitable whitelisted story exists:
   return parsed?.story && typeof parsed.story === 'object' && parsed.story.headline ? parsed.story : null;
 }
 
+// ─── Sprint 23 — markets trading-day guard ──────────────────────────────────
+// The markets prompts assume a weekday ~6:30 AM run ("use yesterday's close").
+// On a weekend/holiday that silently became a fabricated "today" move (e.g.
+// "Sensex and Nifty both up 0.1% today" on a Sunday, when the exchanges were
+// shut). This computes whether NSE/BSE trade today and hands the writer an
+// explicit instruction so it never asserts a move on a closed day — it leads
+// with sentiment / global cues / what to watch on reopen instead.
+// Revertible: MARKETS_TRADING_GUARD=off restores the prior prompt text.
+const MARKETS_TRADING_GUARD = (process.env.MARKETS_TRADING_GUARD || 'on').toLowerCase() !== 'off';
+// Fixed-date NSE holidays (always closed). Movable holidays (Diwali, Holi, etc.)
+// shift year to year — supply the current year's dates via NSE_EXTRA_HOLIDAYS as
+// a comma-separated YYYY-MM-DD list (env only, no code change). The weekend check
+// carries the common case; the fixed set below is unambiguous.
+const NSE_FIXED_HOLIDAYS = new Set(['01-26', '08-15', '10-02', '12-25']); // MM-DD
+function nseExtraHolidays(): Set<string> {
+  return new Set((process.env.NSE_EXTRA_HOLIDAYS || '').split(',').map((s) => s.trim()).filter(Boolean));
+}
+function isIndianMarketOpen(istDateStr: string): boolean {
+  // istDateStr is YYYY-MM-DD in IST. Noon-IST keeps the calendar date stable when
+  // we read the UTC weekday.
+  const d = new Date(`${istDateStr}T12:00:00+05:30`);
+  const dow = d.getUTCDay(); // 0 = Sun … 6 = Sat
+  if (dow === 0 || dow === 6) return false;
+  const mmdd = istDateStr.slice(5);
+  if (NSE_FIXED_HOLIDAYS.has(mmdd)) return false;
+  if (nseExtraHolidays().has(istDateStr)) return false;
+  return true;
+}
+function marketsDayContext(today: string): string {
+  if (!MARKETS_TRADING_GUARD) return '';
+  if (isIndianMarketOpen(today)) {
+    return `MARKET STATUS: Indian exchanges (NSE/BSE) trade today. Report the session's actual direction from real data; if Indian markets have not closed yet at the time of writing, use the most recent confirmed close and label it (e.g. "at yesterday's close"). Never invent a number.\n`;
+  }
+  return `MARKET STATUS: Indian exchanges (NSE/BSE) are CLOSED today (weekend or holiday). Do NOT state any "today" move for the Sensex or Nifty — no daily percentage, no "markets were flat/up/down today"; asserting one is a factual error. Instead lead with market SENTIMENT and positioning: the global cues (overnight US session, oil, the dollar, geopolitics) and the themes investors will weigh when trading resumes. You may reference the last trading session only if explicitly labelled (e.g. "at Friday's close"). Close on what to watch when markets reopen.\n`;
+}
+
 async function fetchMarkets(today: string): Promise<{ summary: string; indices: MarketIndex[] }> {
-  const prompt = `You are a markets desk reporter. Today is ${today}. Use web_search_preview to fetch TODAY's closing values (or most recent if markets are open) for:
+  const prompt = `You are a markets desk reporter. Today is ${today}.
+${marketsDayContext(today)}Use web_search_preview to fetch the most recent CONFIRMED closing values (do not fabricate; if Indian markets are closed today, use the last completed trading session and label it) for:
 - Sensex (BSE)
 - Nifty 50 (NSE)
 - S&P 500
@@ -641,7 +678,7 @@ async function fetchMarkets(today: string): Promise<{ summary: string; indices: 
 
 Search multiple sources if needed. Return ONLY this JSON, no markdown:
 {
-  "summary": "2-3 sentences on today's market direction and drivers, India-focused",
+  "summary": "2-3 sentences on market direction (or, if closed today, sentiment + global cues) and drivers, India-focused — follow MARKET STATUS above",
   "indices": [
     { "name": "Sensex",  "change": "+0.4%" },
     { "name": "Nifty",   "change": "-0.1%" },
@@ -676,11 +713,11 @@ Be analytical, NOT descriptive: synthesise the single biggest THEME and explain 
 Stories fetched today:
 ${JSON.stringify(summary, null, 2)}
 
-Return ONLY this JSON, no markdown:
+${marketsDayContext(today)}Return ONLY this JSON, no markdown:
 {
   "world": "2-3 sentence analytical paragraph on the biggest global theme and what it means",
   "india": "2-3 sentence analytical paragraph on the biggest Indian theme and what it means",
-  "markets": "2-3 sentence analytical paragraph on markets direction and what is driving it",
+  "markets": "2-3 sentence analytical paragraph on market direction or, if markets are closed today, the sentiment and global cues investors are weighing — follow MARKET STATUS above; never assert a 'today' index move on a closed day",
   "watch": "2-3 sentence analytical paragraph on the most important development(s) to watch in the days ahead"
 }`;
 
@@ -2185,6 +2222,21 @@ const PLACEMENT_MAJOR_CAP = 5; // front-page capacity (Sprint 22 decision)
 // Shared-brief precedence (decided): india above world for the audience.
 const PLACEMENT_ORDER = ['major_events', 'india', 'world', 'business', 'technology', 'climate_health', 'sport', 'culture'];
 
+// ─── Sprint 23 — front-page OVERLAY (one-event-one-home, minus the front page) ─
+// PLACEMENT_V2 gives major_events the FIRST claim on every event, which lifts the
+// day's biggest stories OUT of world/india — so the topical tabs lead with
+// leftovers (a wildfire over Iran-US; a cricket record over a fatal flood). The
+// RSS engine already keeps each lead in its topical pool (see rss-retrieval:
+// "India and World keep their FULL pools"); only the downstream dedup drains
+// them. PLACEMENT_OVERLAY treats major_events as a HIGHLIGHT LAYER, not an
+// extraction: one-event-one-home still holds across the 7 topical sections (no
+// topical duplication), but a front-page lead ALSO renders in its topical home.
+// Effective only when PLACEMENT_V2 is on. Revertible: PLACEMENT_OVERLAY=off
+// restores the extraction behaviour exactly.
+const PLACEMENT_OVERLAY = (process.env.PLACEMENT_OVERLAY || 'on').toLowerCase() !== 'off';
+// Topical precedence (front page excluded — it overlays, it does not claim).
+const PLACEMENT_TOPICAL_ORDER = ['india', 'world', 'business', 'technology', 'climate_health', 'sport', 'culture'];
+
 function placeByEventId(cleaned: any): void {
   // 1. Trim the front page to capacity FIRST, so an event ranked below the cut is
   //    not "claimed" by major_events and then left unwritten — it falls back to
@@ -2199,7 +2251,12 @@ function placeByEventId(cleaned: any): void {
   //    is dropped. Stories with no eventId can't be matched, so they're kept.
   const claimed = new Map<number, string>();
   let removed = 0;
-  for (const sec of PLACEMENT_ORDER) {
+  // OVERLAY: the front page is a highlight layer, not a claimant — walk the
+  // TOPICAL sections only, so a lead stays in its topical home AND on the front
+  // page. Non-overlay (legacy): major_events is first and claims events out of
+  // the topical sections (extraction).
+  const placementOrder = PLACEMENT_OVERLAY ? PLACEMENT_TOPICAL_ORDER : PLACEMENT_ORDER;
+  for (const sec of placementOrder) {
     const arr = cleaned[sec];
     if (!Array.isArray(arr)) continue;
     const kept: any[] = [];
@@ -2217,7 +2274,7 @@ function placeByEventId(cleaned: any): void {
   //    clustering regression is a single named line, not silent duplication.
   const homeOf = new Map<number, string>();
   let collisions = 0;
-  for (const sec of PLACEMENT_ORDER) {
+  for (const sec of placementOrder) {
     for (const s of (cleaned[sec] || [])) {
       const id = (s && typeof s.eventId === 'number') ? s.eventId : null;
       if (id == null) continue;
@@ -2229,7 +2286,7 @@ function placeByEventId(cleaned: any): void {
   if (collisions > 0) {
     console.error(`[placement-v2] ASSERT FAILED — ${collisions} event(s) in >1 section after placement.`);
   } else {
-    console.log(`[placement-v2] one-event-one-home ok — ${claimed.size} events placed, ${removed} cross/within-section dupe(s) removed, major≤${PLACEMENT_MAJOR_CAP}.`);
+    console.log(`[placement-v2] ${PLACEMENT_OVERLAY ? 'overlay (front-page highlights also shown in their topical home)' : 'extraction'} — ${claimed.size} topical event(s) placed, ${removed} cross/within-section dupe(s) removed, major≤${PLACEMENT_MAJOR_CAP}.`);
   }
 }
 
@@ -2289,6 +2346,12 @@ function enforceQualityRules(raw: any): RawStories {
 
   function processList(section: string, list: any[]): RawStory[] {
     const kept: RawStory[] = [];
+    // OVERLAY: major_events is a highlight layer — dedup it WITHIN itself, but
+    // don't let its fingerprints block the identical topical copies (so a lead
+    // survives in world/india too). Falls back to the shared set when overlay is
+    // off, preserving the original cross-section "earlier-section-wins" dedup.
+    const overlayMajor = PLACEMENT_V2 && PLACEMENT_OVERLAY && section === 'major_events';
+    const seen = overlayMajor ? new Set<string>() : seenFingerprints;
     for (const story of list || []) {
       if (!story || typeof story !== 'object') continue;
 
@@ -2307,11 +2370,11 @@ function enforceQualityRules(raw: any): RawStories {
 
       // Dedup
       const fp = fingerprint(story);
-      if (seenFingerprints.has(fp)) {
+      if (seen.has(fp)) {
         dropped.push({ section, reason: 'duplicate of higher-priority section', headline: story.headline });
         continue;
       }
-      seenFingerprints.add(fp);
+      seen.add(fp);
 
       kept.push(story as RawStory);
     }
@@ -2560,6 +2623,13 @@ const RANK_BY_NW = (process.env.RANK_BY_NEWSWORTHINESS || 'on').toLowerCase() !=
 // India cricket (returns 0 otherwise), so it reshuffles sport without disturbing
 // any other section. Gated by HOME_AUDIENCE_BOOST (default on).
 const HOME_AUDIENCE_BOOST = (process.env.HOME_AUDIENCE_BOOST || 'on').toLowerCase() !== 'off';
+// Sprint 23 — scope the home-audience (India-cricket) lift to the SPORT section
+// only. In rankByImportance the lift sat ABOVE newsworthiness for EVERY section,
+// so a cricket milestone outranked a fatal flood in india/world. The lift was
+// only ever meant to stop a foreign tournament flooding SPORT (see the dedicated
+// sport pass in enforceQualityRules) — confine it there. Revertible:
+// HOME_BOOST_SPORT_ONLY=off restores the all-section lift.
+const HOME_BOOST_SPORT_ONLY = (process.env.HOME_BOOST_SPORT_ONLY || 'on').toLowerCase() !== 'off';
 function homeAudienceBonus(story: any): number {
   if (!HOME_AUDIENCE_BOOST) return 0;
   const h = `${(story as any)?.headline || ''} ${(story as any)?.summary || (story as any)?.body || ''}`;
@@ -2572,14 +2642,19 @@ function homeAudienceBonus(story: any): number {
   return Math.min(3, b);
 }
 
-function rankByImportance(arr: RawStory[]): RawStory[] {
+function rankByImportance(arr: RawStory[], section?: string): RawStory[] {
   if (!Array.isArray(arr) || arr.length < 2) return Array.isArray(arr) ? arr : [];
   if (!RANK_BY_NW) return rankBySourceTier(arr);
+  // Apply the India-cricket lift only where it belongs. When HOME_BOOST_SPORT_ONLY
+  // is on, hb is non-zero only for the sport section; everywhere else
+  // newsworthiness decides, so a fatal flood outranks a sports record in
+  // india/world.
+  const useBoost = !HOME_BOOST_SPORT_ONLY || section === 'sport';
   return arr
     .map((s, i) => ({
       s, i,
       nw: typeof (s as any)?.nw === 'number' ? (s as any).nw : -1,
-      hb: homeAudienceBonus(s),
+      hb: useBoost ? homeAudienceBonus(s) : 0,
       t: sourceTier((s as any)?.source_url),
       m: (s as any)?.must_include ? 1 : 0,
     }))
@@ -2612,7 +2687,7 @@ function buildSubset(raw: RawStories, cap: number): RawStories {
   // for any section whose stories have no nw score (fail-safe).
   const ranked: Record<string, RawStory[]> = {};
   for (const sec of PRIORITY) {
-    ranked[sec] = rankByImportance(((raw as any)[sec] || []) as RawStory[]);
+    ranked[sec] = rankByImportance(((raw as any)[sec] || []) as RawStory[], sec);
   }
 
   // First pass: take min(quota, available) per section.
@@ -2668,8 +2743,51 @@ function buildSubset(raw: RawStories, cap: number): RawStories {
   };
 }
 
+// Deterministic visibility check (Sprint 23): flag 5-min items whose one-line
+// what_happened merely restates the headline (high significant-word overlap). We
+// LOG rather than regenerate — a per-story retry would add a second model call
+// and latency for little gain; surfacing the count in the run log lets the
+// prompt fix be verified and tuned. No content is changed.
+function dekRestatesHeadline(headline: string, dek: string): boolean {
+  const h = significantWords(headline || '');
+  const d = significantWords(dek || '');
+  if (h.size < 3 || d.size < 3) return false;
+  let shared = 0;
+  for (const w of Array.from(d)) if (h.has(w)) shared++;
+  // ≥80% of the dek's significant words already appear in the headline ⇒ restated.
+  return shared / d.size >= 0.8;
+}
+function warnOnDekRestatesHeadline(brief: any): void {
+  if (!brief || typeof brief !== 'object') return;
+  let flagged = 0; const examples: string[] = [];
+  for (const sec of ['major_events', 'world', 'india', 'topics']) {
+    for (const s of (brief[sec] || [])) {
+      if (dekRestatesHeadline(s?.headline, s?.what_happened)) {
+        flagged++;
+        if (examples.length < 3) examples.push(String(s?.headline || '').slice(0, 60));
+      }
+    }
+  }
+  if (flagged > 0) {
+    console.warn(`[dek:5min] ${flagged} item(s) where what_happened restates the headline (should add a new fact). e.g. ${examples.join(' | ')}`);
+  }
+}
+
 async function writeQuickEdition(raw: RawStories): Promise<BriefQuick> {
   const today = getISTDate();
+
+  // Sprint 23 — dek quality. The 5-min reader sees exactly two lines per item
+  // (what_happened, why_it_matters), so a what_happened that paraphrases the
+  // headline wastes half the item. Instruct the dek to ADD the single most
+  // important NEW fact, and stop forcing a strained India angle onto every
+  // why_it_matters. Revertible: DEK_ADD_INFO=off restores the prior wording.
+  const DEK_ADD_INFO = (process.env.DEK_ADD_INFO || 'on').toLowerCase() !== 'off';
+  const whatHappenedRule = DEK_ADD_INFO
+    ? `- what_happened: ONE sentence (≤ 22 words) that ADDS to the headline — it must NOT restate it. Assume the reader has ALREADY read the headline; this line carries the single most important NEW fact the headline omits: a number, a name, a scale, a cause, a consequence, or what changed and when. If your sentence is a paraphrase of the headline, it has failed — rewrite it with new information. BAD — headline "Three Firefighters Killed in Colorado-Utah Border Wildfires" → "Wildfires in Colorado and Utah killed three firefighters." (adds nothing). GOOD → "The fire has burned 40,000 acres and forced 2,000 evacuations; the three died when winds turned." (new facts).`
+    : `- what_happened: ONE sentence (≤ 22 words). State the news plainly. Use specific numbers, names, dates where they sharpen the story.`;
+  const whyItMattersRule = DEK_ADD_INFO
+    ? `- why_it_matters: ONE sentence (≤ 22 words) — REQUIRED, never omit. Where a GENUINE Indian angle exists (inflation, the rupee, food prices, RBI policy, EMIs, household budgets, jobs, urban life, India's strategic position, sector impact on Indian companies/markets), lead with it concretely. Where an India link would be tenuous, do NOT manufacture one — state the real-world significance plainly instead. A forced, vague India tie ("…which India must also consider", "…safety standards India must adhere to") is WORSE than an honest global takeaway.`
+    : `- why_it_matters: ONE sentence (≤ 22 words) — REQUIRED, never omit. ANCHOR TO INDIA. Acceptable hooks: inflation, the rupee, food prices, RBI policy, EMIs, household budgets, jobs, urban life, India's strategic position, or sector impact on Indian companies/markets. A purely global takeaway is acceptable ONLY if no Indian angle exists; never drop the field. Example to emulate: "Higher oil prices directly affect India's inflation, rupee, and household budgets."`;
 
   // The 5min writer receives a pre-selected subset built by buildQuickSubset.
   // Its only job is to rewrite each story in MicroStory shape — same set of
@@ -2685,8 +2803,8 @@ FORMAT — each micro-item has the following fields:
 
 Editorial fields (you write these):
 - headline: clear, factual (≤ 14 words). Lead with the subject (country, company, person, number) — not the verb.
-- what_happened: ONE sentence (≤ 22 words). State the news plainly. Use specific numbers, names, dates where they sharpen the story.
-- why_it_matters: ONE sentence (≤ 22 words) — REQUIRED, never omit. ANCHOR TO INDIA. Acceptable hooks: inflation, the rupee, food prices, RBI policy, EMIs, household budgets, jobs, urban life, India's strategic position, or sector impact on Indian companies/markets. A purely global takeaway is acceptable ONLY if no Indian angle exists; never drop the field. Example to emulate: "Higher oil prices directly affect India's inflation, rupee, and household budgets."
+${whatHappenedRule}
+${whyItMattersRule}
 
 Passthrough fields (copy from raw stories UNCHANGED):
 - source, source_url, industries, interests, city_tags, topic_tags, must_include
@@ -2718,7 +2836,9 @@ OUTPUT SHAPE:
 Raw stories:
 ${JSON.stringify(rawStoriesForWriter(raw))}`;
 
-  return callOpenAIChat('gpt-4o', prompt, 6000, 'The Brief (5min)', '5min');
+  const brief = await callOpenAIChat('gpt-4o', prompt, 6000, 'The Brief (5min)', '5min');
+  if (DEK_ADD_INFO) warnOnDekRestatesHeadline(brief);
+  return brief;
 }
 
 async function writeDailyEdition(raw: RawStories): Promise<BriefDaily> {
@@ -3683,6 +3803,10 @@ function dedupeDailyAcrossSections(content: any): { content: any; dropped: numbe
   const seen = new Set<string>();
   let dropped = 0;
   for (const sec of DAILY_SECTION_PRIORITY) {
+    // OVERLAY: the front page is a highlight layer that intentionally repeats a
+    // few topical leads — don't dedup it against the sections (that would delete
+    // the overlay), and don't let it consume URLs the topical copies need.
+    if (PLACEMENT_V2 && PLACEMENT_OVERLAY && sec === 'major_events') continue;
     const arr = content[sec];
     if (!Array.isArray(arr) || arr.length === 0) continue;
     const uniques: any[] = [];

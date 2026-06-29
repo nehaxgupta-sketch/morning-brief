@@ -492,10 +492,89 @@ function coerceCandidates(city: string, candidates: any[]): CityStory[] {
   return finaliseCityStories(city, candidates);
 }
 
+// ─── Sprint 23 — tail freshness + cross-day de-duplication ──────────────────
+// Two failure modes the screenshots exposed: (1) interest/city tails served
+// stale items (a 3-day-old Amazon story) because the candidate source wasn't
+// recency-gated; (2) the SAME story repeated across days. Both are fixed here at
+// the candidate chokepoint, for RSS and Perplexity sources alike. Revertible:
+// TAIL_RECENCY_HOURS controls the window; CROSS_DAY_DEDUP=off disables
+// suppression. Cross-day suppression is FAIL-OPEN — any DB error leaves the tail
+// untouched, never blocking the brief.
+const TAIL_RECENCY_HOURS = Math.max(1, parseInt(process.env.TAIL_RECENCY_HOURS || '48', 10) || 48);
+const CROSS_DAY_DEDUP = (process.env.CROSS_DAY_DEDUP || 'on').toLowerCase() !== 'off';
+const CROSS_DAY_LOOKBACK_DAYS = Math.max(1, parseInt(process.env.CROSS_DAY_LOOKBACK_DAYS || '2', 10) || 2);
+
+function tailUrlKey(u: any): string {
+  return String(u || '').trim().toLowerCase().split('?')[0].replace(/\/+$/, '');
+}
+function withinTailRecency(publishedAt: any): boolean {
+  if (!publishedAt || typeof publishedAt !== 'string') return true; // permissive on missing
+  let s = publishedAt.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) s = `${s}T23:59:59+05:30`; // date-only ⇒ end of day IST
+  const t = Date.parse(s);
+  if (!Number.isFinite(t)) return true; // unparseable ⇒ keep
+  return (Date.now() - t) <= TAIL_RECENCY_HOURS * 3600 * 1000;
+}
+
+// Memoised once per invocation, keyed by date so a warm container doesn't reuse
+// yesterday's set. Reads the recent days' tail_briefs rows (written by prior
+// tail-fetch runs) and collects their story URLs.
+let _recentTailUrls: { date: string; urls: Set<string> } | null = null;
+async function loadRecentTailUrls(): Promise<Set<string>> {
+  const today = getISTDate();
+  if (_recentTailUrls && _recentTailUrls.date === today) return _recentTailUrls.urls;
+  const urls = new Set<string>();
+  try {
+    const since = new Date(`${today}T00:00:00+05:30`);
+    since.setUTCDate(since.getUTCDate() - CROSS_DAY_LOOKBACK_DAYS);
+    const sinceStr = since.toISOString().slice(0, 10);
+    const { data, error } = await supabase
+      .from('tail_briefs')
+      .select('date, stories')
+      .gte('date', sinceStr)
+      .lt('date', today);
+    if (error) {
+      console.warn(`[cross-day] tail_briefs read failed: ${error.message} — suppression skipped.`);
+    } else {
+      for (const row of data || []) {
+        const stories = Array.isArray((row as any).stories) ? (row as any).stories : [];
+        for (const s of stories) { const k = tailUrlKey(s?.source_url); if (k) urls.add(k); }
+      }
+      console.log(`[cross-day] loaded ${urls.size} URL(s) shown in the last ${CROSS_DAY_LOOKBACK_DAYS} day(s).`);
+    }
+  } catch (e: any) {
+    console.warn(`[cross-day] suppression unavailable: ${e?.message || e}`);
+  }
+  _recentTailUrls = { date: today, urls };
+  return urls;
+}
+
+// Apply recency + cross-day suppression to a freshly-fetched candidate list.
+async function filterTailCandidates(label: string, candidates: any[]): Promise<any[]> {
+  if (!Array.isArray(candidates) || candidates.length === 0) return candidates || [];
+  const before = candidates.length;
+  let kept = candidates.filter((c) => withinTailRecency(c?.published_at));
+  const staleDropped = before - kept.length;
+  let crossDropped = 0;
+  if (CROSS_DAY_DEDUP) {
+    const recent = await loadRecentTailUrls();
+    if (recent.size > 0) {
+      const afterCross = kept.filter((c) => !recent.has(tailUrlKey(c?.source_url)));
+      crossDropped = kept.length - afterCross.length;
+      kept = afterCross;
+    }
+  }
+  if (staleDropped > 0 || crossDropped > 0) {
+    console.log(`[tail-filter:${label}] dropped ${staleDropped} stale (>${TAIL_RECENCY_HOURS}h) + ${crossDropped} seen-in-last-${CROSS_DAY_LOOKBACK_DAYS}d; ${kept.length}/${before} kept.`);
+  }
+  return kept;
+}
+
 async function fetchCityStories(city: string): Promise<CityStory[]> {
-  const candidates = PERSONAL_RSS
+  const candidates0 = PERSONAL_RSS
     ? await rssCityCandidates(city)
     : await perplexityCityCandidates(city);
+  const candidates = await filterTailCandidates(`city:${city}`, candidates0);
   if (candidates.length === 0) return [];
   return claudeSelectCityStories(city, candidates);
 }
@@ -687,9 +766,10 @@ function coerceInterestCandidates(interest: string, candidates: any[]): Interest
 
 async function fetchInterestStories(interest: string): Promise<InterestStory[]> {
   const def = PERSONAL_RSS ? interestDef(interest) : null;
-  const candidates = def
+  const candidates0 = def
     ? await rssInterestCandidates(interest, def)
     : await perplexityInterestCandidates(interest);
+  const candidates = await filterTailCandidates(`interest:${interest}`, candidates0);
   if (candidates.length === 0) return [];
   return claudeSelectInterestStories(interest, candidates, def?.why);
 }
@@ -1143,7 +1223,7 @@ function buildWithFloors(
   industryCache: Map<string, InterestStory[]>,
 ): BuildResult {
   const shape: 'micro' | 'full' = edition === '5min' ? 'micro' : 'full';
-  const cityMap: (s: CityStory) => any = shape === 'micro' ? cityToMicro : cityToFull;
+  const cityMap = shape === 'micro' ? cityToMicro : cityToFull;
   const scorer = (s: any) => scoreStory(s, profile);
 
   // Standard spine — full available, score-ordered; major capped at MAJOR_CAP.
