@@ -2280,10 +2280,13 @@ function placeByEventId(cleaned: any): void {
           if (s && typeof s.eventId === 'number') topicalIds.add(s.eventId);
         }
       }
-      for (const id of cutIds) {
+      // NOTE: iterate via Array.from, not `for...of` over the Set directly —
+      // this project's tsconfig target rejects direct Set iteration
+      // (TS "--downlevelIteration" error at next build; esbuild does not catch it).
+      Array.from(cutIds).forEach((id) => {
         if (topicalIds.has(id)) cutRehomed++;
         else orphaned++; // no topical twin — should be impossible; logged below.
-      }
+      });
     }
   }
 
