@@ -2231,9 +2231,25 @@ const PLACEMENT_ORDER = ['major_events', 'india', 'world', 'business', 'technolo
 // them. PLACEMENT_OVERLAY treats major_events as a HIGHLIGHT LAYER, not an
 // extraction: one-event-one-home still holds across the 7 topical sections (no
 // topical duplication), but a front-page lead ALSO renders in its topical home.
-// Effective only when PLACEMENT_V2 is on. Revertible: PLACEMENT_OVERLAY=off
-// restores the extraction behaviour exactly.
-const PLACEMENT_OVERLAY = (process.env.PLACEMENT_OVERLAY || 'on').toLowerCase() !== 'off';
+// Effective only when PLACEMENT_V2 is on.
+//
+// ─── DECISION (2026-06-29) — suppress the repeat: EXTRACTION, not overlay ──────
+// The overlay made a front-page lead ALSO appear in its topical home (the
+// newspaper repeat). Product decision: an event must appear exactly ONCE. So
+// PLACEMENT_OVERLAY now DEFAULTS OFF — major_events claims its events out of the
+// topical sections (extraction). The orphaning bug that extraction historically
+// risked ("event was on the front page → dropped from india → then the front
+// page over-filled/under-wrote → it vanished from BOTH") is structurally
+// impossible here, because:
+//   (a) the front page is trimmed to capacity FIRST (below), so an event ranked
+//       out of the top-5 is never claimed, and its topical twin survives; and
+//   (b) the topical twin ALWAYS exists — rss-retrieval builds major_events by
+//       SELECTING (copying) PoolItems that REMAIN in pool.india/world (see
+//       rss-retrieval ~L1018: the lead is filled from indiaRanked/restRanked
+//       without removing them). So "fallback to home" is automatic: dropping an
+//       event from the front page cannot orphan it — the section copy is intact.
+// Revert: PLACEMENT_OVERLAY=on restores the newspaper repeat exactly.
+const PLACEMENT_OVERLAY = (process.env.PLACEMENT_OVERLAY || 'off').toLowerCase() === 'on';
 // Topical precedence (front page excluded — it overlays, it does not claim).
 const PLACEMENT_TOPICAL_ORDER = ['india', 'world', 'business', 'technology', 'climate_health', 'sport', 'culture'];
 
@@ -2242,8 +2258,33 @@ function placeByEventId(cleaned: any): void {
   //    not "claimed" by major_events and then left unwritten — it falls back to
   //    its topical home instead (this is what fixes the orphaning, e.g. the
   //    earthquake that was deduped out of india yet never written into major).
+  //
+  //    Capture the eventIds being CUT, then verify each cut event still has a
+  //    surviving copy in some topical section. It always should (rss-retrieval
+  //    builds major_events by copying PoolItems that remain in india/world), so
+  //    this is a self-proving assertion: if `orphaned` is ever > 0, a cut event
+  //    has no topical home and the log names it loudly rather than failing silent.
+  let cutRehomed = 0;
+  let orphaned = 0;
   if (Array.isArray(cleaned.major_events) && cleaned.major_events.length > PLACEMENT_MAJOR_CAP) {
+    const cut = cleaned.major_events.slice(PLACEMENT_MAJOR_CAP);
     cleaned.major_events = cleaned.major_events.slice(0, PLACEMENT_MAJOR_CAP);
+    const cutIds = new Set<number>(
+      cut.map((s: any) => (s && typeof s.eventId === 'number') ? s.eventId : null)
+         .filter((id: number | null): id is number => id != null),
+    );
+    if (cutIds.size > 0) {
+      const topicalIds = new Set<number>();
+      for (const sec of PLACEMENT_TOPICAL_ORDER) {
+        for (const s of (cleaned[sec] || [])) {
+          if (s && typeof s.eventId === 'number') topicalIds.add(s.eventId);
+        }
+      }
+      for (const id of cutIds) {
+        if (topicalIds.has(id)) cutRehomed++;
+        else orphaned++; // no topical twin — should be impossible; logged below.
+      }
+    }
   }
 
   // 2. One event → one home: walk sections in precedence; the first section to
@@ -2285,8 +2326,10 @@ function placeByEventId(cleaned: any): void {
   }
   if (collisions > 0) {
     console.error(`[placement-v2] ASSERT FAILED — ${collisions} event(s) in >1 section after placement.`);
+  } else if (orphaned > 0) {
+    console.error(`[placement-v2] ASSERT FAILED — ${orphaned} event(s) cut from the front page with NO topical home (orphaned). ${cutRehomed} cut event(s) correctly fell back.`);
   } else {
-    console.log(`[placement-v2] ${PLACEMENT_OVERLAY ? 'overlay (front-page highlights also shown in their topical home)' : 'extraction'} — ${claimed.size} topical event(s) placed, ${removed} cross/within-section dupe(s) removed, major≤${PLACEMENT_MAJOR_CAP}.`);
+    console.log(`[placement-v2] ${PLACEMENT_OVERLAY ? 'overlay (front-page highlights also shown in their topical home)' : 'extraction (one home per event; front-page leads not repeated topically)'} — ${claimed.size} topical event(s) placed, ${cutRehomed} cut→fell-back to topical home, ${removed} cross/within-section dupe(s) removed, major≤${PLACEMENT_MAJOR_CAP}.`);
   }
 }
 

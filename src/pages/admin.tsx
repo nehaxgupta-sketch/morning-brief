@@ -305,7 +305,7 @@ const STEP_META: Record<StageId, { endpoint: string; does: string; running: stri
     endpoint: "POST /api/generate-brief · mode: 'fetch'",
     does: 'Pulls the day’s news, dedups, scores newsworthiness, and saves the raw pool all 3 editions write from.',
     running: 'fetching news (~40s)…',
-    refresh: 'Refresh when a sprint touches feeds, the source whitelist, dedup, newsworthiness, or front-page / edition selection.',
+    refresh: 'Refresh when a sprint touches feeds, the source whitelist, dedup, newsworthiness, or front-page / edition selection. Sprint 25: placement is now EXTRACTION (one home per event; front-page leads no longer repeat in their topical section) — proof-line `[placement-v2] extraction … cut→fell-back …`; set PLACEMENT_OVERLAY=on to restore the repeat. Sprint 24 clustering proof-line `[event-cluster] … via embeddings`.',
   },
   write: {
     endpoint: "POST /api/generate-brief · mode: 'write' (5min → 10min → deep, one at a time)",
@@ -341,7 +341,7 @@ const STEP_META: Record<StageId, { endpoint: string; does: string; running: stri
     endpoint: 'POST /api/generate-desks',
     does: 'Generates the subscribed desks that don’t yet have today’s edition (2 at a time).',
     running: 'generating subscribed desks…',
-    refresh: 'Refresh when a sprint touches desk generation, the desk writer, or desk scoring.',
+    refresh: 'Refresh when a sprint touches desk generation, the desk writer, or desk scoring. Sprint 24: per-desk floors + verify-on-fail=keep — proof-lines `[desk:*:verify] … onfail=keep` and `[desk:*] THIN … (< floor N)`. Sprint 25: invented-citation capture — `[desk:*] non-whitelisted dropped N/M …` names the fake outlets (CSIS / Brookings / Bollywood Hungama…) the search model tried to cite; read it to finish the prompt-side fix.',
   },
   extras: {
     endpoint: 'POST /api/score-extras',

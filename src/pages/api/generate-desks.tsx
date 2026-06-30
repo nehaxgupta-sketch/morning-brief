@@ -18,8 +18,8 @@
 //   2. Write (gpt-4o-mini, desk voice): distributes kept stories into the
 //      locked content shape — lens + top_stories(5) + india(4) + global(3) +
 //      features(4) + quick_takes(4) + desk_editorial.
-//   3. Save to desk_editions (status 'ready', or 'thin' below the 15-story
-//      floor — written anyway, with a logged warning).
+//   3. Save to desk_editions (status 'ready', or 'thin' below the desk's own
+//      per-desk story floor — written anyway, with a logged warning).
 //   4. Score (gpt-4o-mini, 7-dim rubric + the Sprint 13 deterministic
 //      empty-section penalty) → brief_scores with edition = 'desk:<slug>'.
 //
@@ -63,7 +63,28 @@ const DESK_CONCURRENCY = 2;          // desks in flight at once (TPM discipline,
                                      // each desk makes 2 search calls, so 2
                                      // desks ≈ 4 concurrent search requests)
 const TIME_BUDGET_MS = 200_000;      // stop STARTING new desks after this
-const STORY_FLOOR = 15;              // below this → status 'thin' + warning
+// Per-desk thin threshold. Sprint 24 — a single global floor (was 15) mislabels
+// desks with genuinely different natural sizes: a content-rich desk (business,
+// tech, politics) sustains ~16–20, while entertainment and markets run leaner by
+// nature of their pools. One number forced the lean desks to read 'thin' on a
+// normal day. Each desk now has its own floor; DESK_STORY_FLOORS overrides via
+// env as a CSV of slug:floor pairs (e.g. "entertainment:8,markets:10"), and
+// DESK_STORY_FLOOR_DEFAULT sets the fallback. Below a desk's floor → 'thin'.
+const STORY_FLOOR_DEFAULT = Math.max(1, parseInt(process.env.DESK_STORY_FLOOR_DEFAULT || '12', 10) || 12);
+const STORY_FLOOR_OVERRIDES: Record<string, number> = (() => {
+  const base: Record<string, number> = {
+    business: 14, tech: 14, politics: 13, markets: 10, sport: 12, entertainment: 8,
+  };
+  for (const pair of (process.env.DESK_STORY_FLOORS || '').split(',')) {
+    const [slug, n] = pair.split(':').map((x) => x.trim());
+    const v = parseInt(n, 10);
+    if (slug && Number.isFinite(v) && v > 0) base[slug] = v;
+  }
+  return base;
+})();
+function storyFloorFor(slug: string): number {
+  return STORY_FLOOR_OVERRIDES[slug] ?? STORY_FLOOR_DEFAULT;
+}
 const FEATURE_TARGET = 8;            // 7-day features fetch ask (a couple extra to survive whitelist drops)
 const DESK_FETCH_MODEL = 'gpt-4o-mini-search-preview';
 const DESK_WRITE_MODEL = 'gpt-4o-mini'; // writer AND scorer (mini, per cost gate)
@@ -79,10 +100,20 @@ const DESK_WRITE_MODEL = 'gpt-4o-mini'; // writer AND scorer (mini, per cost gat
 // window. Only features are verified (a small set), not the whole pool (pool
 // stories are already recency-gated upstream in the brief).
 const FEATURE_MAX_AGE_DAYS = Math.max(1, parseInt(process.env.DESK_FEATURE_MAX_AGE_DAYS || '21', 10) || 21);
-// What to do when the verification fetch itself fails (timeout / publisher blocks
-// Vercel's IP): 'drop' (default — an unverifiable feature carries the same risk
-// as the stale ones) or 'keep' (loosen if desks thin from reachability).
-const FEATURE_VERIFY_ONFAIL = (process.env.DESK_FEATURE_VERIFY_ONFAIL || 'drop').toLowerCase() === 'keep' ? 'keep' : 'drop';
+// What to do when the verification fetch ITSELF fails (timeout / publisher blocks
+// Vercel's datacenter IP with a 403) — as opposed to a confirmed-dead 4xx or a
+// confirmed-stale date, which are still always dropped below.
+//
+// Sprint 24 — default flipped 'drop' → 'keep'. Evidence: across all six desks
+// the features section collapsed to 0–1 items (target 8), which alone dropped
+// desks from ~20 stories to ~12–14, under the floor → 'thin'. The cause was not
+// bad features; it was that a verify-fetch FAILURE (publisher refusing Vercel's
+// IP, or a 9s timeout) was treated identically to a dead link and dropped. That
+// punishes good, live articles for an infrastructure quirk. We now KEEP a
+// feature whose verify-fetch fails (we simply couldn't check it), while still
+// dropping anything we POSITIVELY confirm is dead (4xx/5xx) or stale (old date).
+// Set DESK_FEATURE_VERIFY_ONFAIL=drop to restore the old strict behaviour.
+const FEATURE_VERIFY_ONFAIL = (process.env.DESK_FEATURE_VERIFY_ONFAIL || 'keep').toLowerCase() === 'drop' ? 'drop' : 'keep';
 
 // ─── Auth (same contract as generate-brief: CRON_SECRET or session token) ───
 
@@ -441,7 +472,8 @@ India wires: PTI, ANI.
 India specialist: Live Law, Bar & Bench (law), Down To Earth (environment).
 Government primary: RBI, SEBI, MoSPI, PIB.
 Specialist: TechCrunch, The Verge, Wired, Ars Technica (tech), Nature, Science, STAT (science/health), Variety, Hollywood Reporter (entertainment), ESPNCricinfo, ESPN (sport).
-No aggregators, no social media, no Google News redirects. Only return URLs you actually retrieved from a search result — never construct or guess a URL.`;
+No aggregators, no social media, no Google News redirects. Only return URLs you actually retrieved from a search result — never construct or guess a URL.
+CRITICAL — do NOT cite outlets that are not on this list. If the best piece you found is from a think-tank, trade outlet, or niche site NOT named above (e.g. CSIS, Brookings, Carnegie, Bollywood Hungama, Cinema Express, Pinkvilla, or any blog), DROP it and find a whitelisted publisher covering the same story instead. Do NOT substitute a real whitelisted name onto a URL from a different outlet, and do NOT invent a citation. Returning fewer items from whitelisted sources is correct and expected; padding the list with non-whitelisted or fabricated citations is a failure — they are discarded downstream and waste the slot.`;
 }
 
 // ─── Search-model call (mirrors callTailFetch's mini-search path) ───────────
@@ -503,16 +535,41 @@ async function callDeskSearch(
   const raw = Array.isArray(parsed?.stories) ? parsed.stories : [];
   const kept: RawDeskStory[] = [];
   const seenUrls = new Set<string>();
+  // Sprint 25 — citation-confabulation capture. The desk search model invents
+  // citations to plausible-but-non-whitelisted outlets (CSIS, Brookings,
+  // Bollywood Hungama, Cinema Express…) that die here at the gate, collapsing
+  // the features list. Previously each drop logged one line by URL only, so the
+  // PATTERN (which fake publishers, how often, on which desk) was unreadable in
+  // the run log — which is exactly why the prompt-side fix was blocked (no data).
+  // Now we aggregate: collect the invented publisher hosts/names and emit ONE
+  // countable summary line per call. That single line is the capture the fix was
+  // waiting on. (Proof: [desk:*] non-whitelisted dropped …)
+  const droppedCites: string[] = [];
   for (const s of raw) {
     if (!s || typeof s.headline !== 'string' || typeof s.body !== 'string' || typeof s.source !== 'string') continue;
     if (!isWhitelistedSource(s.source_url)) {
-      console.warn(`[desk:${label}] dropping non-whitelisted source: ${s.source_url}`);
+      // Capture the model's claimed publisher + the URL host, so the aggregate
+      // names the invented outlet (the "source" field is what the model thinks
+      // it cited; the host is what it actually linked).
+      let host = '';
+      try { host = new URL(s.source_url).hostname.replace(/^www\./, ''); } catch { host = '(unparseable-url)'; }
+      droppedCites.push(`${(s.source || '?').slice(0, 40)}<${host}>`);
       continue;
     }
     if (seenUrls.has(s.source_url)) continue;
     seenUrls.add(s.source_url);
     kept.push(s as RawDeskStory);
     if (kept.length >= cap) break;
+  }
+  if (droppedCites.length > 0) {
+    // Tally identical invented outlets so a repeat offender shows its count.
+    const tally = new Map<string, number>();
+    for (const c of droppedCites) tally.set(c, (tally.get(c) || 0) + 1);
+    const summary = Array.from(tally.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([name, n]) => (n > 1 ? `${name}×${n}` : name))
+      .join(', ');
+    console.warn(`[desk:${label}] non-whitelisted dropped ${droppedCites.length}/${raw.length} (kept ${kept.length}): ${summary}`);
   }
   return kept;
 }
@@ -664,15 +721,24 @@ ${JSON.stringify(features)}`;
 function enforceDeskSourceUrls(
   content: any,
   rawUrls: Set<string>,
-): { content: any; dropped: number } {
+): { content: any; dropped: number; cites: string[] } {
   let dropped = 0;
+  const cites: string[] = [];
   const guard = (arr: any) => {
     if (!Array.isArray(arr)) return [];
     return arr.filter((s: any) => {
       const ok = s && typeof s.source_url === 'string'
         && rawUrls.has(s.source_url)
         && isWhitelistedSource(s.source_url);
-      if (!ok) dropped++;
+      if (!ok) {
+        dropped++;
+        // Capture the invented/ineligible publisher for the citation-pattern log.
+        let host = '';
+        try { host = s && typeof s.source_url === 'string' ? new URL(s.source_url).hostname.replace(/^www\./, '') : '(no-url)'; }
+        catch { host = '(unparseable-url)'; }
+        const reason = (s && typeof s.source_url === 'string' && isWhitelistedSource(s.source_url)) ? 'not-in-pool' : 'non-whitelisted';
+        cites.push(`${(s?.source || '?').slice(0, 40)}<${host}:${reason}>`);
+      }
       return ok;
     });
   };
@@ -681,7 +747,7 @@ function enforceDeskSourceUrls(
   content.global = guard(content.global);
   content.features = guard(content.features);
   content.quick_takes = guard(content.quick_takes);
-  return { content, dropped };
+  return { content, dropped, cites };
 }
 
 function deskStoryCount(content: any): number {
@@ -838,7 +904,11 @@ async function runDesk(desk: DeskRow, pool: RawDeskStory[]): Promise<DeskRunResu
     const enforced = enforceDeskSourceUrls(content, rawUrls);
     content = enforced.content;
     if (enforced.dropped > 0) {
-      console.warn(`[desk:${desk.slug}] dropped ${enforced.dropped} stories with invented/non-whitelisted URLs post-write.`);
+      const tally = new Map<string, number>();
+      for (const c of enforced.cites) tally.set(c, (tally.get(c) || 0) + 1);
+      const summary = Array.from(tally.entries()).sort((a, b) => b[1] - a[1])
+        .map(([name, n]) => (n > 1 ? `${name}×${n}` : name)).join(', ');
+      console.warn(`[desk:${desk.slug}] dropped ${enforced.dropped} stories with invented/non-whitelisted URLs post-write: ${summary}`);
     }
 
     // Sprint 17 #2: remove the same story repeated across sections of this desk.
@@ -856,9 +926,10 @@ async function runDesk(desk: DeskRow, pool: RawDeskStory[]): Promise<DeskRunResu
     content.date = today;
 
     const count = deskStoryCount(content);
-    const status: 'ready' | 'thin' = count >= STORY_FLOOR ? 'ready' : 'thin';
+    const floor = storyFloorFor(desk.slug);
+    const status: 'ready' | 'thin' = count >= floor ? 'ready' : 'thin';
     if (status === 'thin') {
-      console.warn(`[desk:${desk.slug}] THIN edition: ${count} stories (< floor ${STORY_FLOOR}). Shipping anyway with status=thin.`);
+      console.warn(`[desk:${desk.slug}] THIN edition: ${count} stories (< floor ${floor}). Shipping anyway with status=thin.`);
     }
 
     // 4. Save.
