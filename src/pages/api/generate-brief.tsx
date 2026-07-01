@@ -2253,40 +2253,48 @@ const PLACEMENT_OVERLAY = (process.env.PLACEMENT_OVERLAY || 'off').toLowerCase()
 // Topical precedence (front page excluded — it overlays, it does not claim).
 const PLACEMENT_TOPICAL_ORDER = ['india', 'world', 'business', 'technology', 'climate_health', 'sport', 'culture'];
 
-function placeByEventId(cleaned: any): void {
-  // 1. Trim the front page to capacity FIRST, so an event ranked below the cut is
-  //    not "claimed" by major_events and then left unwritten — it falls back to
-  //    its topical home instead (this is what fixes the orphaning, e.g. the
-  //    earthquake that was deduped out of india yet never written into major).
-  //
-  //    Capture the eventIds being CUT, then verify each cut event still has a
-  //    surviving copy in some topical section. It always should (rss-retrieval
-  //    builds major_events by copying PoolItems that remain in india/world), so
-  //    this is a self-proving assertion: if `orphaned` is ever > 0, a cut event
-  //    has no topical home and the log names it loudly rather than failing silent.
-  let cutRehomed = 0;
-  let orphaned = 0;
+function placeByEventId(cleaned: any, eventHomeSection?: Map<number, string>): void {
+  // 1. Trim the front page to capacity FIRST. A lead ranked below the cut must
+  //    NOT vanish: it falls back to its topical home. The original design only
+  //    *checked* whether the topical twin still existed — but recency/cap/near-dup
+  //    run before this and often drop the twin, so cut leads orphaned (proven live:
+  //    "ASSERT FAILED — 7 event(s) … NO topical home"). Fix (Sprint 25.1): when a
+  //    cut lead's twin is gone, RE-INJECT the cut story object itself into its home
+  //    section (captured from the unfiltered pool in eventHomeSection). Guarantees
+  //    fallback by construction instead of hoping the twin survived.
+  let cutRehomed = 0;     // cut lead whose twin already survived in its section
+  let cutReinjected = 0;  // cut lead we had to re-insert (twin was filtered away)
+  let orphaned = 0;       // cut lead with no recoverable home (should now be ~0)
   if (Array.isArray(cleaned.major_events) && cleaned.major_events.length > PLACEMENT_MAJOR_CAP) {
     const cut = cleaned.major_events.slice(PLACEMENT_MAJOR_CAP);
     cleaned.major_events = cleaned.major_events.slice(0, PLACEMENT_MAJOR_CAP);
-    const cutIds = new Set<number>(
-      cut.map((s: any) => (s && typeof s.eventId === 'number') ? s.eventId : null)
-         .filter((id: number | null): id is number => id != null),
-    );
-    if (cutIds.size > 0) {
-      const topicalIds = new Set<number>();
-      for (const sec of PLACEMENT_TOPICAL_ORDER) {
-        for (const s of (cleaned[sec] || [])) {
-          if (s && typeof s.eventId === 'number') topicalIds.add(s.eventId);
-        }
+
+    // Which eventIds currently survive in some topical section?
+    const topicalIds = new Set<number>();
+    for (const sec of PLACEMENT_TOPICAL_ORDER) {
+      for (const s of (cleaned[sec] || [])) {
+        if (s && typeof s.eventId === 'number') topicalIds.add(s.eventId);
       }
-      // NOTE: iterate via Array.from, not `for...of` over the Set directly —
-      // this project's tsconfig target rejects direct Set iteration
-      // (TS "--downlevelIteration" error at next build; esbuild does not catch it).
-      Array.from(cutIds).forEach((id) => {
-        if (topicalIds.has(id)) cutRehomed++;
-        else orphaned++; // no topical twin — should be impossible; logged below.
-      });
+    }
+
+    for (const story of cut) {
+      const id = (story && typeof story.eventId === 'number') ? story.eventId : null;
+      if (id == null) { orphaned++; continue; } // no id → cannot re-home; counted, logged below
+      if (topicalIds.has(id)) { cutRehomed++; continue; } // twin already present — step 2 keeps one copy
+      // Twin was filtered away → re-inject the cut story into its captured home.
+      const home = eventHomeSection?.get(id);
+      if (home && Array.isArray(cleaned[home])) {
+        cleaned[home].push(story);
+        topicalIds.add(id);
+        cutReinjected++;
+      } else if (home === undefined && eventHomeSection) {
+        // Event never had a topical home in the unfiltered pool (e.g. a major-only
+        // event). Keep it on the front page rather than lose it — the safe fallback.
+        cleaned.major_events.push(story);
+        cutReinjected++;
+      } else {
+        orphaned++; // truly unrecoverable — should be ~0; named loudly below.
+      }
     }
   }
 
@@ -2330,9 +2338,9 @@ function placeByEventId(cleaned: any): void {
   if (collisions > 0) {
     console.error(`[placement-v2] ASSERT FAILED — ${collisions} event(s) in >1 section after placement.`);
   } else if (orphaned > 0) {
-    console.error(`[placement-v2] ASSERT FAILED — ${orphaned} event(s) cut from the front page with NO topical home (orphaned). ${cutRehomed} cut event(s) correctly fell back.`);
+    console.error(`[placement-v2] ASSERT FAILED — ${orphaned} cut event(s) unrecoverable (no eventId/home; lost). ${cutRehomed} fell back, ${cutReinjected} re-injected.`);
   } else {
-    console.log(`[placement-v2] ${PLACEMENT_OVERLAY ? 'overlay (front-page highlights also shown in their topical home)' : 'extraction (one home per event; front-page leads not repeated topically)'} — ${claimed.size} topical event(s) placed, ${cutRehomed} cut→fell-back to topical home, ${removed} cross/within-section dupe(s) removed, major≤${PLACEMENT_MAJOR_CAP}.`);
+    console.log(`[placement-v2] ${PLACEMENT_OVERLAY ? 'overlay (front-page highlights also shown in their topical home)' : 'extraction (one home per event; front-page leads not repeated topically)'} — ${claimed.size} topical event(s) placed, ${cutRehomed} cut→twin-survived, ${cutReinjected} cut→re-injected to home, ${removed} cross/within-section dupe(s) removed, major≤${PLACEMENT_MAJOR_CAP}.`);
   }
 }
 
@@ -2389,6 +2397,28 @@ function enforceQualityRules(raw: any): RawStories {
 
   // Priority for dedup — earlier wins.
   const priority = ['major_events', 'world', 'india', 'business', 'technology', 'climate_health', 'sport', 'culture'];
+
+  // ─── Sprint 25.1 — capture eventId → topical home BEFORE any filtering ───────
+  // placeByEventId (end of this function) trims the front page to 5 and re-homes
+  // the cut leads. The original design assumed each cut lead's topical twin would
+  // still be present in its section at that point — but recency/cap/near-dup run
+  // FIRST and frequently drop the twin, so the cut lead orphaned (proven live:
+  // "[placement-v2] ASSERT FAILED — 7 event(s) … NO topical home"). Fix: snapshot
+  // each event's home section from the UNFILTERED `raw` here, so placeByEventId can
+  // RE-INJECT a cut lead into its home even when the twin was filtered away. We
+  // record the FIRST topical section (in priority order) that carries each eventId;
+  // major_events is skipped (it is the front page, not a home).
+  const eventHomeSection = new Map<number, string>();
+  for (const sec of priority) {
+    if (sec === 'major_events') continue;
+    const arr = (raw as any)[sec];
+    if (!Array.isArray(arr)) continue;
+    for (const s of arr) {
+      const id = (s && typeof s.eventId === 'number') ? s.eventId : null;
+      if (id == null) continue;
+      if (!eventHomeSection.has(id)) eventHomeSection.set(id, sec);
+    }
+  }
 
   function processList(section: string, list: any[]): RawStory[] {
     const kept: RawStory[] = [];
@@ -2596,7 +2626,7 @@ function enforceQualityRules(raw: any): RawStories {
   // engine's eventId, run last so it operates on the final per-section lists
   // (after dedup, cap, and near-dup collapse). Guarantees no event appears in two
   // sections; trims the front page to capacity with fallback-to-home.
-  if (PLACEMENT_V2) placeByEventId(cleaned);
+  if (PLACEMENT_V2) placeByEventId(cleaned, eventHomeSection);
 
   console.log(`Quality enforcement complete. Must-includes: ${mustCount}/5. Dropped: ${dropped.length}`);
   if (dropped.length > 0) console.log('Dropped:', JSON.stringify(dropped, null, 2).slice(0, 1500));
