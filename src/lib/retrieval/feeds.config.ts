@@ -289,6 +289,24 @@ export const SECTION_FEEDS: SectionFeed[] = [
   { source: 'Deadline', tier: 2, url: 'https://deadline.com/feed/',
     sections: ['culture'], tags: ['src:deadline', 'sec:entertainment'], verified: false },
 
+  // ==== Sprint 26 (F5) — India-entertainment feeds for the Bollywood desk ====
+  // The Bollywood & Entertainment desk had ONE ent feed (Deadline, US trade), so
+  // the search model kept inventing citations to legit-but-unfed India outlets
+  // that then died at the whitelist gate (8/8 dropped, 2 empty sections). These
+  // three add real India film-trade URLs to the pool so the desk can SELECT from
+  // whitelisted sources instead of padding. Each follows the SAME per-publisher
+  // URL pattern already proven for that source's other feeds above (IE
+  // /section/<x>/feed/, Hindu /<x>/feeder/default.rss, HT /feeds/rss/<x>/rssfeed.xml),
+  // so they are the highest-probability-to-resolve options — but every URL is
+  // unverified: VALIDATE LIVE FROM VERCEL (feedcheck) before trusting, and flip
+  // verified:true per row once it returns HTTP 200 + parseable on-domain items.
+  { source: 'Indian Express', tier: 3, url: 'https://indianexpress.com/section/entertainment/feed/',
+    sections: ['culture'], tags: ['src:indianexpress', 'sec:entertainment'], verified: false },
+  { source: 'The Hindu', tier: 3, url: 'https://www.thehindu.com/entertainment/feeder/default.rss',
+    sections: ['culture'], tags: ['src:thehindu', 'sec:entertainment'], verified: false },
+  { source: 'Hindustan Times', tier: 3, url: 'https://www.hindustantimes.com/feeds/rss/entertainment/rssfeed.xml',
+    sections: ['culture'], tags: ['src:ht', 'sec:entertainment'], verified: false },
+
   // ==== Sprint 15.1 — reliable "floor" feeds for thin/empty sections ====
   // These publishers are confirmed to answer from Vercel's data-centre IP, so
   // they keep sport / business / climate_health from going empty when the

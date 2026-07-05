@@ -2195,6 +2195,45 @@ function isSameEvent(a: Set<string>, b: Set<string>): boolean {
   return shared >= 3 && shared / small >= 0.6;
 }
 
+// ─── Prefix-aware same-event (Sprint 26 F2/F7) ──────────────────────────────
+// The plain semanticOverlap above is exact-token: it does NOT stem, so
+// "russia" and "russian" (or "strike"/"strikes" when one side didn't hit the
+// synonym map) count as DIFFERENT tokens. That is exactly why two "massive
+// Russian strike on Kyiv" stories got separate eventIds and slipped past every
+// existing dedup: their signatures shared only {kyiv, massive, @strike} = 3,
+// one short of isSameEvent's bar. This variant treats two tokens as matching
+// when they are equal OR one is a prefix of the other AND the shorter is ≥5
+// chars (so russia⊂russian merges, but short accidental prefixes like
+// "pol"⊂"police" do not). Verified by hand not to over-merge the distinct
+// pairs in the RCA. Used ONLY by the section-level guard and the final-brief
+// invariant checker — never to widen the engine's clustering threshold
+// (RCA §10 #4: do NOT lower EVENT_SIM_THRESHOLD blindly).
+const EVENT_PREFIX_MIN = 5;
+function prefixTokenMatch(x: string, y: string): boolean {
+  if (x === y) return true;
+  const shorter = x.length <= y.length ? x : y;
+  const longer = x.length <= y.length ? y : x;
+  if (shorter.length < EVENT_PREFIX_MIN) return false;
+  return longer.startsWith(shorter);
+}
+function prefixOverlap(a: Set<string>, b: Set<string>): number {
+  const A = Array.from(a);
+  const B = Array.from(b);
+  let n = 0;
+  for (const x of A) {
+    for (const y of B) {
+      if (prefixTokenMatch(x, y)) { n++; break; }
+    }
+  }
+  return n;
+}
+function isSameEventPrefix(a: Set<string>, b: Set<string>): boolean {
+  const shared = prefixOverlap(a, b);
+  if (shared >= 4) return true;
+  const small = Math.min(a.size, b.size) || 1;
+  return shared >= 3 && shared / small >= 0.6;
+}
+
 // Sprint 20.2 — the front page over-provisions to 12 leads for RANKING, but the
 // writer takes only the top ~5 into major_events. Deduping india/world against
 // all 12 ORPHANED the leads ranked 6-12: genuinely big India stories (a fatal
@@ -2371,6 +2410,18 @@ function dropSemanticDuplicatesAgainstMajor(raw: any): { kept: any; droppedCount
   };
   return { kept, droppedCount };
 }
+
+// ─── Sprint 26 (F2) — within-section split-event guard ──────────────────────
+// Default ON. The RCA's #1 reader-visible defect: two "massive Russian strike
+// on Kyiv" stories shipped in world with DIFFERENT eventIds (the embeddings
+// clustering split them at cosine < threshold), so neither placeByEventId
+// (dedups by eventId) nor the exact-match near-dup pass (shared only 3 tokens,
+// one short of the bar) collapsed them. This flag adds a SECOND near-dup pass
+// AFTER placeByEventId using the prefix-aware bar (russia~russian ⇒ 4 shared ⇒
+// merge), keeping the better-corroborated copy. It logs every collapse and is
+// env-revertible (SECTION_DEDUP=false). It does NOT touch the engine's
+// clustering threshold (RCA §10 #4).
+const SECTION_DEDUP = (process.env.SECTION_DEDUP || 'true').toLowerCase() !== 'false';
 
 function enforceQualityRules(raw: any): RawStories {
   // First pass: semantic dedup of world/india against major_events.
@@ -2627,6 +2678,74 @@ function enforceQualityRules(raw: any): RawStories {
   // (after dedup, cap, and near-dup collapse). Guarantees no event appears in two
   // sections; trims the front page to capacity with fallback-to-home.
   if (PLACEMENT_V2) placeByEventId(cleaned, eventHomeSection);
+
+  // ─── Sprint 26 (F2) — split-event section dedup ────────────────────────────
+  // Runs AFTER placeByEventId so it also catches any near-dup that re-injection
+  // reintroduced. For each section, collapse stories whose event-signatures pass
+  // the PREFIX-AWARE bar (isSameEventPrefix) — this is what the exact-match pass
+  // above missed for the Kyiv pair (russia vs russian). When two collapse,
+  // KEEP the higher eventCorr (more distinct publishers corroborated it); tie →
+  // keep the earlier (already in importance order). must_include is never
+  // dropped. Logs each collapse with both headlines so the split is visible in
+  // the run log and the admin RCA.
+  if (SECTION_DEDUP) {
+    let sectionDedupCollapsed = 0;
+    for (const sec of priority) {
+      const arr = (cleaned as any)[sec] as RawStory[];
+      if (!Array.isArray(arr) || arr.length < 2) continue;
+      const kept: RawStory[] = [];
+      const keptSigs: Set<string>[] = [];
+      for (const story of arr) {
+        const sig = eventSignature(story?.headline || '');
+        let dupIdx = -1;
+        for (let i = 0; i < keptSigs.length; i++) {
+          if (isSameEventPrefix(sig, keptSigs[i])) { dupIdx = i; break; }
+        }
+        if (dupIdx === -1) {
+          kept.push(story);
+          keptSigs.push(sig);
+          continue;
+        }
+        // Found a same-event partner already kept in this section.
+        const incumbent = kept[dupIdx];
+        const incCorr = Number((incumbent as any)?.eventCorr || 0);
+        const newCorr = Number((story as any)?.eventCorr || 0);
+        const incMust = !!(incumbent as any)?.must_include;
+        const newMust = !!(story as any)?.must_include;
+        // Never drop a must_include; if both must_include, keep both (skip merge).
+        if (incMust && newMust) {
+          kept.push(story);
+          keptSigs.push(sig);
+          continue;
+        }
+        let dropHeadline: string;
+        if (newMust && !incMust) {
+          // Replace incumbent with the must_include newcomer.
+          dropHeadline = incumbent?.headline || '';
+          kept[dupIdx] = story;
+          keptSigs[dupIdx] = sig;
+        } else if (incMust && !newMust) {
+          dropHeadline = story?.headline || '';
+          // keep incumbent, drop newcomer
+        } else if (newCorr > incCorr) {
+          dropHeadline = incumbent?.headline || '';
+          kept[dupIdx] = story;
+          keptSigs[dupIdx] = sig;
+        } else {
+          dropHeadline = story?.headline || '';
+          // tie or incumbent higher → keep incumbent (earlier)
+        }
+        sectionDedupCollapsed++;
+        console.log(`[section-dedup] collapsed same-event pair in ${sec} (kept eventCorr=${Math.max(incCorr, newCorr)}): dropped "${(dropHeadline || '').slice(0, 70)}" — kept "${(kept[dupIdx]?.headline || '').slice(0, 70)}"`);
+      }
+      (cleaned as any)[sec] = kept;
+    }
+    if (sectionDedupCollapsed > 0) {
+      console.log(`[section-dedup] collapsed ${sectionDedupCollapsed} split-event duplicate(s) across sections.`);
+    } else {
+      console.log('[section-dedup] no split-event duplicates found.');
+    }
+  }
 
   console.log(`Quality enforcement complete. Must-includes: ${mustCount}/5. Dropped: ${dropped.length}`);
   if (dropped.length > 0) console.log('Dropped:', JSON.stringify(dropped, null, 2).slice(0, 1500));
@@ -3198,6 +3317,13 @@ async function callOpenAIChat(
 // set REWRITE_TEMPLATE_WHYS=false to disable the rewrite (sentinels then ship).
 const BACKFILL_WHY_FULL = 'Relevant context for Indian readers; see the linked report for detail.';
 const BACKFILL_WHY_MICRO = 'Relevant context for Indian readers; see the linked report.';
+// Sprint 26 (F7) — the exact static sentences rawToFullStory stamps on a padded
+// story. Named here so the final-brief invariant checker can fingerprint a raw
+// template that reached the reader, with zero drift risk. (why_it_matters is
+// handled by BACKFILL_WHY_* above; rewriteTemplateWhys replaces it, but analysis
+// and what_happens_next are NOT rewritten, so those two are the reliable tell.)
+const RAW_TEMPLATE_ANALYSIS = 'Included for completeness; see the linked source for the full account.';
+const RAW_TEMPLATE_WHATNEXT = 'Watch for follow-up coverage and official updates.';
 const REWRITE_TEMPLATE_WHYS = (process.env.REWRITE_TEMPLATE_WHYS || 'true').toLowerCase() !== 'false';
 
 function rawToFullStory(s: any): any {
@@ -3210,8 +3336,8 @@ function rawToFullStory(s: any): any {
     facts: facts || body || String(s?.headline || 'See the linked source for details.'),
     background: `Reported by ${s?.source || 'the source'}.`,
     why_it_matters: why || BACKFILL_WHY_FULL,
-    what_happens_next: 'Watch for follow-up coverage and official updates.',
-    analysis: 'Included for completeness; see the linked source for the full account.',
+    what_happens_next: RAW_TEMPLATE_WHATNEXT,
+    analysis: RAW_TEMPLATE_ANALYSIS,
     source: String(s?.source || '').trim(),
     source_url: String(s?.source_url || '').trim(),
     industries: Array.isArray(s?.industries) ? s.industries : [],
@@ -3284,13 +3410,20 @@ function dailySectionCountsStr(content: any): string {
 const TOPUP_SECTIONS_10MIN = ['major_events', 'india', 'world', 'business', 'technology', 'climate_health', 'sport', 'culture'];
 const TOPUP_SECTIONS_5MIN  = ['major_events', 'india', 'world'];
 
-function backfillToSubsetCounts(content: any, edition: Edition, subset: RawStories): number {
+function backfillToSubsetCounts(content: any, edition: Edition, subset: RawStories, excludeKeys?: Set<string>): number {
   if (!content || typeof content !== 'object') return 0;
   const sections = edition === '5min' ? TOPUP_SECTIONS_5MIN
                  : edition === '10min' ? TOPUP_SECTIONS_10MIN
                  : [];
   if (sections.length === 0) return 0;
   const convert = edition === '5min' ? rawToMicroStory : rawToFullStory;
+  // Sprint 26 (F1): stories the coherence pass just dropped (contradiction /
+  // fabrication / duplication) must NOT be silently re-added here as raw
+  // templates — that is exactly the "backfill resurrects a just-dropped Kyiv
+  // story as boilerplate" defect. The caller passes their normalised source_url
+  // keys; we skip any candidate matching one.
+  const blocked = excludeKeys instanceof Set ? excludeKeys : null;
+  let blockedSkips = 0;
   let added = 0;
   const padLog: string[] = [];
   for (const sec of sections) {
@@ -3305,6 +3438,7 @@ function backfillToSubsetCounts(content: any, edition: Edition, subset: RawStori
       if (out.length >= target) break;
       const key = normaliseUrlForCompare(raw?.source_url);
       if (key && present.has(key)) continue;
+      if (blocked && key && blocked.has(key)) { blockedSkips++; continue; }
       out.push(convert(raw));
       present.add(key);
       added++; secAdded++;
@@ -3314,6 +3448,9 @@ function backfillToSubsetCounts(content: any, edition: Edition, subset: RawStori
   }
   if (padLog.length > 0) {
     console.warn(`[backfill] ${edition} top-up padded under-filled sections with RAW TEMPLATES (these render as canned "why it matters"): ${padLog.join(' · ')}`);
+  }
+  if (blockedSkips > 0) {
+    console.log(`[backfill] ${edition} skipped ${blockedSkips} candidate(s) the coherence pass had dropped (F1 guard — not re-adding removed stories).`);
   }
   return added;
 }
@@ -3421,6 +3558,15 @@ ${numbered}`;
 
 const COHERENCE_ENFORCE = (process.env.COHERENCE_ENFORCE || 'on').toLowerCase() !== 'off';
 
+// Sprint 26 (F1) — default ON. Two independent guarantees on the coherence
+// pass: (1) a story the pass drops can NOT be re-added by the subsequent
+// backfill top-up (the defect where a coherence-dropped Kyiv story came back as
+// a raw boilerplate template), and (2) a high-severity `duplication` flag is
+// resolved by keep-best (drop the lower-corroboration twin) instead of the old
+// behaviour of ignoring duplication entirely. Env-revertible:
+// COHERENCE_BACKFILL_GUARD=false restores the pre-Sprint-26 wiring exactly.
+const COHERENCE_BACKFILL_GUARD = (process.env.COHERENCE_BACKFILL_GUARD || 'true').toLowerCase() !== 'false';
+
 type CoherenceIssue = {
   type: string;
   section: string;
@@ -3492,27 +3638,107 @@ ${compact}`;
   }
 }
 
-// Sprint 14.8 — apply blocking coherence: drop the exact stories flagged as
-// high-severity contradiction/fabrication. Returns how many were removed.
-function applyCoherenceDrops(content: any, edition: Edition, issues: CoherenceIssue[]): number {
-  if (!content || typeof content !== 'object' || !Array.isArray(issues)) return 0;
+// Sprint 14.8 / 26 (F1) — apply blocking coherence. Historically this dropped
+// only high-severity contradiction/fabrication and returned a count. It now:
+//   (1) always returns the normalised source_url + headline keys of what it
+//       dropped, so the caller can bar backfill from re-adding them (the Kyiv
+//       resurrection defect); and
+//   (2) when the F1 guard is on, also resolves a high-severity `duplication`
+//       flag by KEEP-BEST — find the flagged story's in-section near-dup partner
+//       (prefix-aware) and drop the LOWER-eventCorr member, NOT the flagged one
+//       blindly. If no partner is found the flag is treated as a possible
+//       mislabel and nothing is dropped (so a unique story is never lost to a
+//       bad "duplication" call). eventCorr is looked up from the subset by
+//       source_url; written stories that can't be resolved default to keep-first.
+interface CoherenceDropResult { removed: number; droppedUrlKeys: Set<string>; droppedHeadlineKeys: Set<string>; }
+function applyCoherenceDrops(
+  content: any,
+  edition: Edition,
+  issues: CoherenceIssue[],
+  opts?: { guard?: boolean; subset?: RawStories },
+): CoherenceDropResult {
+  const droppedUrlKeys = new Set<string>();
+  const droppedHeadlineKeys = new Set<string>();
+  if (!content || typeof content !== 'object' || !Array.isArray(issues)) {
+    return { removed: 0, droppedUrlKeys, droppedHeadlineKeys };
+  }
+  const guard = !!opts?.guard;
   const ENFORCE_TYPES = new Set(['contradiction', 'fabrication']);
   const norm = (h: any) => String(h || '').toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
+
+  // source_url → eventCorr, from the subset (raw stories carry eventCorr).
+  const corrByUrl = new Map<string, number>();
+  if (opts?.subset && typeof opts.subset === 'object') {
+    for (const key of Object.keys(opts.subset as any)) {
+      const arr = (opts.subset as any)[key];
+      if (!Array.isArray(arr)) continue;
+      for (const s of arr) {
+        const u = normaliseUrlForCompare(s?.source_url);
+        if (u && !corrByUrl.has(u)) corrByUrl.set(u, Number(s?.eventCorr || 0));
+      }
+    }
+  }
+  const corrOf = (s: any): number => {
+    const u = normaliseUrlForCompare(s?.source_url);
+    return u && corrByUrl.has(u) ? (corrByUrl.get(u) as number) : 0;
+  };
+  const recordDrop = (s: any) => {
+    const u = normaliseUrlForCompare(s?.source_url);
+    if (u) droppedUrlKeys.add(u);
+    const h = norm(s?.headline);
+    if (h) droppedHeadlineKeys.add(h);
+  };
+
   let removed = 0;
   for (const it of issues) {
-    if (it.severity !== 'high' || !ENFORCE_TYPES.has(it.type)) continue;
+    if (it.severity !== 'high') continue;
     const sec = it.section;
     const target = norm(it.headline);
     if (!sec || !target || !Array.isArray(content[sec])) continue;
-    const before = content[sec].length;
-    content[sec] = content[sec].filter((s: any) => norm(s?.headline) !== target);
-    const dropped = before - content[sec].length;
-    if (dropped > 0) {
-      removed += dropped;
-      console.warn(`[coherence:${edition}] BLOCKED — dropped ${dropped} story from "${sec}" (${it.type}): "${String(it.headline).slice(0, 80)}"`);
+
+    if (ENFORCE_TYPES.has(it.type)) {
+      const keep: any[] = [];
+      for (const s of content[sec]) {
+        if (norm(s?.headline) === target) { recordDrop(s); removed++; continue; }
+        keep.push(s);
+      }
+      if (content[sec].length !== keep.length) {
+        console.warn(`[coherence:${edition}] BLOCKED — dropped ${content[sec].length - keep.length} story from "${sec}" (${it.type}): "${String(it.headline).slice(0, 80)}"`);
+      }
+      content[sec] = keep;
+      continue;
+    }
+
+    // duplication — keep-best, only under the F1 guard.
+    if (guard && it.type === 'duplication') {
+      const arr = content[sec] as any[];
+      const flaggedIdx = arr.findIndex((s) => norm(s?.headline) === target);
+      if (flaggedIdx === -1) continue; // flagged story not present (already gone)
+      const flaggedSig = eventSignature(arr[flaggedIdx]?.headline || '');
+      let partnerIdx = -1;
+      for (let i = 0; i < arr.length; i++) {
+        if (i === flaggedIdx) continue;
+        if (isSameEventPrefix(flaggedSig, eventSignature(arr[i]?.headline || ''))) { partnerIdx = i; break; }
+      }
+      if (partnerIdx === -1) {
+        console.warn(`[coherence:${edition}] duplication flag on "${String(it.headline).slice(0, 70)}" in ${sec} has NO in-section partner — treating as possible mislabel, keeping story (F1).`);
+        continue;
+      }
+      const a = arr[flaggedIdx], b = arr[partnerIdx];
+      const aCorr = corrOf(a), bCorr = corrOf(b);
+      // Drop the lower-eventCorr member; tie → drop the later index (keep earlier).
+      let dropIdx: number;
+      if (aCorr < bCorr) dropIdx = flaggedIdx;
+      else if (bCorr < aCorr) dropIdx = partnerIdx;
+      else dropIdx = Math.max(flaggedIdx, partnerIdx);
+      const keepIdx = dropIdx === flaggedIdx ? partnerIdx : flaggedIdx;
+      recordDrop(arr[dropIdx]);
+      console.warn(`[coherence:${edition}] BLOCKED(dup keep-best) — ${sec}: dropped "${String(arr[dropIdx]?.headline || '').slice(0, 60)}" (eventCorr=${Math.min(aCorr, bCorr)}), kept "${String(arr[keepIdx]?.headline || '').slice(0, 60)}" (eventCorr=${Math.max(aCorr, bCorr)}).`);
+      arr.splice(dropIdx, 1);
+      removed++;
     }
   }
-  return removed;
+  return { removed, droppedUrlKeys, droppedHeadlineKeys };
 }
 
 
@@ -3645,6 +3871,115 @@ async function fetchPreviousBrief(edition: Edition): Promise<{ content: BriefCon
     return { content: content as BriefContent, lens, status: data.status };
   }
   return null;
+}
+
+// ─── Sprint 26 (F7) — final-brief invariant checker ─────────────────────────
+// The last line of defence, run on the exact object about to be saved. F1 and F2
+// each fix a specific resurrection/split path, but both previously PASSED their
+// own proof-lines while still shipping a wrong brief — so this checker verifies
+// the OUTCOME independently of the flags that produced it. It runs on 5min/10min
+// (deep has no story sections). Two severities:
+//   • halt-class (a,c): a duplicate event in a section (repeat source_url, repeat
+//     stamped eventId, or a prefix-aware near-dup headline) or an orphaned
+//     front-page lead (a curated major_events event that appears nowhere in the
+//     final brief). These are the trust-breaking defects.
+//   • log-loud (b,d): a raw-template fingerprint that reached the reader, or a
+//     supplied section that shipped empty / a total below the edition floor.
+// BRIEF_INVARIANTS (default ON) is pure telemetry — it logs and never changes
+// content. BRIEF_INVARIANTS_HALT (default OFF) additionally refuses to ship a
+// brief with a halt-class violation (it falls back to the previous good brief).
+// Enable HALT only after a run confirms zero halt-class violations.
+const BRIEF_INVARIANTS = (process.env.BRIEF_INVARIANTS || 'true').toLowerCase() !== 'false';
+const BRIEF_INVARIANTS_HALT = (process.env.BRIEF_INVARIANTS_HALT || 'false').toLowerCase() === 'true';
+
+const INVARIANT_SECTIONS = ['major_events', 'world', 'india', 'business', 'technology', 'climate_health', 'sport', 'culture'];
+
+interface InvariantResult { ok: boolean; violations: string[]; halted: boolean; }
+
+function checkBriefInvariants(content: any, subset: RawStories, edition: Edition): InvariantResult {
+  const violations: string[] = [];
+  if (edition === 'deep' || !content || typeof content !== 'object') {
+    console.log(`[invariants:${edition}] ok — no story sections to check.`);
+    return { ok: true, violations, halted: false };
+  }
+
+  // source_url → eventId, and the curated front-page event set, from the subset
+  // (the raw stories carry eventId; written stories do not, so we map by URL).
+  const eventIdByUrl = new Map<string, number>();
+  const majorEventIds = new Set<number>();
+  for (const key of Object.keys(subset as any)) {
+    const arr = (subset as any)[key];
+    if (!Array.isArray(arr)) continue;
+    for (const s of arr) {
+      const u = normaliseUrlForCompare(s?.source_url);
+      const eid = typeof s?.eventId === 'number' ? s.eventId : null;
+      if (u && eid != null && !eventIdByUrl.has(u)) eventIdByUrl.set(u, eid);
+      if (key === 'major_events' && eid != null) majorEventIds.add(eid);
+    }
+  }
+
+  const presentEventIds = new Set<number>();
+  let totalStories = 0;
+
+  for (const sec of INVARIANT_SECTIONS) {
+    const arr = (content as any)[sec];
+    if (!Array.isArray(arr)) continue;
+    const seenUrls = new Set<string>();
+    const seenEventIds = new Set<number>();
+    const keptSigs: Set<string>[] = [];
+    for (const s of arr) {
+      totalStories++;
+      const url = normaliseUrlForCompare(s?.source_url);
+      if (url) {
+        if (seenUrls.has(url)) violations.push(`[dup:${sec}] repeated source_url (${url.slice(0, 60)})`);
+        else seenUrls.add(url);
+      }
+      let eid: number | null = url && eventIdByUrl.has(url) ? (eventIdByUrl.get(url) as number) : null;
+      if (eid == null && typeof s?.eventId === 'number') eid = s.eventId;
+      if (eid != null) {
+        presentEventIds.add(eid);
+        if (seenEventIds.has(eid)) violations.push(`[dup:${sec}] repeated eventId ${eid} ("${String(s?.headline || '').slice(0, 45)}")`);
+        else seenEventIds.add(eid);
+      }
+      const sig = eventSignature(s?.headline || '');
+      for (const ks of keptSigs) {
+        if (isSameEventPrefix(sig, ks)) {
+          violations.push(`[dup:${sec}] near-duplicate headline ("${String(s?.headline || '').slice(0, 45)}")`);
+          break;
+        }
+      }
+      keptSigs.push(sig);
+      const analysis = String(s?.analysis || '');
+      const wnext = String(s?.what_happens_next || '');
+      const why = String(s?.why_it_matters || '');
+      if (analysis === RAW_TEMPLATE_ANALYSIS || wnext === RAW_TEMPLATE_WHATNEXT || why === BACKFILL_WHY_FULL || why === BACKFILL_WHY_MICRO) {
+        violations.push(`[template:${sec}] raw-template fingerprint reached reader ("${String(s?.headline || '').slice(0, 45)}")`);
+      }
+    }
+  }
+
+  // Orphaned front-page lead — a curated event missing everywhere in the brief.
+  for (const eid of Array.from(majorEventIds)) {
+    if (!presentEventIds.has(eid)) violations.push(`[orphan] front-page lead eventId ${eid} is not present anywhere in the final ${edition} brief`);
+  }
+
+  // Floor checks — a supplied section that shipped empty, or a low total.
+  for (const sec of INVARIANT_SECTIONS) {
+    const sup = Array.isArray((subset as any)[sec]) ? (subset as any)[sec].length : 0;
+    const got = Array.isArray((content as any)[sec]) ? (content as any)[sec].length : 0;
+    if (sup > 0 && got === 0) violations.push(`[floor:${sec}] subset supplied ${sup} but final shipped 0`);
+  }
+  const target = edition === '5min' ? 15 : 20;
+  if (totalStories < target) violations.push(`[floor] total ${totalStories} stories below ${edition} target ${target}`);
+
+  const haltClass = violations.filter((v) => v.startsWith('[dup:') || v.startsWith('[orphan]'));
+  if (violations.length === 0) {
+    console.log(`[invariants:${edition}] ok — ${totalStories} stories, no duplicate events, no template fingerprints, all front-page leads present.`);
+    return { ok: true, violations, halted: false };
+  }
+  const halted = haltClass.length > 0;
+  console.warn(`[invariants:${edition}] VIOLATION(S): ${violations.join(' | ')}${halted && BRIEF_INVARIANTS_HALT ? ' [HALT]' : ''}`);
+  return { ok: false, violations, halted };
 }
 
 // ─── Save ────────────────────────────────────────────────────────────────────
@@ -4072,9 +4407,17 @@ async function runWriterForEdition(
             const issues = await runCoherenceCheck(ed, finalContent);
             if (COHERENCE_ENFORCE && issues.length > 0) {
               const candidate = JSON.parse(JSON.stringify(finalContent));
-              const removed = applyCoherenceDrops(candidate, ed, issues);
+              const dropRes = applyCoherenceDrops(
+                candidate, ed, issues,
+                COHERENCE_BACKFILL_GUARD ? { guard: true, subset: writerInput } : undefined,
+              );
+              const removed = dropRes.removed;
               if (removed > 0) {
-                backfillToSubsetCounts(candidate, ed, writerInput);
+                // F1: bar the just-dropped stories from being re-added by backfill.
+                backfillToSubsetCounts(
+                  candidate, ed, writerInput,
+                  COHERENCE_BACKFILL_GUARD ? dropRes.droppedUrlKeys : undefined,
+                );
                 const reval = validateBrief(candidate, ed);
                 if (reval.ok) {
                   finalContent = reval.data;
@@ -4093,6 +4436,13 @@ async function runWriterForEdition(
         // as canned boilerplate (the Sprint 18 regression). Catches every
         // backfill path (empty-section, post-strip top-up, post-coherence top-up).
         await rewriteTemplateWhys(finalContent, ed);
+        // Sprint 26 (F7) — final invariant check on the exact object being saved.
+        if (BRIEF_INVARIANTS) {
+          const inv = checkBriefInvariants(finalContent, writerInput, ed);
+          if (!inv.ok && inv.halted && BRIEF_INVARIANTS_HALT) {
+            throw new Error(`INVARIANTS_HALT: ${ed} — ${inv.violations.join(' | ')}`);
+          }
+        }
         await saveBriefToSupabase(ed, rawStories, finalContent, lens, 'ready');
         return { status: 'ready', content: finalContent };
       }
@@ -4109,6 +4459,13 @@ async function runWriterForEdition(
       // risk the 60s cap, so stop and fall back cleanly.
       if (typeof err?.message === 'string' && err.message.startsWith('RATE_LIMITED')) {
         console.warn(`[${ed}] rate limit persisted past in-call backoff — skipping redundant retry, using fallback.`);
+        break;
+      }
+      // Sprint 26 (F7) — a halt-class invariant violation means the brief we
+      // built is unshippable; a retry would likely reproduce it, so go straight
+      // to the previous-good-brief fallback instead of burning the second attempt.
+      if (typeof err?.message === 'string' && err.message.startsWith('INVARIANTS_HALT')) {
+        console.error(`[${ed}] HALTED by final invariant checker — not shipping this brief; falling back to the previous good brief. ${err.message}`);
         break;
       }
     }
@@ -4681,6 +5038,17 @@ function effectiveRefs(gt: GroundTruth): string[] {
 // (a synthesis edition with no story headlines to match) always keeps V2.
 const COVERAGE_V3 = (process.env.COVERAGE_V3 || 'on').toLowerCase() !== 'off';
 
+// Sprint 26 (F3) — default ON. The deep edition has NO top-level story headlines
+// (its content lives in title/body prose and three_patterns[].stories_connected),
+// so collectBriefHeadlines returns [] for it and EVERY reference headline scored
+// as missed → `[score:deep] N/N missed (100%)` every run, a false telemetry
+// signal. This flag switches the deep edition to a CORPUS coverage test: flatten
+// all of deep's strings into one word+anchor bag and count a reference covered if
+// its significant words (or anchors) appear anywhere in that prose. Affects only
+// the deep COVERAGE score (telemetry) — never reader content. Revert with
+// DEEP_COVERAGE_V2=false (deep then falls back to the old headline path).
+const DEEP_COVERAGE_V2 = (process.env.DEEP_COVERAGE_V2 || 'true').toLowerCase() !== 'false';
+
 // Importance of a reference headline, 1 (minor/regional/process) to 3
 // (day-defining national news). Deterministic + transparent; tune freely.
 function referenceImportance(headline: string): number {
@@ -4742,6 +5110,54 @@ function measureCoverageV3(content: any, gt: GroundTruth, edition: Edition): Cov
   return { score, missed, totalScoped: refs.length, weightedMissRate };
 }
 
+// ─── Sprint 26 (F3) — deep-edition corpus coverage ──────────────────────────
+// Recursively flatten every string in the deep content (titles, bodies, and the
+// nested three_patterns[].stories_connected arrays the headline collector can't
+// see) so a reference can be matched against the full prose, not a headline list
+// that is empty for this edition. Depth-guarded against pathological nesting.
+function collectDeepStrings(node: any, out: string[], depth: number): void {
+  if (node == null || depth > 8) return;
+  if (typeof node === 'string') { if (node.trim()) out.push(node); return; }
+  if (Array.isArray(node)) { for (const v of node) collectDeepStrings(v, out, depth + 1); return; }
+  if (typeof node === 'object') { for (const k of Object.keys(node)) collectDeepStrings((node as any)[k], out, depth + 1); return; }
+}
+
+// Deep coverage: same weighted, edition-scoped measurement as measureCoverageV3,
+// but the "brief side" is a single word+anchor corpus built from ALL deep prose
+// rather than a per-headline list. A reference counts as covered if >=2 of its
+// significant words (or any anchor) appear anywhere in that corpus.
+function measureDeepCoverage(content: any, gt: GroundTruth, edition: Edition): CoverageV3Result {
+  const refs = scopedRefs(gt, edition); // deep -> full de-filler list (scopedRefs returns base for non-5min)
+  const strings: string[] = [];
+  collectDeepStrings(content, strings, 0);
+  const corpusWords = new Set<string>();
+  const corpusAnchors = new Set<string>();
+  for (const s of strings) {
+    for (const w of Array.from(significantWords(s))) corpusWords.add(w);
+    if (COVERAGE_ANCHOR_MATCH) for (const a of Array.from(anchorTokens(s))) corpusAnchors.add(a);
+  }
+  let totalW = 0;
+  let missedW = 0;
+  const missed: string[] = [];
+  for (const ref of refs) {
+    const refSet = significantWords(ref);
+    if (refSet.size === 0) continue;
+    const w = referenceImportance(ref);
+    totalW += w;
+    let overlap = 0;
+    for (const t of Array.from(refSet)) if (corpusWords.has(t)) overlap++;
+    let covered = overlap >= COVERAGE_MATCH_THRESHOLD;
+    if (!covered && COVERAGE_ANCHOR_MATCH) {
+      const refAnchors = anchorTokens(ref);
+      for (const t of Array.from(refAnchors)) { if (corpusAnchors.has(t)) { covered = true; break; } }
+    }
+    if (!covered) { missedW += w; missed.push(ref); }
+  }
+  const weightedMissRate = totalW > 0 ? missedW / totalW : 0;
+  const score = Math.max(0, Math.min(10, Math.round((1 - weightedMissRate) * 10)));
+  return { score, missed, totalScoped: refs.length, weightedMissRate };
+}
+
 function missedReferenceHeadlines(content: any, gt: GroundTruth | null): string[] {
   if (!gt) return [];
   const briefHeads = collectBriefHeadlines(content);
@@ -4789,7 +5205,13 @@ async function scoreBriefWithLLM(
 
   // Sprint 14.8 — give the scorer the day's REAL top headlines so COVERAGE is
   // judged against what actually happened, not just against the brief itself.
-  const missedRefs = missedReferenceHeadlines(content, groundTruth || null);
+  // Sprint 26 (F3): for deep, the missed list comes from the prose-corpus test,
+  // not the (empty) headline list — so both the LLM prompt below and the
+  // deterministic path use the correct missed set.
+  const deepCov = (DEEP_COVERAGE_V2 && edition === 'deep' && groundTruth)
+    ? measureDeepCoverage(content, groundTruth as GroundTruth, edition)
+    : null;
+  const missedRefs = deepCov ? deepCov.missed : missedReferenceHeadlines(content, groundTruth || null);
   const referenceBlock = groundTruth
     ? `\n\nCOVERAGE REFERENCE — the day's actual top headlines from major outlets (independently retrieved). Judge COVERAGE against THIS list; a brief that omits several of these has a real coverage gap, however polished the stories it did include:\nINDIA: ${groundTruth.india.map((h) => `• ${h}`).join('\n')}\nWORLD: ${groundTruth.world.map((h) => `• ${h}`).join('\n')}\n${missedRefs.length ? `Reference headlines this brief appears to MISS entirely: ${missedRefs.map((h) => `"${h}"`).join('; ')}.` : 'The brief appears to cover the reference headlines.'}`
     : '';
@@ -4875,6 +5297,8 @@ OUTPUT — return ONLY this JSON, no preamble, no markdown:
   // V3 (default) measures coverage deterministically for the story editions;
   // deep and COVERAGE_V3=off keep the V2 LLM-score-minus-penalty path.
   const useV3 = coverageVerified && COVERAGE_V3 && (edition === '5min' || edition === '10min');
+  // F3: deep coverage measured against the prose corpus (deepCov computed above).
+  const useDeep = !!deepCov;
 
   let dim_coverage: number | null;
   let unverifiedNote = '';
@@ -4889,6 +5313,14 @@ OUTPUT — return ONLY this JSON, no preamble, no markdown:
   if (useV3) {
     const cov = measureCoverageV3(content, groundTruth as GroundTruth, edition);
     // An empty section is itself a coverage failure — keep that deterministic hit.
+    dim_coverage = Math.max(0, cov.score - penalty);
+    missCount = cov.missed.length;
+    totalRefs = cov.totalScoped;
+    missRate = cov.weightedMissRate;
+    missedForNote = cov.missed;
+  } else if (useDeep) {
+    // Sprint 26 (F3) — deep edition scored against its prose corpus.
+    const cov = deepCov as CoverageV3Result;
     dim_coverage = Math.max(0, cov.score - penalty);
     missCount = cov.missed.length;
     totalRefs = cov.totalScoped;
@@ -4914,6 +5346,8 @@ OUTPUT — return ONLY this JSON, no preamble, no markdown:
   }
   if (useV3) {
     console.warn(`[score:${edition}] coverage v3 — covered ${totalRefs - missCount}/${totalRefs} scoped reference headline(s) (weighted miss ${Math.round(missRate * 100)}%) → dim_coverage ${typeof dim_coverage === 'number' ? dim_coverage : 'n/a'}${penalty > 0 ? ` (after -${penalty} empty-section)` : ''}.${missedForNote.length ? ` Missed: ${missedForNote.slice(0, 6).map((h) => `"${h.slice(0, 60)}"`).join('; ')}` : ''}`);
+  } else if (useDeep) {
+    console.warn(`[score:${edition}] deep-coverage v2 — covered ${totalRefs - missCount}/${totalRefs} reference headline(s) in deep prose (weighted miss ${Math.round(missRate * 100)}%) → dim_coverage ${typeof dim_coverage === 'number' ? dim_coverage : 'n/a'}${penalty > 0 ? ` (after -${penalty} empty-section)` : ''}.${missedForNote.length ? ` Missed: ${missedForNote.slice(0, 6).map((h) => `"${h.slice(0, 60)}"`).join('; ')}` : ''}`);
   } else if (missPenalty > 0) {
     console.warn(`[score:${edition}] ${missCount}/${totalRefs} reference headline(s) missed (${Math.round(missRate * 100)}%) → -${missPenalty} on coverage. Missed: ${missedForNote.slice(0, 6).map((h) => `"${h.slice(0, 60)}"`).join('; ')}`);
   }
@@ -4937,6 +5371,8 @@ OUTPUT — return ONLY this JSON, no preamble, no markdown:
       + (emptySections > 0 ? ` [auto-penalty: ${emptySections} empty section(s), -${penalty} on coverage & field completeness]` : '')
       + (useV3
           ? ` [coverage v3: covered ${totalRefs - missCount}/${totalRefs} of the day's scoped top headlines (importance-weighted); dim_coverage ${typeof dim_coverage === 'number' ? dim_coverage : 'n/a'}/10]`
+          : useDeep
+          ? ` [deep-coverage v2: covered ${totalRefs - missCount}/${totalRefs} of the day's scoped top headlines in deep prose (importance-weighted); dim_coverage ${typeof dim_coverage === 'number' ? dim_coverage : 'n/a'}/10]`
           : (missPenalty > 0 ? ` [coverage-gap: missed ${missCount} of the day's top headlines, -${missPenalty} on coverage]` : '')),
   };
 }

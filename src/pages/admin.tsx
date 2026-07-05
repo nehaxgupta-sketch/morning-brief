@@ -558,10 +558,23 @@ function buildRcaReport(rawLines: string[]): { report: any; markdown: string } {
     }
     const rewrote = first(/\[backfill\] (\w+) rewrote (\d+)\/(\d+) template/)
     const padded = has('RAW TEMPLATES')
-    if (rewrote) f.push(`Template why-it-matters rewrite fired: ${rewrote[1]} rewrote ${rewrote[2]}/${rewrote[3]} into real analysis (no canned boilerplate shipped).`)
-    else if (padded) {
-      f.push('Warning: padding happened but no rewrite line — canned boilerplate may have shipped (check REWRITE_TEMPLATE_WHYS).')
-      status = 'warn'
+    if (rewrote) {
+      const did = Number(rewrote[2]); const tot = Number(rewrote[3])
+      // HONESTY FIX (Sprint 26 F6): the old report asserted "no canned
+      // boilerplate shipped" here. That is FALSE — the why-rewrite only touches
+      // the why_it_matters field; background / analysis / what_happens_next
+      // template sentences are untouched by it and CAN still ship. The authority
+      // on shipped boilerplate is now the final-brief invariant checker
+      // ([invariants:*], F7), parsed below — not this rewrite line.
+      f.push(`Template why-rewrite fired: ${rewrote[1]} rewrote ${did}/${tot} flagged why_it_matters. (This does NOT cover background/analysis/what_happens_next boilerplate — see [invariants] check.)`)
+      if (did < tot) {
+        f.push(`Warning: ${tot - did} flagged why(s) were NOT rewritten.`)
+        status = 'warn'
+      }
+    }
+    if (padded) {
+      f.push('Note: backfill padded section(s) with RAW TEMPLATE placeholder stories. These are not real coverage — confirm they were replaced downstream or were intended (see [invariants] for shipped template fingerprints).')
+      if (status === 'ok' || status === 'na') status = 'degraded'
     }
     const coh = all(/\[coherence:(\w+)\] (\d+) issue/)
     const cohSeen = new Set<string>()
@@ -573,10 +586,113 @@ function buildRcaReport(rawLines: string[]): { report: any; markdown: string } {
         if (status === 'ok') status = 'warn'
       }
     }
+    // Sprint 26 (F7) — final-brief invariant checker. This is the ground truth
+    // on what actually shipped (duplicate events, template fingerprints,
+    // orphaned front-page leads, floor misses), independent of the flags that
+    // produced the brief. A clean run logs `[invariants:<ed>] ok — ...`; any
+    // problem logs `[invariants:<ed>] VIOLATION(S): ...`.
+    const invOk = all(/\[invariants:(\w+)\] ok\b/)
+    const invBad = all(/\[invariants:(\w+)\] VIOLATION\(S\): (.+)/)
+    const invSeen = new Set<string>()
+    for (const v of invBad) {
+      if (invSeen.has(v[1])) continue
+      invSeen.add(v[1])
+      const halted = /\[HALT\]/.test(v[2])
+      f.push(`${halted ? 'FAIL' : 'Warning'}: invariants(${v[1]}) — ${v[2].replace(/\s*\[HALT\]\s*/, '').trim()}${halted ? ' [run HALTED]' : ''}.`)
+      status = halted ? 'fail' : (status === 'ok' || status === 'na' ? 'degraded' : status)
+    }
+    for (const v of invOk) {
+      if (invSeen.has(v[1])) continue
+      invSeen.add(v[1])
+      f.push(`Invariants(${v[1]}): clean — no duplicate events, template fingerprints, or orphaned leads.`)
+      if (status === 'na') status = 'ok'
+    }
     legs.push({ name: 'Leg 4 — Write', status, findings: f })
   }
 
-  // Leg 5 — Personalize
+  // Leg 5 — Score (coverage) — Sprint 26 (F6), previously ABSENT from the RCA
+  {
+    const gtRef = first(/\[score:groundtruth(?::\w+)?\] reference: (\d+) India \+ (\d+) world/)
+    const gtNone = has('[score:groundtruth] NO usable reference')
+    const missed = all(/\[score:(\w+)\] (\d+)\/(\d+) reference headline\(s\) missed \((\d+)%\)/)
+    const covered = all(/\[score:(\w+)\] coverage v3 — covered (\d+)\/(\d+)/)
+    const unver = all(/\[score:(\w+)\] ⚠ COVERAGE UNVERIFIED/)
+    const emptyPen = all(/\[score:(\w+)\] (\d+) empty section\(s\) → -(\d+)/)
+    const f: string[] = []
+    let status = 'na'
+    if (gtRef) { f.push(`Ground truth: ${gtRef[1]} India + ${gtRef[2]} world reference headline(s).`); status = 'ok' }
+    if (gtNone) { f.push('Warning: no usable ground-truth reference (Perplexity + news-API both failed) — coverage WITHHELD, not scored, this run.'); status = 'degraded' }
+    const missSeen = new Set<string>()
+    for (const m of missed) {
+      if (missSeen.has(m[1])) continue
+      missSeen.add(m[1])
+      const pct = Number(m[4])
+      f.push(`${m[1]}: missed ${m[2]}/${m[3]} scoped reference headline(s) (${pct}%).`)
+      if (pct >= 100) { f.push(`Warning: ${m[1]} coverage scored 100% missed — if this is the deep edition, confirm DEEP_COVERAGE_V2 is on (V2 headline-matcher can't see nested deep prose).`); if (status !== 'degraded') status = 'warn' }
+      else if (pct > 50) { f.push(`Warning: ${m[1]} missed the majority of top headlines (${pct}%).`); if (status === 'ok' || status === 'na') status = 'warn' }
+      else if (status === 'na') status = 'ok'
+    }
+    const covSeen = new Set<string>()
+    for (const c of covered) {
+      if (covSeen.has(c[1]) || missSeen.has(c[1])) continue
+      covSeen.add(c[1])
+      f.push(`${c[1]}: covered ${c[2]}/${c[3]} scoped headline(s).`)
+      if (status === 'na') status = 'ok'
+    }
+    for (const u of Array.from(new Set(unver.map((m) => m[1])))) f.push(`Note: ${u} coverage unverified this run (no reference) — dim_coverage withheld.`)
+    const epSeen = new Set<string>()
+    for (const e of emptyPen) {
+      if (epSeen.has(e[1])) continue
+      epSeen.add(e[1])
+      if (Number(e[2]) > 0) { f.push(`Warning: ${e[1]} — ${e[2]} empty section(s), -${e[3]} on coverage & field completeness.`); if (status === 'ok' || status === 'na') status = 'warn' }
+    }
+    if (!f.length) f.push('No score signals in this run (auto-scorer may not have run).')
+    legs.push({ name: 'Leg 5 — Score (coverage)', status, findings: f })
+  }
+
+  // Leg 6 — Desks — Sprint 26 (F6), previously ABSENT from the RCA
+  {
+    const poolEmpty = has('[desks] shared pool is EMPTY')
+    const verify = all(/\[desk:([^\]]+):verify\] features in=(\d+) kept=(\d+) dropped\(dead=(\d+)/)
+    const nonWl = all(/\[desk:([^\]]+)\] non-whitelisted dropped (\d+)\/(\d+)/)
+    const invUrl = all(/\[desk:([^\]]+)\] dropped (\d+) stories with invented\/non-whitelisted URL/)
+    const thin = all(/\[desk:([^\]]+)\] THIN edition: (\d+) stories \(< floor (\d+)\)/)
+    const deskEmpty = all(/\[desk-score:([^\]]+)\] (\d+) empty section/)
+    const done = all(/\[desk:([^\]]+)\] done in \d+s — (\d+) stories/)
+    const failed = all(/\[desk:([^\]]+)\] FAILED:/)
+    const f: string[] = []
+    let status = 'na'
+    if (done.length) { f.push(`Desks completed: ${done.map((d) => `${d[1]} (${d[2]})`).join(', ')}.`); status = 'ok' }
+    if (poolEmpty) { f.push('FAIL: shared desk pool was EMPTY — no shared brief to draw from; desks could not run on real stories.'); status = 'fail' }
+    for (const v of verify) {
+      const dropped = Number(v[4])
+      if (dropped > 0) { f.push(`Note: ${v[1]} desk — ${dropped} feature(s) dropped as dead/stale at verify (kept ${v[3]}/${v[2]}). If an entertainment feed is newly added, confirm it resolved.`); if (status === 'ok' || status === 'na') status = 'degraded' }
+    }
+    const nwSeen = new Set<string>()
+    for (const n of nonWl) {
+      if (nwSeen.has(n[1])) continue
+      nwSeen.add(n[1])
+      const dropped = Number(n[2]); const total = Number(n[3])
+      if (dropped > 0) {
+        const pct = total ? Math.round((dropped / total) * 100) : 0
+        f.push(`Warning: ${n[1]} desk — model cited ${dropped}/${total} (${pct}%) non-whitelisted/invented sources (dropped at gate). High values = too few real feeds in this desk's pool.`)
+        if (status === 'ok' || status === 'na' || status === 'degraded') status = 'warn'
+      }
+    }
+    for (const iu of invUrl) if (Number(iu[2]) > 0) { f.push(`Warning: ${iu[1]} desk — ${iu[2]} placed story(ies) had invented/non-whitelisted URLs.`); if (status === 'ok' || status === 'na' || status === 'degraded') status = 'warn' }
+    for (const t of thin) { f.push(`Warning: ${t[1]} desk — THIN (${t[2]} stories < floor ${t[3]}).`); if (status === 'ok' || status === 'na' || status === 'degraded') status = 'warn' }
+    const deSeen = new Set<string>()
+    for (const d of deskEmpty) {
+      if (deSeen.has(d[1])) continue
+      deSeen.add(d[1])
+      if (Number(d[2]) > 0) { f.push(`Warning: ${d[1]} desk — ${d[2]} empty section(s).`); if (status === 'ok' || status === 'na' || status === 'degraded') status = 'warn' }
+    }
+    for (const fa of failed) { f.push(`FAIL: ${fa[1]} desk errored out.`); status = 'fail' }
+    if (!f.length) f.push('No desk signals in this run (desks stage may not have run).')
+    legs.push({ name: 'Leg 6 — Desks', status, findings: f })
+  }
+
+  // Leg 7 — Personalize
   {
     const done = first(/\[tail-fetch\] Done\. Cities: (\d+)\/(\d+) ready\. Interests: (\d+)\/(\d+)\. Industries: (\d+)\/(\d+)/)
     const rss = all(/\[tail:rss ([^\]]+)\] feeds (\d+)\/(\d+) responded.*?-> (\d+) after dedupe/)
@@ -611,16 +727,31 @@ function buildRcaReport(rawLines: string[]): { report: any; markdown: string } {
       const cap = Number(p[5])
       f.push(`${p[1]} brief: ${p[2]} universal + ${p[3]} personal = ${total}/${cap}${total < cap ? ' (under cap)' : ''}.`)
     }
-    legs.push({ name: 'Leg 5 — Personalize', status, findings: f })
+    legs.push({ name: 'Leg 7 — Personalize', status, findings: f })
   }
 
+  // HONESTY FIX (Sprint 26 F6): the old verdict counted warn-STATUS LEGS (max
+  // ~4), so a run with 35 warning lines could read "1 warning". The headline
+  // number is now the count of actual warning/error LINES in the raw run log,
+  // which is what an operator needs to see. Leg rollups are still shown per-leg.
   const warns = legs.filter((l) => l.status === 'warn').length
+  const degraded = legs.filter((l) => l.status === 'degraded').length
   const fails = legs.filter((l) => l.status === 'fail').length
-  const verdict = fails > 0 ? `${fails} leg(s) failing · ${warns} warning(s)` : warns > 0 ? `All legs running · ${warns} warning(s) to watch` : 'All legs healthy'
+  const WARN_LINE_RE = /(⚠|\bwarning\b|\bwarn\b|non-whitelisted|invented\/non-whitelisted|THIN edition|COVERAGE UNVERIFIED|NO usable reference|circuit breaker|VIOLATION\(S\)|RAW TEMPLATES|all-filtered [1-9])/i
+  const ERROR_LINE_RE = /(\berror\b|\bfailed\b|\bexception\b|top-level error|is EMPTY|\[HALT\])/i
+  const warnLineCount = lines.filter((l) => WARN_LINE_RE.test(l)).length
+  const errorLineCount = lines.filter((l) => ERROR_LINE_RE.test(l)).length
+  const legRoll = `${fails} leg(s) failing · ${degraded} degraded · ${warns} leg(s) with warnings`
+  const lineRoll = `${warnLineCount} warning line(s), ${errorLineCount} error line(s) in log`
+  const verdict = fails > 0
+    ? `${fails} leg(s) FAILING · ${lineRoll}`
+    : (degraded > 0 || warnLineCount > 0 || errorLineCount > 0)
+      ? `All legs running · ${lineRoll} — review (${legRoll})`
+      : 'All legs healthy · no warning/error lines'
   const generatedAt = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' IST'
-  const report = { generatedAt, verdict, logLines: lines.length, legs }
+  const report = { generatedAt, verdict, logLines: lines.length, warnLineCount, errorLineCount, legs }
 
-  const g = (s: string) => (s === 'ok' ? 'OK' : s === 'warn' ? 'WARN' : s === 'fail' ? 'FAIL' : '--')
+  const g = (s: string) => (s === 'ok' ? 'OK' : s === 'warn' ? 'WARN' : s === 'degraded' ? 'DEGRADED' : s === 'fail' ? 'FAIL' : '--')
   const mdLines: string[] = ['# Morning Brief — Pipeline RCA', `_Generated ${generatedAt} · ${lines.length} log lines · Verdict: ${verdict}_`, '']
   for (const l of legs) {
     mdLines.push(`## [${g(l.status)}] ${l.name}`)

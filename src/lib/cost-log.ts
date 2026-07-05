@@ -60,6 +60,26 @@ const PRICING: Record<string, { input: number; output: number }> = {
   // Perplexity (Sonar)
   'sonar-pro':                    { input: 3.00,  output: 15.00 },
   'sonar':                        { input: 1.00,  output: 1.00 },
+  // Anthropic (Sprint 26)
+  // ------------------------
+  // personalise-briefs.tsx's city/interest editors call the Anthropic Messages
+  // API with ANTHROPIC_CITY_MODEL (default 'claude-sonnet-4-6'). That model
+  // string was missing here, so EVERY personalise run logged
+  //   [cost] Unknown model "claude-sonnet-4-6" — using gpt-4o-mini rate
+  // and the spend dashboard under-reported the largest per-user cost. This map
+  // is the SHARED util imported by generate-brief, personalise-briefs,
+  // generate-desks and score-extras, so adding the string here fixes the
+  // telemetry for all four at once. Standard Claude Sonnet token pricing
+  // ($3 in / $15 out per 1M) — VERIFY against anthropic.com/pricing if a live
+  // run still logs "Unknown model" or the rate has since changed.
+  'claude-sonnet-4-6':            { input: 3.00,  output: 15.00 },
+  // OpenAI embeddings (Sprint 26 — honesty fix #8)
+  // ------------------------
+  // rss-retrieval embed() (text-embedding-3-small) powers near-dup + event
+  // clustering every fetch but never wrote a cost row. It now logs under
+  // phase:'embed'. Embeddings are INPUT-ONLY (no output/reasoning tokens);
+  // $0.02 per 1M input tokens. ~$0.01/run at our volume.
+  'text-embedding-3-small':       { input: 0.02,  output: 0.00 },
 };
 
 function getISTDate(): string {
@@ -78,6 +98,7 @@ export type CostPhase =
   | 'industry'   // per-industry tail fetch (Sprint 12)
   | 'storyline'  // Follow a Story: tag/detect, backfill, fallback fetch, story-so-far regen (Sprint 13)
   | 'desk'       // Desks: per-desk two-pass fetch + writer + scorer (Sprint 14)
+  | 'embed'      // event-clustering embeddings — text-embedding-3-small (Sprint 26)
   | 'score';     // auto-scorer (rubric)
 
 export function calculateCostUSD(

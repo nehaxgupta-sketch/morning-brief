@@ -163,6 +163,16 @@ export const TIER_1_DOMAINS = new Set<string>([
   // Sport / culture breadth
   'theathletic.com',                   // The Athletic — premium global sport (NYT)
   'deadline.com',                      // Deadline — entertainment industry
+  // Sprint 26 (F5) — India entertainment trade press. The Bollywood &
+  // Entertainment desk had exactly ONE ent feed (Deadline, US trade), so the
+  // search model kept citing legitimate-but-unlisted India outlets that then
+  // died at this gate (8/8 dropped, 2 empty sections). Bollywood Hungama is a
+  // credible, long-running Mumbai film-trade outlet and the most-cited of the
+  // dropped names — whitelisting it stops the desk model being punished for a
+  // correct citation and pairs with the new IE/Hindu/HT entertainment feeds in
+  // feeds.config.ts. filmcompanion.in / variety.com / hollywoodreporter.com are
+  // already listed above.
+  'bollywoodhungama.com',              // Bollywood Hungama — India film trade
 ]);
 
 // ─── Regional sources ───────────────────────────────────────────────────────
@@ -489,6 +499,7 @@ const PUBLISHER_LABELS: Record<string, string> = {
   'boomlive.in': 'BOOM',
   'theathletic.com': 'The Athletic',
   'deadline.com': 'Deadline',
+  'bollywoodhungama.com': 'Bollywood Hungama',
   'mathrubhumi.com': 'Mathrubhumi',
   'eenadu.net': 'Eenadu',
   'sakshi.com': 'Sakshi',
@@ -550,7 +561,7 @@ const TIER_2_DOMAINS = new Set<string>([
   'livelaw.in', 'barandbench.com', 'downtoearth.org.in',
   // Global specialist (sport / entertainment / science / tech)
   'espncricinfo.com', 'espn.com', 'cricbuzz.com', 'variety.com',
-  'hollywoodreporter.com', 'filmcompanion.in', 'nature.com', 'science.org',
+  'hollywoodreporter.com', 'filmcompanion.in', 'bollywoodhungama.com', 'nature.com', 'science.org',
   'statnews.com', 'techcrunch.com', 'theverge.com', 'arstechnica.com', 'wired.com',
   // Sprint 15 — reputable national-digital / specialist additions (rank below wires)
   'scmp.com', 'asia.nikkei.com', 'thediplomat.com', 'cnn.com',

@@ -42,6 +42,7 @@ import {
   SECTION_FEEDS, WIRE_FEEDS, NEW_SOURCE_QUERY_FEEDS, MARKET_TICKERS, googleNewsFeed,
 } from '@/lib/retrieval/feeds.config';
 import { isWhitelistedSource, sourceTier, publisherLabel } from '@/lib/whitelist';
+import { logOpenAICost } from '@/lib/cost-log';
 
 // ── Output shape (mirrors RawStory / RawStories in generate-brief.tsx) ────────
 export interface RssStory {
@@ -490,6 +491,13 @@ async function embed(texts: string[]): Promise<number[][] | null> {
   if (!texts.length) return [];
   const BATCH = 256;
   const out: number[][] = [];
+  // Sprint 26 (#8) — embeddings ran uncosted every fetch. Accumulate the token
+  // usage across batches and write ONE brief_costs row after a fully-successful
+  // embed (phase 'embed'). Embeddings are input-only, so output/reasoning are 0.
+  // Fire-and-forget (void) and only on success — a failed embed returns null
+  // before this and the caller falls back to word-overlap, so we never bill a
+  // partial/aborted run.
+  let embInputTokens = 0;
   try {
     for (let i = 0; i < texts.length; i += BATCH) {
       const slice = texts.slice(i, i + BATCH).map((t) => (t || '').slice(0, 400) || ' ');
@@ -508,9 +516,18 @@ async function embed(texts: string[]): Promise<number[][] | null> {
         console.warn(`[embed] malformed response on batch ${i} (got ${j?.data?.length ?? 'none'} of ${slice.length}).`);
         return null;
       }
+      embInputTokens += Number(j?.usage?.prompt_tokens || j?.usage?.total_tokens || 0);
       for (const d of j.data) out.push(d.embedding as number[]);
     }
     console.log(`[embed] ok — ${out.length} vector(s) via text-embedding-3-small.`);
+    void logOpenAICost({
+      phase: 'embed',
+      model: 'text-embedding-3-small',
+      inputTokens: embInputTokens,
+      outputTokens: 0,
+      reasoningTokens: 0,
+      detail: `event-cluster embeddings — ${out.length} vector(s)`,
+    });
     return out;
   } catch (e: any) {
     console.warn(`[embed] threw — ${String(e?.message || e).slice(0, 160)}; caller falls back to word-overlap.`);
