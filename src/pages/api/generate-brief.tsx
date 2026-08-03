@@ -28,9 +28,65 @@
 // Sprint 13 — Follow a Story: new mode=storylines (runs after write), plus
 // CRON_SECRET enforcement, URL liveness check, deterministic scorer
 // penalties, material-relevance industry prompt, tail_used_urls cleanup.
+//
+// Sprint 27.1 (2026-07-05 audit) — this file's share of the deployment-audit
+// fixes: cross-section split-event dedup (N1, SECTION_DEDUP_XS); placement
+// cut-accounting + exLead stamping (N3); F7 invariant checker made schema-aware,
+// brief-wide, and honest about its orphan promise (N5/N3); coherence disposition
+// logging so no flagged issue can be silently ignored (N7); strict deep-coverage
+// matching (N4, DEEP_COVERAGE_STRICT); writer/validator contract repairs —
+// one_chart nullable + short-field padding (N10, WRITER_FIELD_REPAIR); and a
+// shipped-count telemetry line (N6). Personalised-surface and admin-RCA fixes
+// live in their own files (Sprint 27.2 / 27.3).
 
+// ============================================================================
+// SECTION INDEX  (generated navigation aid -- see companion
+// generate-brief-section-map.md for the prose walkthrough)
+// ----------------------------------------------------------------------------
+// To edit cheaply: find the section below, grep '^// SECTION NN:' to jump
+// to it, and load/replace only that banner-to-next-banner block instead of
+// the whole file. Sections are contiguous and cover the file top to bottom.
+//
+//    1. IMPORTS, ENV, SUPABASE CLIENT & REQUEST AUTH
+//    2. TYPES & INTERFACES
+//    3. ZOD SCHEMAS & JSON EXTRACTION
+//    4. PERSONALISATION UNIVERSE & PROMPT SCAFFOLDING
+//    5. OPENAI SECTION-FETCH HELPERS
+//    6. MARKETS & HOME-SCREEN LENS
+//    7. GPT-5 REASONING FETCH PATH
+//    8. PERPLEXITY & GPT-4o WEB-SEARCH FETCH
+//    9. FETCH STRATEGIES (single / 2-phase)
+//   10. FETCH DISPATCH + LEGACY PATHS  [contains 2 DEAD functions]
+//   11. RECENCY & DEDUP PRIMITIVES
+//   12. PLACEMENT ENGINE (PLACEMENT_V2)
+//   13. SECTION-LEVEL DEDUP  (Sprint 26 F2 / 27.1 N1)
+//   14. enforceQualityRules  --  THE QUALITY GATE  (~400 lines)
+//   15. WRITER PREP, RANKING & SUBSET
+//   16. EDITION WRITERS (5min / 10min / deep)
+//   17. CHAT TRANSPORT + RAW->STORY TEMPLATES + BACKFILL
+//   18. COHERENCE CHECK, VALIDATION & REPAIR
+//   19. FINAL-BRIEF INVARIANT CHECKER  (Sprint 26 F7)
+//   20. PERSIST & PUSH
+//   21. CONTENT HYGIENE: LIVENESS, CROSS-SECTION DEDUP & SANITIZE
+//   22. WRITER ORCHESTRATION  (runWriterForEdition)
+//   23. CRON MODES: fetch / write / push
+//   24. GROUND TRUTH & COVERAGE SCORING
+//   25. LLM SCORER + score / full MODES
+//   26. TAILS (city / interest / industry)
+//   27. STORYLINES (Follow a Story)
+//   28. MAIN HANDLER  (mode router)
+// ============================================================================
+
+// ============================================================================
+// SECTION  1:  IMPORTS, ENV, SUPABASE CLIENT & REQUEST AUTH
+// ----------------------------------------------------------------------------
+// Module imports (whitelist, cost-log, log-capture, editorial-safety, RSS
+// engine), maxDuration config, API/OneSignal env keys, the Supabase client,
+// CRON_SECRET auth, and IST date / weekend helpers.
+// Fns:   authoriseRequest, getISTDate, isWeekend
+// Flags: CRON_SECRET (auth)
+// ============================================================================
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { createClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 // Sprint 11: shared whitelist module. Source-of-truth for all source-URL
 // validation across generate-brief and personalise-briefs.
@@ -49,6 +105,13 @@ import { attachLogCapture } from '@/lib/log-capture';
 import { applyCitySafety } from '@/lib/editorial-safety';
 // Sprint 15: the RSS retrieval engine (used when RETRIEVAL=rss; old path otherwise).
 import { fetchStrategy_Rss, fetchStoriesFromFeeds } from '@/lib/rss-retrieval';
+// Modularization stage 1: shared env + Supabase client (declarations moved to ./env).
+import {
+  supabase,
+  OPENAI_API_KEY,
+  ONESIGNAL_APP_ID,
+  ONESIGNAL_REST_API_KEY,
+} from '@/lib/generate-brief/env';
 
 // 300s = 5min. Vercel Pro caps at 300; Hobby with Fluid Compute enabled also
 // reaches 300. gpt-5 with reasoning web_search at 'low' effort runs ~150-200s.
@@ -57,14 +120,7 @@ export const config = { maxDuration: 300 };
 
 // ─── Env / clients ──────────────────────────────────────────────────────────
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const ONESIGNAL_APP_ID = process.env.ONESIGNAL_APP_ID;
-const ONESIGNAL_REST_API_KEY = process.env.ONESIGNAL_REST_API_KEY;
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+// Env + Supabase client now live in @/lib/generate-brief/env (imported above).
 
 // ─── Sprint 13: request authorisation (CRON_SECRET enforcement) ─────────────
 //
@@ -118,6 +174,15 @@ function isWeekend(): boolean {
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+// ============================================================================
+// SECTION  2:  TYPES & INTERFACES
+// ----------------------------------------------------------------------------
+// All TypeScript shapes for the pipeline: RawStory / RawStories (the fetch
+// pool), MicroStory / FullStory (writer output), and the three edition briefs
+// (BriefQuick / BriefDaily / BriefEditorial) plus Pattern / LongRead / WatchItem.
+// Fns:   RawStory, RawStories, MicroStory, FullStory, Brief* interfaces
+// Flags: -
+// ============================================================================
 type Edition = '5min' | '10min' | 'deep';
 
 interface RawStory {
@@ -257,7 +322,7 @@ interface BriefEditorial {
   watching_this_week: WatchItem[];
   signature: {
     one_number: { value: string; context: string };
-    one_chart: { title: string; description: string; data_points?: { label: string; value: number }[] };
+    one_chart?: { title: string; description: string; data_points?: { label: string; value: number }[] } | null;
     one_quote?: { quote: string; attribution: string; context: string } | null;
   };
 }
@@ -266,6 +331,15 @@ type BriefContent = BriefQuick | BriefDaily | BriefEditorial;
 
 // ─── Zod schemas ────────────────────────────────────────────────────────────
 
+// ============================================================================
+// SECTION  3:  ZOD SCHEMAS & JSON EXTRACTION
+// ----------------------------------------------------------------------------
+// Runtime validation schemas mirroring the interfaces above (writer output is
+// Zod-checked before save), plus extractJsonObject() — the tolerant JSON
+// parser used on every LLM response.
+// Fns:   *Schema, extractJsonObject
+// Flags: -
+// ============================================================================
 const TagsSchema = z.object({
   industries: z.array(z.string()).optional(),
   interests: z.array(z.string()).optional(),
@@ -374,6 +448,12 @@ const BriefEditorialSchema = z.object({
       value: z.string().min(1),
       context: z.string().min(10),
     }),
+    // Sprint 27.1 (N10) — nullish, matching one_quote. The writer occasionally
+    // returns one_chart: null (no usable series), and sanitizeSignature itself
+    // nulls a synthetic chart — but the schema required an object, so a null
+    // failed the WHOLE deep brief and burnt a full retry (~$0.09 on 07-05).
+    // The renderer already tolerates null (sanitised nulls have shipped since
+    // Sprint 14.4). A chart-less deep is valid; a failed deep is not.
     one_chart: z.object({
       title: z.string().min(3),
       description: z.string().min(15),
@@ -383,7 +463,7 @@ const BriefEditorialSchema = z.object({
         label: z.string().min(1),
         value: z.number(),
       })).max(8).optional(),
-    }),
+    }).nullish(),
     one_quote: z.object({
       quote: z.string().min(10),
       attribution: z.string().min(3),
@@ -431,6 +511,15 @@ function extractJsonObject(text: string): any {
 
 // ─── Phase 1: Personalisation universe ──────────────────────────────────────
 
+// ============================================================================
+// SECTION  4:  PERSONALISATION UNIVERSE & PROMPT SCAFFOLDING
+// ----------------------------------------------------------------------------
+// Loads the cities/interests/industries universe from opted-in profiles and
+// builds the reusable prompt fragments (source-whitelist block, tags block,
+// story-shape spec) shared by every fetch prompt.
+// Fns:   loadPersonalisationUniverse, sourceWhitelistBlock, tagsBlockFor, storyShape
+// Flags: -
+// ============================================================================
 interface Universe {
   industries: string[];
   interests: string[];
@@ -530,6 +619,14 @@ function storyShape(today: string): string {
 
 // ─── Generic per-section fetch ──────────────────────────────────────────────
 
+// ============================================================================
+// SECTION  5:  OPENAI SECTION-FETCH HELPERS
+// ----------------------------------------------------------------------------
+// Thin helpers that call OpenAI for a single section and coerce the result
+// into list / single-object shapes. Used by the markets + lens fetchers.
+// Fns:   callOpenAISection, fetchListSection, fetchSingleSection
+// Flags: -
+// ============================================================================
 async function callOpenAISection(prompt: string, sectionName: string, maxTokens = 4000): Promise<any> {
   const response = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
@@ -640,6 +737,15 @@ OR, if no suitable whitelisted story exists:
 // explicit instruction so it never asserts a move on a closed day — it leads
 // with sentiment / global cues / what to watch on reopen instead.
 // Revertible: MARKETS_TRADING_GUARD=off restores the prior prompt text.
+// ============================================================================
+// SECTION  6:  MARKETS & HOME-SCREEN LENS
+// ----------------------------------------------------------------------------
+// NSE trading-day guard (holidays + weekend), the markets summary/indices
+// fetch, and fetchLens() — the four-line world/india/markets/watch lens the
+// home flash-card shows. Markets are suppressed on non-trading days.
+// Fns:   isIndianMarketOpen, marketsDayContext, fetchMarkets, fetchLens
+// Flags: MARKETS_TRADING_GUARD, NSE_EXTRA_HOLIDAYS
+// ============================================================================
 const MARKETS_TRADING_GUARD = (process.env.MARKETS_TRADING_GUARD || 'on').toLowerCase() !== 'off';
 // Fixed-date NSE holidays (always closed). Movable holidays (Diwali, Holi, etc.)
 // shift year to year — supply the current year's dates via NSE_EXTRA_HOLIDAYS as
@@ -769,6 +875,14 @@ ${marketsDayContext(today)}Return ONLY this JSON, no markdown:
 // (fetchListSection, fetchSingleSection, fetchMarkets) remain in the file
 // as dead code for quick rollback via git.
 
+// ============================================================================
+// SECTION  7:  GPT-5 REASONING FETCH PATH
+// ----------------------------------------------------------------------------
+// The gpt-5 reasoning + web_search fetch path and its (large) prompt builder.
+// One of several selectable fetch engines; see Section 10 for dispatch.
+// Fns:   callGpt5Reasoning, buildGpt5FetchPrompt
+// Flags: -
+// ============================================================================
 async function callGpt5Reasoning(
   prompt: string,
   reasoningEffort: 'low' | 'medium' | 'high' = 'low',
@@ -1064,6 +1178,14 @@ Begin now. Search aggressively. Return ONLY the JSON object.`;
 // not at fetch time (that's the scorer's job) — fallback fires only on
 // technical failure (empty/error response).
 
+// ============================================================================
+// SECTION  8:  PERPLEXITY & GPT-4o WEB-SEARCH FETCH
+// ----------------------------------------------------------------------------
+// Perplexity (sonar-pro) transport with timeout, the gpt-4o web-search
+// fallback, the Perplexity fetch-prompt builder, and the sleep() util.
+// Fns:   callPerplexity, callGpt4oWebSearchFallback, buildPerplexityFetchPrompt, sleep
+// Flags: PERPLEXITY_MODEL
+// ============================================================================
 const PERPLEXITY_API_KEY = process.env.PERPLEXITY_API_KEY;
 const PERPLEXITY_MODEL = process.env.PERPLEXITY_MODEL || 'sonar-pro';
 
@@ -1339,6 +1461,15 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 // but the 18-Jun Perplexity stub was 1155 chars (520 content + injected
 // citations) yet carried ZERO stories — it passed the length gate and was
 // accepted without a retry. Gating on story count instead catches that.
+// ============================================================================
+// SECTION  9:  FETCH STRATEGIES (single / 2-phase)
+// ----------------------------------------------------------------------------
+// The three active fetch strategies (perplexity-single, perplexity-2phase,
+// gpt4o-2phase) and the per-phase (universal/topical) prompt builder.
+// countCoreStories() gates a retry when a fetch comes back thin.
+// Fns:   fetchStrategy_PerplexitySingle / _Perplexity2Phase / _Gpt4o2Phase, buildPerplexityFetchPromptByPhase
+// Flags: -
+// ============================================================================
 function countCoreStories(rawText: string): number {
   if (!rawText) return 0;
   let parsed: any;
@@ -1787,6 +1918,17 @@ Begin now. Return ONLY the JSON object.`;
 //                          Safety net if Perplexity has issues; ~3x cost.
 // Sprint 15 — the on/off switch for the RSS engine. Default 'perplexity' keeps
 // the existing engine; set RETRIEVAL=rss in Vercel to use feed-based retrieval.
+// ============================================================================
+// SECTION 10:  FETCH DISPATCH + LEGACY PATHS  [contains 2 DEAD functions]
+// ----------------------------------------------------------------------------
+// Chooses the engine (RETRIEVAL=rss uses rss-retrieval.ts; else FETCH_STRATEGY
+// picks a strategy above) and runs enforceQualityRules on the result.
+// NOTE: fetchNewsFromOpenAI_gpt5_legacy and fetchNewsFromOpenAI_legacy are
+// defined here but NEVER CALLED (each has one self-reference only). ~232 dead
+// lines kept for revert-safety — the single real shrink candidate in the file.
+// Fns:   getFetchStrategy, fetchNewsFromOpenAI  |  DEAD: fetchNewsFromOpenAI_gpt5_legacy, fetchNewsFromOpenAI_legacy
+// Flags: RETRIEVAL, FETCH_STRATEGY
+// ============================================================================
 const RETRIEVAL = (process.env.RETRIEVAL || 'perplexity').toLowerCase();
 
 type FetchStrategy = 'perplexity-single' | 'perplexity-2phase' | 'gpt4o-2phase';
@@ -2084,6 +2226,15 @@ async function fetchNewsFromOpenAI_legacy(universe: Universe): Promise<RawStorie
 // unparseable, keep the story rather than drop on a date format issue. The
 // LLM is instructed to use today's date if it can't determine actual
 // published_at, so missing dates trend "fresh".
+// ============================================================================
+// SECTION 11:  RECENCY & DEDUP PRIMITIVES
+// ----------------------------------------------------------------------------
+// Low-level building blocks reused by the quality gate and placement:
+// recency windows (24h / 72h major), stopword-stripped significant-word sets,
+// semantic overlap, event signatures, and prefix-aware same-event matching.
+// Fns:   significantWords, semanticOverlap, eventSignature, isSameEvent, isSameEventPrefix
+// Flags: RECENCY_HOURS_*, SEMANTIC_DEDUP_THRESHOLD, MAJOR_DEDUP_DEPTH, EVENT_PREFIX_MIN
+// ============================================================================
 const RECENCY_HOURS_DEFAULT = 24;
 const RECENCY_HOURS_MAJOR = 72;
 
@@ -2256,6 +2407,16 @@ const MAJOR_DEDUP_DEPTH = Math.max(1, parseInt(process.env.MAJOR_DEDUP_DEPTH || 
 // brief, confirm the [placement-v2] log, then default it). When on, matcher 1
 // (the over-aggressive false-dropper) is skipped; the exact/near-dup passes are
 // left as harmless subsets; this pass is authoritative and runs last.
+// ============================================================================
+// SECTION 12:  PLACEMENT ENGINE (PLACEMENT_V2)
+// ----------------------------------------------------------------------------
+// One-event-one-home authority. placeByEventId() assigns each clustered event
+// a single home section and removes the front-page repeat (re-injection
+// fallback lives in the writer path). dropSemanticDuplicatesAgainstMajor()
+// clears topical twins of a curated lead.
+// Fns:   placeByEventId, dropSemanticDuplicatesAgainstMajor
+// Flags: PLACEMENT_V2, PLACEMENT_OVERLAY, PLACEMENT_MAJOR_CAP(=5)
+// ============================================================================
 const PLACEMENT_V2 = (process.env.PLACEMENT_V2 || '').toLowerCase() === 'on';
 const PLACEMENT_MAJOR_CAP = 5; // front-page capacity (Sprint 22 decision)
 // Shared-brief precedence (decided): india above world for the audience.
@@ -2292,7 +2453,7 @@ const PLACEMENT_OVERLAY = (process.env.PLACEMENT_OVERLAY || 'off').toLowerCase()
 // Topical precedence (front page excluded — it overlays, it does not claim).
 const PLACEMENT_TOPICAL_ORDER = ['india', 'world', 'business', 'technology', 'climate_health', 'sport', 'culture'];
 
-function placeByEventId(cleaned: any, eventHomeSection?: Map<number, string>): void {
+function placeByEventId(cleaned: any, eventHomeSection?: Map<number, string>, curatedLeadCount?: number): void {
   // 1. Trim the front page to capacity FIRST. A lead ranked below the cut must
   //    NOT vanish: it falls back to its topical home. The original design only
   //    *checked* whether the topical twin still existed — but recency/cap/near-dup
@@ -2303,7 +2464,9 @@ function placeByEventId(cleaned: any, eventHomeSection?: Map<number, string>): v
   //    fallback by construction instead of hoping the twin survived.
   let cutRehomed = 0;     // cut lead whose twin already survived in its section
   let cutReinjected = 0;  // cut lead we had to re-insert (twin was filtered away)
+  let cutKeptOnFront = 0; // cut lead with no topical home in the pool — kept on the front page
   let orphaned = 0;       // cut lead with no recoverable home (should now be ~0)
+  const atPlacement = Array.isArray(cleaned.major_events) ? cleaned.major_events.length : 0;
   if (Array.isArray(cleaned.major_events) && cleaned.major_events.length > PLACEMENT_MAJOR_CAP) {
     const cut = cleaned.major_events.slice(PLACEMENT_MAJOR_CAP);
     cleaned.major_events = cleaned.major_events.slice(0, PLACEMENT_MAJOR_CAP);
@@ -2316,12 +2479,32 @@ function placeByEventId(cleaned: any, eventHomeSection?: Map<number, string>): v
       }
     }
 
+    // Sprint 27.1 (N3) — stamp every cut lead's surviving representation as an
+    // ex-front-page lead (`exLead` + its curated rank). buildSubset ranks and
+    // F7's delivery report read these stamps: the 07-05 audit found three
+    // curated leads (nw up to 7) that never reached any reader, with no line
+    // anywhere saying so. Stamping makes their fate trackable end-to-end.
+    let cutIdx = 0;
     for (const story of cut) {
+      cutIdx++;
+      const leadRank = PLACEMENT_MAJOR_CAP + cutIdx; // curated rank 6..12
       const id = (story && typeof story.eventId === 'number') ? story.eventId : null;
       if (id == null) { orphaned++; continue; } // no id → cannot re-home; counted, logged below
-      if (topicalIds.has(id)) { cutRehomed++; continue; } // twin already present — step 2 keeps one copy
+      if (topicalIds.has(id)) {
+        cutRehomed++;
+        // Stamp the SURVIVING TWIN in its topical section.
+        for (const sec of PLACEMENT_TOPICAL_ORDER) {
+          const arr = cleaned[sec];
+          if (!Array.isArray(arr)) continue;
+          const twin = arr.find((s: any) => s && typeof s.eventId === 'number' && s.eventId === id);
+          if (twin) { (twin as any).exLead = true; (twin as any).leadRank = leadRank; break; }
+        }
+        continue;
+      }
       // Twin was filtered away → re-inject the cut story into its captured home.
       const home = eventHomeSection?.get(id);
+      (story as any).exLead = true;
+      (story as any).leadRank = leadRank;
       if (home && Array.isArray(cleaned[home])) {
         cleaned[home].push(story);
         topicalIds.add(id);
@@ -2330,7 +2513,7 @@ function placeByEventId(cleaned: any, eventHomeSection?: Map<number, string>): v
         // Event never had a topical home in the unfiltered pool (e.g. a major-only
         // event). Keep it on the front page rather than lose it — the safe fallback.
         cleaned.major_events.push(story);
-        cutReinjected++;
+        cutKeptOnFront++;
       } else {
         orphaned++; // truly unrecoverable — should be ~0; named loudly below.
       }
@@ -2374,12 +2557,22 @@ function placeByEventId(cleaned: any, eventHomeSection?: Map<number, string>): v
       else homeOf.set(id, sec);
     }
   }
+  // Sprint 27.1 (N3) — full cut accounting. The 07-05 run logged "1 twin +
+  // 5 re-injected" against 7 cuts because (a) leads lost to pre-placement
+  // filters were invisible and (b) kept-on-front was folded into re-injected.
+  // Every lead is now in exactly one bucket, and curated vs at-placement is
+  // explicit, so cut = twin + re-injected + kept-on-front + orphaned holds
+  // arithmetically on every run.
+  const cutTotal = Math.max(0, atPlacement - PLACEMENT_MAJOR_CAP);
+  const lostPre = typeof curatedLeadCount === 'number' && curatedLeadCount > 0
+    ? Math.max(0, curatedLeadCount - atPlacement) : null;
+  const acct = `curated=${curatedLeadCount ?? 'n/a'} at-placement=${atPlacement}${lostPre != null ? ` lost-to-pre-placement-filters=${lostPre}` : ''}, cut=${cutTotal} → twin-survived=${cutRehomed} + re-injected=${cutReinjected} + kept-on-front=${cutKeptOnFront} + orphaned=${orphaned}`;
   if (collisions > 0) {
-    console.error(`[placement-v2] ASSERT FAILED — ${collisions} event(s) in >1 section after placement.`);
+    console.error(`[placement-v2] ASSERT FAILED — ${collisions} event(s) in >1 section after placement. (${acct})`);
   } else if (orphaned > 0) {
-    console.error(`[placement-v2] ASSERT FAILED — ${orphaned} cut event(s) unrecoverable (no eventId/home; lost). ${cutRehomed} fell back, ${cutReinjected} re-injected.`);
+    console.error(`[placement-v2] ASSERT FAILED — ${orphaned} cut event(s) unrecoverable (no eventId/home; lost). (${acct})`);
   } else {
-    console.log(`[placement-v2] ${PLACEMENT_OVERLAY ? 'overlay (front-page highlights also shown in their topical home)' : 'extraction (one home per event; front-page leads not repeated topically)'} — ${claimed.size} topical event(s) placed, ${cutRehomed} cut→twin-survived, ${cutReinjected} cut→re-injected to home, ${removed} cross/within-section dupe(s) removed, major≤${PLACEMENT_MAJOR_CAP}.`);
+    console.log(`[placement-v2] ${PLACEMENT_OVERLAY ? 'overlay (front-page highlights also shown in their topical home)' : 'extraction (one home per event; front-page leads not repeated topically)'} — ${claimed.size} topical event(s) placed, ${removed} cross/within-section dupe(s) removed, major≤${PLACEMENT_MAJOR_CAP}. Accounting: ${acct}.`);
   }
 }
 
@@ -2421,9 +2614,85 @@ function dropSemanticDuplicatesAgainstMajor(raw: any): { kept: any; droppedCount
 // merge), keeping the better-corroborated copy. It logs every collapse and is
 // env-revertible (SECTION_DEDUP=false). It does NOT touch the engine's
 // clustering threshold (RCA §10 #4).
+// ============================================================================
+// SECTION 13:  SECTION-LEVEL DEDUP  (Sprint 26 F2 / 27.1 N1)
+// ----------------------------------------------------------------------------
+// Prefix-aware within-section (and cross-section, _XS) collapse of split-event
+// duplicates the exact-match pass misses (e.g. russia/russian), keeping the
+// higher-eventCorr copy. Runs after placement so re-injection can't reintroduce.
+// Fns:   prefixSharedTokens, inheritCollapsedEvidence
+// Flags: SECTION_DEDUP, SECTION_DEDUP_XS
+// ============================================================================
 const SECTION_DEDUP = (process.env.SECTION_DEDUP || 'true').toLowerCase() !== 'false';
 
+// ─── Sprint 27.1 (N1) — CROSS-section split-event guard ─────────────────────
+// Default ON. The 2026-07-05 audit's worst reader-visible defect: the same
+// Meta/Instagram-CSAM event shipped in BOTH major_events and business, in both
+// editions — the same clustering-split root cause as the Kyiv pair, expressed
+// ACROSS sections. F2's pass is within-section only, and placeByEventId dedups
+// by eventId (the two copies had different ids), so nothing compared them.
+// This pass extends the same prefix-aware collapse across section boundaries,
+// walking sections in placement-priority order: the copy in the higher-priority
+// section (major_events first) keeps its home; the later occurrence is dropped
+// and its corroboration/newsworthiness/must_include are inherited by the kept
+// copy (so a merged event ranks as the SUM of its evidence, not the survivor's
+// alone). A must_include newcomer whose earlier twin is NOT must_include is
+// kept-both + logged loud (mislabel safety — same principle as F1). Requires
+// SECTION_DEDUP=on; independently revertible with SECTION_DEDUP_XS=false.
+// Logs `[section-dedup:xs] …` per collapse, including the shared tokens, so an
+// over-merge (the F2c caution) is diagnosable from the run log.
+const SECTION_DEDUP_XS = (process.env.SECTION_DEDUP_XS || 'true').toLowerCase() !== 'false';
+
+// The tokens two event-signatures actually share under the prefix-aware bar —
+// logged with every collapse so over-merges on generic vocabularies (fifa/world/
+// cup/prediction — the F2c caution) are visible, not inferred.
+function prefixSharedTokens(a: Set<string>, b: Set<string>): string[] {
+  const A = Array.from(a);
+  const B = Array.from(b);
+  const out: string[] = [];
+  for (const x of A) {
+    for (const y of B) {
+      if (prefixTokenMatch(x, y)) { out.push(x === y ? x : `${x}~${y}`); break; }
+    }
+  }
+  return out;
+}
+
+// Merge semantics when a split-event pair collapses (within- OR cross-section):
+// the kept copy inherits the pair's best evidence — max eventCorr, max nw, and
+// must_include if either had it. Sprint 27.1 (N3): the 07-05 run collapsed a
+// front-page lead into its twin and the twin then lost the buildSubset cut —
+// deleting the event's only shipped chance. Inheriting the evidence gives the
+// survivor the rank the EVENT earned, not the rank one copy earned.
+function inheritCollapsedEvidence(kept: any, dropped: any): void {
+  if (!kept || !dropped) return;
+  const kc = Number(kept.eventCorr || 0), dc = Number(dropped.eventCorr || 0);
+  if (dc > kc) kept.eventCorr = dc;
+  const kn = typeof kept.nw === 'number' ? kept.nw : null;
+  const dn = typeof dropped.nw === 'number' ? dropped.nw : null;
+  if (dn != null && (kn == null || dn > kn)) kept.nw = dn;
+  if (dropped.must_include) kept.must_include = true;
+  if (dropped.exLead && !kept.exLead) { kept.exLead = true; kept.leadRank = dropped.leadRank; }
+}
+
+// ============================================================================
+// SECTION 14:  enforceQualityRules  --  THE QUALITY GATE  (~400 lines)
+// ----------------------------------------------------------------------------
+// The central fetch-time gate, run once on the pool: whitelist gate, recency
+// window, cross-section dedup, publisher cap, within-section same-event
+// collapse, then placeByEventId (when PLACEMENT_V2). Output becomes raw_stories;
+// buildSubset (Section 15) derives per-edition subsets from it. EDIT WITH CARE.
+// Fns:   enforceQualityRules
+// Flags: PUBLISHER_CAP (+ consumes Sections 11-13 flags)
+// ============================================================================
 function enforceQualityRules(raw: any): RawStories {
+  // Sprint 27.1 (N3) — census the CURATED front page before any filter runs.
+  // The 07-05 audit found placement telemetry under-accounting (12 curated,
+  // 7 cut, only 6 explained): leads lost to recency/whitelist/near-dup BEFORE
+  // placeByEventId were invisible. Passing the curated count in lets the
+  // placement line report curated vs at-placement vs cut explicitly.
+  const curatedLeadCount = Array.isArray(raw?.major_events) ? raw.major_events.length : 0;
+
   // First pass: semantic dedup of world/india against major_events.
   // Sprint 22: PLACEMENT_V2's eventId one-home pass supersedes this word-overlap
   // matcher (more reliable, and it never false-drops a distinct story) — skip it
@@ -2677,7 +2946,7 @@ function enforceQualityRules(raw: any): RawStories {
   // engine's eventId, run last so it operates on the final per-section lists
   // (after dedup, cap, and near-dup collapse). Guarantees no event appears in two
   // sections; trims the front page to capacity with fallback-to-home.
-  if (PLACEMENT_V2) placeByEventId(cleaned, eventHomeSection);
+  if (PLACEMENT_V2) placeByEventId(cleaned, eventHomeSection, curatedLeadCount);
 
   // ─── Sprint 26 (F2) — split-event section dedup ────────────────────────────
   // Runs AFTER placeByEventId so it also catches any near-dup that re-injection
@@ -2708,6 +2977,7 @@ function enforceQualityRules(raw: any): RawStories {
         }
         // Found a same-event partner already kept in this section.
         const incumbent = kept[dupIdx];
+        const sharedToks = prefixSharedTokens(sig, keptSigs[dupIdx]); // BEFORE any swap
         const incCorr = Number((incumbent as any)?.eventCorr || 0);
         const newCorr = Number((story as any)?.eventCorr || 0);
         const incMust = !!(incumbent as any)?.must_include;
@@ -2719,24 +2989,33 @@ function enforceQualityRules(raw: any): RawStories {
           continue;
         }
         let dropHeadline: string;
+        let droppedStory: any;
         if (newMust && !incMust) {
           // Replace incumbent with the must_include newcomer.
           dropHeadline = incumbent?.headline || '';
+          droppedStory = incumbent;
           kept[dupIdx] = story;
           keptSigs[dupIdx] = sig;
         } else if (incMust && !newMust) {
           dropHeadline = story?.headline || '';
+          droppedStory = story;
           // keep incumbent, drop newcomer
         } else if (newCorr > incCorr) {
           dropHeadline = incumbent?.headline || '';
+          droppedStory = incumbent;
           kept[dupIdx] = story;
           keptSigs[dupIdx] = sig;
         } else {
           dropHeadline = story?.headline || '';
+          droppedStory = story;
           // tie or incumbent higher → keep incumbent (earlier)
         }
+        // Sprint 27.1 (N3) — the survivor inherits the pair's best evidence
+        // (max eventCorr/nw, must_include) so a collapse can't demote the event
+        // below the buildSubset cut that one of its copies had earned.
+        inheritCollapsedEvidence(kept[dupIdx], droppedStory);
         sectionDedupCollapsed++;
-        console.log(`[section-dedup] collapsed same-event pair in ${sec} (kept eventCorr=${Math.max(incCorr, newCorr)}): dropped "${(dropHeadline || '').slice(0, 70)}" — kept "${(kept[dupIdx]?.headline || '').slice(0, 70)}"`);
+        console.log(`[section-dedup] collapsed same-event pair in ${sec} (kept eventCorr=${Number((kept[dupIdx] as any)?.eventCorr || 0)}): dropped "${(dropHeadline || '').slice(0, 70)}" — kept "${(kept[dupIdx]?.headline || '').slice(0, 70)}" | shared tokens: ${sharedToks.join(', ')}`);
       }
       (cleaned as any)[sec] = kept;
     }
@@ -2744,6 +3023,66 @@ function enforceQualityRules(raw: any): RawStories {
       console.log(`[section-dedup] collapsed ${sectionDedupCollapsed} split-event duplicate(s) across sections.`);
     } else {
       console.log('[section-dedup] no split-event duplicates found.');
+    }
+
+    // ── Sprint 27.1 (N1) — cross-section pass ──────────────────────────────
+    // Same prefix-aware bar, applied ACROSS section boundaries in placement-
+    // priority order. The earlier (higher-priority) section keeps its copy —
+    // this mirrors placeByEventId's own first-claim semantics, and it means a
+    // front-page lead is never yanked off the front page by a topical twin.
+    // The dropped copy's evidence is inherited by the kept copy. If the dropped
+    // copy was BETTER corroborated, that is logged loudly (section precedence
+    // won, but the trade-off is visible). A must_include newcomer whose earlier
+    // twin is not must_include is kept-both + logged (mislabel safety) — F7's
+    // brief-wide duplicate check will independently flag it if it ships.
+    if (SECTION_DEDUP_XS) {
+      type XsKept = { sig: Set<string>; sec: string; story: any };
+      const registry: XsKept[] = [];
+      let xsCollapsed = 0;
+      let xsMustKeptBoth = 0;
+      for (const sec of priority) {
+        const arr = (cleaned as any)[sec] as RawStory[];
+        if (!Array.isArray(arr) || arr.length === 0) continue;
+        const survivors: RawStory[] = [];
+        for (const story of arr) {
+          const sig = eventSignature(story?.headline || '');
+          let twin: XsKept | null = null;
+          for (const r of registry) {
+            if (r.sec !== sec && isSameEventPrefix(sig, r.sig)) { twin = r; break; }
+          }
+          if (!twin) {
+            survivors.push(story);
+            registry.push({ sig, sec, story });
+            continue;
+          }
+          const newMust = !!(story as any)?.must_include;
+          const twinMust = !!(twin.story as any)?.must_include;
+          if (newMust && !twinMust) {
+            // Mislabel safety: never drop a must_include, never yank the earlier
+            // section's copy — keep both, loudly. F7 will flag it if both ship.
+            xsMustKeptBoth++;
+            console.warn(`[section-dedup:xs] must_include twin KEPT in ${sec} (earlier copy in ${twin.sec} is not must_include) — keeping both, F7 will verify: "${String(story?.headline || '').slice(0, 70)}"`);
+            survivors.push(story);
+            registry.push({ sig, sec, story });
+            continue;
+          }
+          const sharedToks = prefixSharedTokens(sig, twin.sig);
+          const dropCorr = Number((story as any)?.eventCorr || 0);
+          const keptCorr = Number((twin.story as any)?.eventCorr || 0);
+          inheritCollapsedEvidence(twin.story, story);
+          xsCollapsed++;
+          const corrNote = dropCorr > keptCorr
+            ? ` ⚠ dropped copy was BETTER corroborated (${dropCorr}>${keptCorr}) — section precedence kept the ${twin.sec} copy; evidence inherited`
+            : '';
+          console.log(`[section-dedup:xs] collapsed cross-section same-event pair (${twin.sec} ⟷ ${sec}): dropped "${String(story?.headline || '').slice(0, 70)}" from ${sec} — kept "${String(twin.story?.headline || '').slice(0, 70)}" in ${twin.sec} (eventCorr now ${Number((twin.story as any)?.eventCorr || 0)}) | shared tokens: ${sharedToks.join(', ')}${corrNote}`);
+        }
+        (cleaned as any)[sec] = survivors;
+      }
+      if (xsCollapsed > 0 || xsMustKeptBoth > 0) {
+        console.log(`[section-dedup:xs] collapsed ${xsCollapsed} cross-section split-event duplicate(s)${xsMustKeptBoth > 0 ? `; ${xsMustKeptBoth} must_include twin(s) kept-both (mislabel safety)` : ''}.`);
+      } else {
+        console.log('[section-dedup:xs] no cross-section split-event duplicates found.');
+      }
     }
   }
 
@@ -2755,6 +3094,15 @@ function enforceQualityRules(raw: any): RawStories {
 
 // ─── Phase 3: Edition writers (three different prompts) ─────────────────────
 
+// ============================================================================
+// SECTION 15:  WRITER PREP, RANKING & SUBSET
+// ----------------------------------------------------------------------------
+// Shapes the cleaned pool for the writer, ranks by source tier / newsworthiness
+// / home-audience boost, and buildSubset() carves each edition's per-section
+// quota from the shared pool at write time.
+// Fns:   rankBySourceTier, rankByImportance, homeAudienceBonus, buildSubset
+// Flags: RANK_BY_NEWSWORTHINESS, HOME_AUDIENCE_BOOST, HOME_BOOST_SPORT_ONLY
+// ============================================================================
 function rawStoriesForWriter(raw: RawStories) {
   // Strip `lens` — it's a four-line home-screen summary, not source material.
   // Previously the deep writer was treating lens lines as available headlines
@@ -2943,6 +3291,15 @@ function buildSubset(raw: RawStories, cap: number): RawStories {
 // LOG rather than regenerate — a per-story retry would add a second model call
 // and latency for little gain; surfacing the count in the run log lets the
 // prompt fix be verified and tuned. No content is changed.
+// ============================================================================
+// SECTION 16:  EDITION WRITERS (5min / 10min / deep)
+// ----------------------------------------------------------------------------
+// The three edition writers that turn the subset into brief content:
+// writeQuickEdition (5min micro-items), writeDailyEdition (10min full stories),
+// writeEditorialEdition (deep synthesis). Plus the dek-restates-headline guard.
+// Fns:   writeQuickEdition, writeDailyEdition, writeEditorialEdition, warnOnDekRestatesHeadline
+// Flags: -
+// ============================================================================
 function dekRestatesHeadline(headline: string, dek: string): boolean {
   const h = significantWords(headline || '');
   const d = significantWords(dek || '');
@@ -3197,6 +3554,16 @@ ${JSON.stringify(rawStoriesForWriter(raw))}`;
 // Sprint 20.1 — parse OpenAI's suggested wait from a 429/5xx response so backoff
 // matches the server's rolling-window hint. Falls back to a Retry-After header,
 // then to a sane default. Returns milliseconds.
+// ============================================================================
+// SECTION 17:  CHAT TRANSPORT + RAW->STORY TEMPLATES + BACKFILL
+// ----------------------------------------------------------------------------
+// callOpenAIChat() (429/5xx-aware backoff), the raw-template constants and
+// raw->Micro/Full converters, section backfill (backfillToSubsetCounts takes an
+// exclude-set so a coherence-dropped story can't return), and template-why
+// rewriting. The template constants here are the fingerprints Section 19 guards.
+// Fns:   callOpenAIChat, rawToFullStory, rawToMicroStory, backfillToSubsetCounts, rewriteTemplateWhys
+// Flags: REWRITE_TEMPLATE_WHYS  |  consts: BACKFILL_WHY_*, RAW_TEMPLATE_*
+// ============================================================================
 function retryAfterMsFromBody(body: string, headerSeconds: number): number {
   if (!isNaN(headerSeconds) && headerSeconds > 0) return Math.round(headerSeconds * 1000);
   const ms = body.match(/try again in\s+([\d.]+)\s*ms/i);
@@ -3556,6 +3923,16 @@ ${numbered}`;
 // when the issue names an exact headline that matches a story in the named
 // section — so a drop is always precisely targeted, never a guess.
 
+// ============================================================================
+// SECTION 18:  COHERENCE CHECK, VALIDATION & REPAIR
+// ----------------------------------------------------------------------------
+// LLM coherence pass + drop (applyCoherenceDrops returns dropped URL keys for
+// the backfill guard; a duplication flag resolves by keep-best, drops nothing
+// with no partner), plus repairCommonOmissions, validateBrief / validateLens,
+// the non-whitelisted strip, and fetchPreviousBrief (halt fallback source).
+// Fns:   runCoherenceCheck, applyCoherenceDrops, repairCommonOmissions, validateBrief, stripNonWhitelistedFromContent, fetchPreviousBrief
+// Flags: COHERENCE_ENFORCE, COHERENCE_BACKFILL_GUARD
+// ============================================================================
 const COHERENCE_ENFORCE = (process.env.COHERENCE_ENFORCE || 'on').toLowerCase() !== 'off';
 
 // Sprint 26 (F1) — default ON. Two independent guarantees on the coherence
@@ -3690,13 +4067,26 @@ function applyCoherenceDrops(
   };
 
   let removed = 0;
+  // Sprint 27.1 (N7) — every flagged issue now logs a DISPOSITION. The 07-05
+  // run flagged contradiction/high @ markets and silently no-oped (the target
+  // was the non-array markets object; the loop `continue`d without a word) —
+  // the brief shipped carrying a flagged high-severity contradiction. Behaviour
+  // is UNCHANGED here (what was dropped is still dropped, what wasn't still
+  // isn't); the change is that "wasn't" is now a named, greppable reason, so a
+  // high-severity flag can never disappear from the log again.
+  const disposition = (it: CoherenceIssue, what: string) => {
+    console.warn(`[coherence:${edition}] disposition — ${it.type}/${it.severity} @ ${it.section || '?'}: ${what}`);
+  };
   for (const it of issues) {
-    if (it.severity !== 'high') continue;
+    if (it.severity !== 'high') { disposition(it, 'below-severity (low) — logged only, nothing dropped'); continue; }
     const sec = it.section;
     const target = norm(it.headline);
-    if (!sec || !target || !Array.isArray(content[sec])) continue;
+    const attributable = !!(sec && target);
+    const droppableSection = !!(sec && Array.isArray(content[sec]));
 
     if (ENFORCE_TYPES.has(it.type)) {
+      if (!attributable) { disposition(it, 'NOT ATTRIBUTABLE to one story (no section/headline from the reviewer) — cannot drop; likely a cross-section issue, shipping with the flag on record'); continue; }
+      if (!droppableSection) { disposition(it, `section "${sec}" is not a droppable story array (object/absent) — cannot drop; likely a cross-section issue, shipping with the flag on record`); continue; }
       const keep: any[] = [];
       for (const s of content[sec]) {
         if (norm(s?.headline) === target) { recordDrop(s); removed++; continue; }
@@ -3704,16 +4094,22 @@ function applyCoherenceDrops(
       }
       if (content[sec].length !== keep.length) {
         console.warn(`[coherence:${edition}] BLOCKED — dropped ${content[sec].length - keep.length} story from "${sec}" (${it.type}): "${String(it.headline).slice(0, 80)}"`);
+        disposition(it, 'DROPPED (blocking enforcement)');
+      } else {
+        disposition(it, 'story-not-found in section (already removed by an earlier pass?) — nothing dropped');
       }
       content[sec] = keep;
       continue;
     }
 
     // duplication — keep-best, only under the F1 guard.
-    if (guard && it.type === 'duplication') {
+    if (it.type === 'duplication') {
+      if (!guard) { disposition(it, 'duplication with F1 guard OFF — logged only, nothing dropped'); continue; }
+      if (!attributable) { disposition(it, 'NOT ATTRIBUTABLE to one story — cannot resolve keep-best; nothing dropped'); continue; }
+      if (!droppableSection) { disposition(it, `section "${sec}" is not a droppable story array — nothing dropped`); continue; }
       const arr = content[sec] as any[];
       const flaggedIdx = arr.findIndex((s) => norm(s?.headline) === target);
-      if (flaggedIdx === -1) continue; // flagged story not present (already gone)
+      if (flaggedIdx === -1) { disposition(it, 'story-not-found in section (already removed?) — nothing dropped'); continue; }
       const flaggedSig = eventSignature(arr[flaggedIdx]?.headline || '');
       let partnerIdx = -1;
       for (let i = 0; i < arr.length; i++) {
@@ -3722,6 +4118,7 @@ function applyCoherenceDrops(
       }
       if (partnerIdx === -1) {
         console.warn(`[coherence:${edition}] duplication flag on "${String(it.headline).slice(0, 70)}" in ${sec} has NO in-section partner — treating as possible mislabel, keeping story (F1).`);
+        disposition(it, 'no-partner-found — possible mislabel, story KEPT (F1 safety)');
         continue;
       }
       const a = arr[flaggedIdx], b = arr[partnerIdx];
@@ -3734,9 +4131,14 @@ function applyCoherenceDrops(
       const keepIdx = dropIdx === flaggedIdx ? partnerIdx : flaggedIdx;
       recordDrop(arr[dropIdx]);
       console.warn(`[coherence:${edition}] BLOCKED(dup keep-best) — ${sec}: dropped "${String(arr[dropIdx]?.headline || '').slice(0, 60)}" (eventCorr=${Math.min(aCorr, bCorr)}), kept "${String(arr[keepIdx]?.headline || '').slice(0, 60)}" (eventCorr=${Math.max(aCorr, bCorr)}).`);
+      disposition(it, 'RESOLVED keep-best (lower-eventCorr twin dropped)');
       arr.splice(dropIdx, 1);
       removed++;
+      continue;
     }
+
+    // High-severity but not an enforce class (attribution/stale/etc.).
+    disposition(it, `type "${it.type}" is not an enforce class — logged only, nothing dropped`);
   }
   return { removed, droppedUrlKeys, droppedHeadlineKeys };
 }
@@ -3747,6 +4149,42 @@ function repairCommonOmissions(content: any, edition: Edition, raw: RawStories):
 
   // 10min: re-attach markets if dropped or malformed.
   if (edition === '10min') {
+    // ── Sprint 27.1 (writer/validator contract; the open 10-min `facts` item) ──
+    // The writer occasionally emits a required text field a few characters
+    // short of its Zod minimum (`major_events.1.facts: expected ≥15 chars`),
+    // failing the WHOLE brief and burning a full retry over one field. Repair
+    // deterministically instead: extend a present-but-short field from the
+    // story's own material (headline first, then a neutral pointer), logged per
+    // field. MISSING/null fields still fail validation — those signal a deeper
+    // writer failure a retry should handle; this only repairs "wrote it, but
+    // too short". Env-revertible: WRITER_FIELD_REPAIR=false restores strict
+    // fail-and-retry. Same contract-fix family as the deep one_chart null.
+    const WRITER_FIELD_REPAIR = (process.env.WRITER_FIELD_REPAIR || 'true').toLowerCase() !== 'false';
+    if (WRITER_FIELD_REPAIR) {
+      const MIN = 15;
+      const FIELDS = ['facts', 'background', 'why_it_matters', 'what_happens_next', 'analysis'];
+      let padded = 0;
+      const padField = (s: any, field: string) => {
+        const val = s?.[field];
+        if (typeof val !== 'string') return;           // missing/null → leave for Zod
+        const trimmed = val.trim();
+        if (trimmed.length === 0 || trimmed.length >= MIN) return;
+        const head = String(s?.headline || '').trim();
+        const extended = head && `${trimmed} — ${head}.`.length >= MIN
+          ? `${trimmed} — ${head}.`
+          : `${trimmed} — see the linked source for detail.`;
+        s[field] = extended;
+        padded++;
+        console.warn(`[10min] field-repair: "${field}" was ${trimmed.length} chars (<${MIN}) on "${head.slice(0, 55)}" — extended deterministically.`);
+      };
+      for (const sec of ['major_events', 'world', 'india', 'business', 'technology', 'climate_health', 'sport', 'culture', 'politics', 'markets_news']) {
+        const arr = (content as any)[sec];
+        if (!Array.isArray(arr)) continue;
+        for (const s of arr) for (const f of FIELDS) padField(s, f);
+      }
+      if (padded > 0) console.warn(`[10min] field-repair extended ${padded} short field(s) — brief saved from a whole-retry over sub-minimum text.`);
+    }
+
     const hasMarkets =
       content.markets &&
       typeof content.markets === 'object' &&
@@ -3889,66 +4327,118 @@ async function fetchPreviousBrief(edition: Edition): Promise<{ content: BriefCon
 // content. BRIEF_INVARIANTS_HALT (default OFF) additionally refuses to ship a
 // brief with a halt-class violation (it falls back to the previous good brief).
 // Enable HALT only after a run confirms zero halt-class violations.
+// ============================================================================
+// SECTION 19:  FINAL-BRIEF INVARIANT CHECKER  (Sprint 26 F7)
+// ----------------------------------------------------------------------------
+// Independent check on the EXACT object being saved (5/10min; deep no-op):
+// no duplicate event in a section, no orphaned front-page lead (halt-class),
+// no raw-template fingerprint, no floor miss (log-loud). Halting refuses to
+// ship a violating brief and falls back to the previous good brief.
+// Fns:   checkBriefInvariants
+// Flags: BRIEF_INVARIANTS (on/log-only), BRIEF_INVARIANTS_HALT (off)
+// ============================================================================
 const BRIEF_INVARIANTS = (process.env.BRIEF_INVARIANTS || 'true').toLowerCase() !== 'false';
 const BRIEF_INVARIANTS_HALT = (process.env.BRIEF_INVARIANTS_HALT || 'false').toLowerCase() === 'true';
 
-const INVARIANT_SECTIONS = ['major_events', 'world', 'india', 'business', 'technology', 'climate_health', 'sport', 'culture'];
+// Sprint 27.1 (N5) — the checker must know each edition's ACTUAL schema. The
+// 07-05 audit caught it schema-blind: the 5-min folds business…culture into a
+// single `topics` array (the checker saw 0-story sections and cried a false
+// floor violation on a healthy brief), and the 10-min's politics/markets_news
+// were outside the check entirely (it said "20 stories" on a 29-story brief).
+// A checker that cries wolf and misses real sections erodes the trust it was
+// built to provide — these lists mirror BriefQuickSchema / BriefDailySchema.
+const INVARIANT_SECTIONS_BY_EDITION: Record<string, string[]> = {
+  '5min':  ['major_events', 'world', 'india', 'topics'],
+  '10min': ['major_events', 'world', 'india', 'business', 'technology', 'climate_health', 'sport', 'culture', 'politics', 'markets_news'],
+};
+// 5-min folding: these subset sections ship inside `topics`, not under their
+// own keys — the floor check tests them collectively against topics.
+const FIVE_MIN_FOLDED_INTO_TOPICS = ['business', 'technology', 'climate_health', 'sport', 'culture'];
 
 interface InvariantResult { ok: boolean; violations: string[]; halted: boolean; }
 
-function checkBriefInvariants(content: any, subset: RawStories, edition: Edition): InvariantResult {
+function checkBriefInvariants(content: any, subset: RawStories, edition: Edition, fullPool?: RawStories | null): InvariantResult {
   const violations: string[] = [];
   if (edition === 'deep' || !content || typeof content !== 'object') {
     console.log(`[invariants:${edition}] ok — no story sections to check.`);
     return { ok: true, violations, halted: false };
   }
+  const sections = INVARIANT_SECTIONS_BY_EDITION[edition] || INVARIANT_SECTIONS_BY_EDITION['10min'];
 
-  // source_url → eventId, and the curated front-page event set, from the subset
-  // (the raw stories carry eventId; written stories do not, so we map by URL).
+  // source_url → eventId, from the subset AND the full pool (the pool also
+  // covers curated leads that didn't make the subset — the delivery report
+  // below needs to recognise them wherever they surface). Written stories
+  // don't carry eventId, so we map by URL.
   const eventIdByUrl = new Map<string, number>();
-  const majorEventIds = new Set<number>();
-  for (const key of Object.keys(subset as any)) {
-    const arr = (subset as any)[key];
-    if (!Array.isArray(arr)) continue;
-    for (const s of arr) {
-      const u = normaliseUrlForCompare(s?.source_url);
-      const eid = typeof s?.eventId === 'number' ? s.eventId : null;
-      if (u && eid != null && !eventIdByUrl.has(u)) eventIdByUrl.set(u, eid);
-      if (key === 'major_events' && eid != null) majorEventIds.add(eid);
+  const shippedMajorEventIds = new Set<number>();     // the shipped front page (≤5) — halt-class promise
+  const curatedLeads = new Map<number, { rank: number; headline: string }>(); // curated 1..12 — delivery report
+  const harvest = (src: any, isSubset: boolean) => {
+    if (!src || typeof src !== 'object') return;
+    for (const key of Object.keys(src)) {
+      const arr = (src as any)[key];
+      if (!Array.isArray(arr)) continue;
+      for (const s of arr) {
+        const u = normaliseUrlForCompare(s?.source_url);
+        const eid = typeof s?.eventId === 'number' ? s.eventId : null;
+        if (u && eid != null && !eventIdByUrl.has(u)) eventIdByUrl.set(u, eid);
+        if (isSubset && key === 'major_events' && eid != null) {
+          shippedMajorEventIds.add(eid);
+          if (!curatedLeads.has(eid)) curatedLeads.set(eid, { rank: 0, headline: String(s?.headline || '') });
+        }
+        // Sprint 27.1 (N3) — cut curated leads are exLead-stamped by placement.
+        if (eid != null && (s as any)?.exLead && !curatedLeads.has(eid)) {
+          curatedLeads.set(eid, { rank: Number((s as any)?.leadRank || 0), headline: String(s?.headline || '') });
+        }
+      }
     }
-  }
+  };
+  harvest(subset, true);
+  harvest(fullPool, false);
 
   const presentEventIds = new Set<number>();
   let totalStories = 0;
+  let sectionsChecked = 0;
 
-  for (const sec of INVARIANT_SECTIONS) {
+  // Sprint 27.1 (N1) — duplicate tracking is BRIEF-WIDE, not per-section. The
+  // 07-05 Meta/CSAM pair shipped in major_events AND business; the per-section
+  // checker blessed it ("ok — no duplicate events") — a false negative on the
+  // exact defect class it exists for. URLs, eventIds and prefix-aware headline
+  // signatures are now compared across every section, tagged with both homes.
+  const seenUrls = new Map<string, string>();          // url → first section
+  const seenEventIds = new Map<number, string>();      // eid → first section
+  const keptSigs: { sig: Set<string>; sec: string; headline: string }[] = [];
+
+  for (const sec of sections) {
     const arr = (content as any)[sec];
     if (!Array.isArray(arr)) continue;
-    const seenUrls = new Set<string>();
-    const seenEventIds = new Set<number>();
-    const keptSigs: Set<string>[] = [];
+    sectionsChecked++;
     for (const s of arr) {
       totalStories++;
       const url = normaliseUrlForCompare(s?.source_url);
       if (url) {
-        if (seenUrls.has(url)) violations.push(`[dup:${sec}] repeated source_url (${url.slice(0, 60)})`);
-        else seenUrls.add(url);
+        const firstSec = seenUrls.get(url);
+        if (firstSec === sec) violations.push(`[dup:${sec}] repeated source_url (${url.slice(0, 60)})`);
+        else if (firstSec) violations.push(`[dup-xs:${firstSec}⟷${sec}] same source_url in both (${url.slice(0, 60)})`);
+        else seenUrls.set(url, sec);
       }
       let eid: number | null = url && eventIdByUrl.has(url) ? (eventIdByUrl.get(url) as number) : null;
       if (eid == null && typeof s?.eventId === 'number') eid = s.eventId;
       if (eid != null) {
         presentEventIds.add(eid);
-        if (seenEventIds.has(eid)) violations.push(`[dup:${sec}] repeated eventId ${eid} ("${String(s?.headline || '').slice(0, 45)}")`);
-        else seenEventIds.add(eid);
+        const firstSec = seenEventIds.get(eid);
+        if (firstSec === sec) violations.push(`[dup:${sec}] repeated eventId ${eid} ("${String(s?.headline || '').slice(0, 45)}")`);
+        else if (firstSec) violations.push(`[dup-xs:${firstSec}⟷${sec}] same eventId ${eid} in both ("${String(s?.headline || '').slice(0, 45)}")`);
+        else seenEventIds.set(eid, sec);
       }
       const sig = eventSignature(s?.headline || '');
       for (const ks of keptSigs) {
-        if (isSameEventPrefix(sig, ks)) {
-          violations.push(`[dup:${sec}] near-duplicate headline ("${String(s?.headline || '').slice(0, 45)}")`);
+        if (isSameEventPrefix(sig, ks.sig)) {
+          if (ks.sec === sec) violations.push(`[dup:${sec}] near-duplicate headline ("${String(s?.headline || '').slice(0, 45)}")`);
+          else violations.push(`[dup-xs:${ks.sec}⟷${sec}] near-duplicate headlines ("${ks.headline.slice(0, 45)}" ⟷ "${String(s?.headline || '').slice(0, 45)}")`);
           break;
         }
       }
-      keptSigs.push(sig);
+      keptSigs.push({ sig, sec, headline: String(s?.headline || '') });
       const analysis = String(s?.analysis || '');
       const wnext = String(s?.what_happens_next || '');
       const why = String(s?.why_it_matters || '');
@@ -3958,23 +4448,54 @@ function checkBriefInvariants(content: any, subset: RawStories, edition: Edition
     }
   }
 
-  // Orphaned front-page lead — a curated event missing everywhere in the brief.
-  for (const eid of Array.from(majorEventIds)) {
-    if (!presentEventIds.has(eid)) violations.push(`[orphan] front-page lead eventId ${eid} is not present anywhere in the final ${edition} brief`);
+  // Orphaned SHIPPED front-page lead — halt-class. Sprint 27.1 (N3): this is
+  // honestly labelled now. What placement guarantees — and what this asserts —
+  // is that every event on the SHIPPED front page (major ≤5) appears in the
+  // final brief. The curated 6-12 are NOT guaranteed to ship (they compete in
+  // buildSubset like any story); their fate is reported below as log-loud
+  // delivery telemetry, not asserted. Promoting the curated-12 to a shipped
+  // guarantee is a deliberate future selection-policy decision, not a checker
+  // default (see Sprint 27.1 summary — decision deferred, documented).
+  for (const eid of Array.from(shippedMajorEventIds)) {
+    if (!presentEventIds.has(eid)) violations.push(`[orphan] shipped front-page lead eventId ${eid} is absent from the final ${edition} brief`);
   }
 
-  // Floor checks — a supplied section that shipped empty, or a low total.
-  for (const sec of INVARIANT_SECTIONS) {
+  // Curated-lead delivery report (log-loud, never halts): which of the day's
+  // curated front-page events — shipped 1-5 AND cut 6-12 — reached this brief.
+  // The 07-05 audit found three curated leads (nw up to 7) that reached no
+  // reader with no line anywhere saying so; this is that line.
+  const curatedIds = Array.from(curatedLeads.keys());
+  if (curatedIds.length > 0) {
+    const missing = curatedIds.filter((eid) => !presentEventIds.has(eid));
+    if (missing.length === 0) {
+      console.log(`[invariants:${edition}] curated-lead delivery: ${curatedIds.length}/${curatedIds.length} curated front-page event(s) present in the final brief.`);
+    } else {
+      const detail = missing
+        .map((eid) => { const m = curatedLeads.get(eid)!; return `rank ${m.rank || '?'} "${m.headline.slice(0, 55)}"`; })
+        .join('; ');
+      console.warn(`[invariants:${edition}] [lead-miss] curated-lead delivery: ${curatedIds.length - missing.length}/${curatedIds.length} present — MISSING: ${detail}. (Log-loud telemetry — curated 6-12 are not a shipped guarantee; see Sprint 27.1.)`);
+    }
+  }
+
+  // Floor checks — edition-aware (N5). For the 5-min, business…culture ship
+  // folded into `topics`; test them collectively. Per-section elsewhere.
+  const flooredSections = edition === '5min' ? ['major_events', 'world', 'india'] : sections;
+  for (const sec of flooredSections) {
     const sup = Array.isArray((subset as any)[sec]) ? (subset as any)[sec].length : 0;
     const got = Array.isArray((content as any)[sec]) ? (content as any)[sec].length : 0;
     if (sup > 0 && got === 0) violations.push(`[floor:${sec}] subset supplied ${sup} but final shipped 0`);
   }
+  if (edition === '5min') {
+    const foldedSupplied = FIVE_MIN_FOLDED_INTO_TOPICS.reduce((n, sec) => n + (Array.isArray((subset as any)[sec]) ? (subset as any)[sec].length : 0), 0);
+    const topicsGot = Array.isArray((content as any).topics) ? (content as any).topics.length : 0;
+    if (foldedSupplied > 0 && topicsGot === 0) violations.push(`[floor:topics] subset supplied ${foldedSupplied} folded topical stor(ies) but topics shipped 0`);
+  }
   const target = edition === '5min' ? 15 : 20;
   if (totalStories < target) violations.push(`[floor] total ${totalStories} stories below ${edition} target ${target}`);
 
-  const haltClass = violations.filter((v) => v.startsWith('[dup:') || v.startsWith('[orphan]'));
+  const haltClass = violations.filter((v) => v.startsWith('[dup:') || v.startsWith('[dup-xs:') || v.startsWith('[orphan]'));
   if (violations.length === 0) {
-    console.log(`[invariants:${edition}] ok — ${totalStories} stories, no duplicate events, no template fingerprints, all front-page leads present.`);
+    console.log(`[invariants:${edition}] ok — ${totalStories} stories across ${sectionsChecked} section(s), checked brief-wide: no duplicate events, no template fingerprints, all shipped front-page leads present.`);
     return { ok: true, violations, halted: false };
   }
   const halted = haltClass.length > 0;
@@ -3984,6 +4505,14 @@ function checkBriefInvariants(content: any, subset: RawStories, edition: Edition
 
 // ─── Save ────────────────────────────────────────────────────────────────────
 
+// ============================================================================
+// SECTION 20:  PERSIST & PUSH
+// ----------------------------------------------------------------------------
+// Writes the validated brief to the briefs table and sends the OneSignal push
+// for the top headline.
+// Fns:   saveBriefToSupabase, sendPushNotification
+// Flags: ONESIGNAL_* (env)
+// ============================================================================
 async function saveBriefToSupabase(
   edition: Edition,
   rawStories: RawStories | null,
@@ -4063,6 +4592,15 @@ async function sendPushNotification(topHeadline: string) {
 // Pure function: takes raw stories, returns a saved result. Shared by 'write'
 // mode and 'full' mode below.
 
+// ============================================================================
+// SECTION 21:  CONTENT HYGIENE: LIVENESS, CROSS-SECTION DEDUP & SANITIZE
+// ----------------------------------------------------------------------------
+// Pre-orchestration hygiene helpers: dead-link detection/drop, cross-section
+// dedup of the daily edition, synthetic-chart detection, and signature/edition
+// sanitisation. (EditionOutcome, the runWriterForEdition result type, is here.)
+// Fns:   isUrlDead, dropDeadLinkStories, dedupeDailyAcrossSections, sanitizeEditionContent
+// Flags: URL_LIVENESS
+// ============================================================================
 type EditionOutcome = {
   status: 'ready' | 'fallback' | 'failed';
   reason?: string;
@@ -4317,6 +4855,15 @@ function sanitizeEditionContent(ed: Edition, content: any): any {
   return content;
 }
 
+// ============================================================================
+// SECTION 22:  WRITER ORCHESTRATION  (runWriterForEdition)
+// ----------------------------------------------------------------------------
+// Per-edition conductor: write -> repair -> coherence drop (+ backfill guard)
+// -> backfill -> dead-link drop -> validate -> invariant check -> outcome.
+// This is where Sections 16-21 are wired together in order.
+// Fns:   runWriterForEdition
+// Flags: (orchestrates Sections 16-21 flags)
+// ============================================================================
 async function runWriterForEdition(
   ed: Edition,
   rawStories: RawStories,
@@ -4436,13 +4983,26 @@ async function runWriterForEdition(
         // as canned boilerplate (the Sprint 18 regression). Catches every
         // backfill path (empty-section, post-strip top-up, post-coherence top-up).
         await rewriteTemplateWhys(finalContent, ed);
-        // Sprint 26 (F7) — final invariant check on the exact object being saved.
+        // Sprint 26 (F7) / 27.1 — final invariant check on the exact object being
+        // saved; the full pool rides along so the curated-lead delivery report
+        // can recognise cut leads that never made the subset.
         if (BRIEF_INVARIANTS) {
-          const inv = checkBriefInvariants(finalContent, writerInput, ed);
+          const inv = checkBriefInvariants(finalContent, writerInput, ed, rawStories);
           if (!inv.ok && inv.halted && BRIEF_INVARIANTS_HALT) {
             throw new Error(`INVARIANTS_HALT: ${ed} — ${inv.violations.join(' | ')}`);
           }
         }
+        // Sprint 27.1 (N6) — SHIPPED census on the exact object being saved.
+        // The 07-05 run's writer diagnostic said "politics 5/5" while liveness
+        // had dropped a fabricated URL and 4 shipped — written≠shipped was
+        // invisible. This line is the shipped truth the RCA should reconcile
+        // against the writer line.
+        try {
+          const shippedKeys = (WRITER_DIAG_SECTIONS[ed] || []).filter((k) => Array.isArray((finalContent as any)?.[k]));
+          const parts = shippedKeys.map((k) => `${k} ${(finalContent as any)[k].length}`);
+          const totalShipped = shippedKeys.reduce((n, k) => n + (finalContent as any)[k].length, 0);
+          console.log(`[write:${ed}] shipped — ${parts.join(' · ')} · total ${totalShipped}`);
+        } catch (e) { /* diagnostic only */ }
         await saveBriefToSupabase(ed, rawStories, finalContent, lens, 'ready');
         return { status: 'ready', content: finalContent };
       }
@@ -4496,6 +5056,15 @@ async function runWriterForEdition(
 // edition). Lens lives inside raw_stories.lens — the writers read it from
 // there in the write phase.
 
+// ============================================================================
+// SECTION 23:  CRON MODES: fetch / write / push
+// ----------------------------------------------------------------------------
+// The mode entry points the cron hits: modeFetch (Stage 1 -> raw_stories),
+// modeWrite (writes editions 5->10->deep sequentially), modePush (OneSignal).
+// emptySectionCount() is a shared diagnostic.
+// Fns:   modeFetch, modeWrite, modePush, emptySectionCount
+// Flags: -
+// ============================================================================
 async function modeFetch() {
   const universe = await loadPersonalisationUniverse();
   console.log(`Universe — industries: ${universe.industries.length}, interests: ${universe.interests.length}, cities: ${universe.cities.length}`);
@@ -4740,6 +5309,16 @@ function emptySectionCount(edition: Edition, content: any): number {
 //
 // Gated by SCORE_GROUNDTRUTH ('off' skips the whole thing and the penalty).
 
+// ============================================================================
+// SECTION 24:  GROUND TRUTH & COVERAGE SCORING
+// ----------------------------------------------------------------------------
+// Independent ground-truth retrieval (Perplexity sonar-pro + news-API fallback,
+// withheld loudly if neither), and coverage measurement: COVERAGE_V3 weighted
+// miss for 5/10min, and DEEP_COVERAGE_V2 corpus-based scoring for the deep
+// edition (flattens prose incl. three_patterns[].stories_connected).
+// Fns:   fetchGroundTruthHeadlines, measureCoverageV3, measureDeepCoverage, collectDeepStrings
+// Flags: SCORE_GROUNDTRUTH, COVERAGE_V2/V3, DEEP_COVERAGE_V2, DEEP_COVERAGE_STRICT, COVERAGE_ANCHOR_MATCH
+// ============================================================================
 const SCORE_GROUNDTRUTH = (process.env.SCORE_GROUNDTRUTH || 'on').toLowerCase() !== 'off';
 
 // Minimum parsed headlines (India + world) for a reference to count as "usable".
@@ -5122,14 +5701,103 @@ function collectDeepStrings(node: any, out: string[], depth: number): void {
   if (typeof node === 'object') { for (const k of Object.keys(node)) collectDeepStrings((node as any)[k], out, depth + 1); return; }
 }
 
+// ─── Sprint 27.1 (N4) — make deep coverage CREDIBLE, not just non-zero ──────
+// F3 fixed the mechanical bug (headline matcher on a headline-less edition) but
+// the 07-05 audit showed the replacement over-corrected: pooling EVERY word of
+// deep prose into one bag meant "delhi" from one story + "threat" from another
+// satisfied the 2-word bar — 16/16 covered, with provably absent topics (no
+// "bomb", no "OPEC", no "Thackeray" anywhere in the corpus). A guaranteed 0
+// became a near-guaranteed 10; both are false telemetry.
+// Strict mode (default ON, revert with DEEP_COVERAGE_STRICT=false):
+//   (1) PER-STRING matching — a reference's words must co-occur inside ONE deep
+//       string (a title/body/connected-story line), not scattered corpus-wide;
+//   (2) at least one matched word must be NON-GENERIC — everyday India-news
+//       vocabulary (india, government, leader, security, threat, tensions…)
+//       cannot carry a match on its own;
+//   (3) anchor matches (acronyms/salient numbers) still count, also per-string;
+//   (4) every COVERED reference logs its evidence (matched tokens + snippet),
+//       so a suspicious score is auditable from the run log in seconds.
+// Telemetry only — never touches reader content.
+const DEEP_COVERAGE_STRICT = (process.env.DEEP_COVERAGE_STRICT || 'true').toLowerCase() !== 'false';
+
+// Words too common in any Indian news corpus to identify a SPECIFIC story.
+// They still count toward the 2-word bar — they just can't be the only
+// evidence. Extends STOPWORDS (already excluded by significantWords).
+const DEEP_GENERIC_WORDS = new Set([
+  'india', 'indian', 'indias', 'delhi', 'mumbai', 'government', 'centre', 'central',
+  'state', 'states', 'minister', 'ministry', 'court', 'courts', 'police', 'national',
+  'official', 'officials', 'leader', 'leaders', 'opposition', 'party', 'political',
+  'politics', 'security', 'threat', 'threats', 'crisis', 'talks', 'deal', 'report',
+  'reports', 'plan', 'plans', 'policy', 'market', 'markets', 'economy', 'economic',
+  'growth', 'prices', 'price', 'global', 'world', 'week', 'launch', 'launches',
+  'major', 'debate', 'controversy', 'tensions', 'rise', 'rises', 'raise', 'fall',
+  'falls', 'expected', 'announces', 'announced', 'says', 'said', 'amid', 'after',
+  'against', 'people', 'country', 'nation', 'issue', 'issues', 'move', 'action',
+]);
+
+type DeepMatchEvidence = { ref: string; tokens: string[]; snippet: string };
+
 // Deep coverage: same weighted, edition-scoped measurement as measureCoverageV3,
-// but the "brief side" is a single word+anchor corpus built from ALL deep prose
-// rather than a per-headline list. A reference counts as covered if >=2 of its
-// significant words (or any anchor) appear anywhere in that corpus.
+// but matched against deep's prose. STRICT (default): per-string co-occurrence
+// with a non-generic requirement, evidence logged. Legacy (STRICT=false): the
+// Sprint 26 corpus-bag behaviour.
 function measureDeepCoverage(content: any, gt: GroundTruth, edition: Edition): CoverageV3Result {
   const refs = scopedRefs(gt, edition); // deep -> full de-filler list (scopedRefs returns base for non-5min)
   const strings: string[] = [];
   collectDeepStrings(content, strings, 0);
+
+  if (DEEP_COVERAGE_STRICT) {
+    // Pre-tokenise each deep string once.
+    const stringWords: Set<string>[] = strings.map((s) => significantWords(s));
+    const stringAnchors: Set<string>[] = COVERAGE_ANCHOR_MATCH ? strings.map((s) => anchorTokens(s)) : [];
+    let totalW = 0;
+    let missedW = 0;
+    const missed: string[] = [];
+    const evidence: DeepMatchEvidence[] = [];
+    for (const ref of refs) {
+      const refSet = significantWords(ref);
+      if (refSet.size === 0) continue;
+      const w = referenceImportance(ref);
+      totalW += w;
+      const refToks = Array.from(refSet);
+      const refAnchors = COVERAGE_ANCHOR_MATCH ? anchorTokens(ref) : new Set<string>();
+      let covered = false;
+      for (let i = 0; i < strings.length && !covered; i++) {
+        const sw = stringWords[i];
+        const matchedToks = refToks.filter((t) => sw.has(t));
+        const nonGeneric = matchedToks.filter((t) => !DEEP_GENERIC_WORDS.has(t));
+        if (matchedToks.length >= COVERAGE_MATCH_THRESHOLD && nonGeneric.length >= 1) {
+          covered = true;
+          evidence.push({ ref, tokens: matchedToks, snippet: strings[i].slice(0, 60) });
+          break;
+        }
+        if (COVERAGE_ANCHOR_MATCH && refAnchors.size > 0) {
+          const sa = stringAnchors[i];
+          const matchedAnchor = Array.from(refAnchors).find((t) => sa.has(t));
+          if (matchedAnchor) {
+            covered = true;
+            evidence.push({ ref, tokens: [matchedAnchor], snippet: strings[i].slice(0, 60) });
+            break;
+          }
+        }
+      }
+      if (!covered) { missedW += w; missed.push(ref); }
+    }
+    // Evidence block — one line per covered reference, so a 16/16 is verifiable
+    // (or falsifiable) from the run log without re-deriving anything.
+    for (const ev of evidence.slice(0, 20)) {
+      console.log(`[score:deep] strict-evidence: "${ev.ref.slice(0, 55)}" ← [${ev.tokens.join(', ')}] in "${ev.snippet}…"`);
+    }
+    console.log(`[score:deep] strict deep-coverage — corpus ${strings.length} string(s); refs matched per-string with ≥${COVERAGE_MATCH_THRESHOLD} words incl. ≥1 non-generic, or an anchor.`);
+    const weightedMissRate = totalW > 0 ? missedW / totalW : 0;
+    const score = Math.max(0, Math.min(10, Math.round((1 - weightedMissRate) * 10)));
+    if (score >= 9) {
+      console.warn(`[score:deep] sanity — near-perfect deep coverage (${score}/10); verify the strict-evidence lines above before trusting (denominator: ${refs.length} scoped refs, ${strings.length} corpus strings).`);
+    }
+    return { score, missed, totalScoped: refs.length, weightedMissRate };
+  }
+
+  // Legacy Sprint-26 corpus-bag path (DEEP_COVERAGE_STRICT=false).
   const corpusWords = new Set<string>();
   const corpusAnchors = new Set<string>();
   for (const s of strings) {
@@ -5183,6 +5851,14 @@ function missedReferenceHeadlines(content: any, gt: GroundTruth | null): string[
   return missed;
 }
 
+// ============================================================================
+// SECTION 25:  LLM SCORER + score / full MODES
+// ----------------------------------------------------------------------------
+// The gpt-4o 7-dimension rubric scorer (folds in the coverage number), plus
+// modeScore and modeFull (the all-in-one run).
+// Fns:   scoreBriefWithLLM, modeScore, modeFull
+// Flags: -
+// ============================================================================
 async function scoreBriefWithLLM(
   edition: Edition,
   content: any,
@@ -5347,7 +6023,7 @@ OUTPUT — return ONLY this JSON, no preamble, no markdown:
   if (useV3) {
     console.warn(`[score:${edition}] coverage v3 — covered ${totalRefs - missCount}/${totalRefs} scoped reference headline(s) (weighted miss ${Math.round(missRate * 100)}%) → dim_coverage ${typeof dim_coverage === 'number' ? dim_coverage : 'n/a'}${penalty > 0 ? ` (after -${penalty} empty-section)` : ''}.${missedForNote.length ? ` Missed: ${missedForNote.slice(0, 6).map((h) => `"${h.slice(0, 60)}"`).join('; ')}` : ''}`);
   } else if (useDeep) {
-    console.warn(`[score:${edition}] deep-coverage v2 — covered ${totalRefs - missCount}/${totalRefs} reference headline(s) in deep prose (weighted miss ${Math.round(missRate * 100)}%) → dim_coverage ${typeof dim_coverage === 'number' ? dim_coverage : 'n/a'}${penalty > 0 ? ` (after -${penalty} empty-section)` : ''}.${missedForNote.length ? ` Missed: ${missedForNote.slice(0, 6).map((h) => `"${h.slice(0, 60)}"`).join('; ')}` : ''}`);
+    console.warn(`[score:${edition}] deep-coverage v2 (strict=${DEEP_COVERAGE_STRICT}) — covered ${totalRefs - missCount}/${totalRefs} reference headline(s) in deep prose (weighted miss ${Math.round(missRate * 100)}%) → dim_coverage ${typeof dim_coverage === 'number' ? dim_coverage : 'n/a'}${penalty > 0 ? ` (after -${penalty} empty-section)` : ''}.${missedForNote.length ? ` Missed: ${missedForNote.slice(0, 6).map((h) => `"${h.slice(0, 60)}"`).join('; ')}` : ''}`);
   } else if (missPenalty > 0) {
     console.warn(`[score:${edition}] ${missCount}/${totalRefs} reference headline(s) missed (${Math.round(missRate * 100)}%) → -${missPenalty} on coverage. Missed: ${missedForNote.slice(0, 6).map((h) => `"${h.slice(0, 60)}"`).join('; ')}`);
   }
@@ -5518,6 +6194,15 @@ import {
   publisherLabel as wlPublisherLabel,
 } from '@/lib/whitelist';
 
+// ============================================================================
+// SECTION 26:  TAILS (city / interest / industry)
+// ----------------------------------------------------------------------------
+// Per-user tail fetches that top up the personalised surface: city, interest,
+// and industry feeds (direct RSS + sonar-pro), recent-URL exclusion, and
+// modeTailFetch. Distinct from the shared brief; consumed at personalise time.
+// Fns:   fetchCityTail, fetchInterestTail, fetchIndustryTail, modeTailFetch
+// Flags: TAIL_RSS, TAIL_RECENCY_HOURS, TAIL_MODEL
+// ============================================================================
 interface TailStory {
   headline: string;
   body: string;
@@ -6172,6 +6857,15 @@ async function modeTailFetch() {
 // semanticOverlap from the fetch pipeline). A partial unique index in the DB
 // is the final backstop.
 
+// ============================================================================
+// SECTION 27:  STORYLINES (Follow a Story)
+// ----------------------------------------------------------------------------
+// mode=storylines: flattens the daily brief, tags/detects storylines, inserts
+// storyline events, backfills the 'story so far', and manages active/dormant/
+// concluded lifecycle. Runs after write.
+// Fns:   storylineTagAndDetect, insertStorylineEvent, fallbackFetchStoryline, regenStorySoFar, modeStorylines
+// Flags: STORYLINE_MAX_* / _AFTER_DAYS consts
+// ============================================================================
 const STORYLINE_MAX_ACTIVE = 25;
 const STORYLINE_MAX_NEW_PER_DAY = 5;
 const STORYLINE_FALLBACK_CAP = 10;
@@ -6630,6 +7324,14 @@ async function modeStorylines() {
 
 // ─── Handler ─────────────────────────────────────────────────────────────────
 
+// ============================================================================
+// SECTION 28:  MAIN HANDLER  (mode router)
+// ----------------------------------------------------------------------------
+// The API entry point. Authorises the request and dispatches ?mode= to the
+// mode functions above (fetch / write / push / full / tail-fetch / storylines).
+// Fns:   handler (export default)
+// Flags: reads ?mode= ; CRON_SECRET via authoriseRequest
+// ============================================================================
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   attachLogCapture(res); // Sprint 14.5: tee server logs into the JSON response
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
