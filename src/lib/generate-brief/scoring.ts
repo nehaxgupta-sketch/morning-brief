@@ -20,6 +20,19 @@ import {
 import {
   callOpenAIChat,
 } from '@/lib/generate-brief/writers';
+import { LIVENESS_SECTIONS } from '@/lib/generate-brief/assemble';
+
+// Moved here from the route (§23) during modularization stage 7 hotfix: its only
+// caller is scoreBriefWithLLM below. Depends on LIVENESS_SECTIONS (assemble) + Edition.
+function emptySectionCount(edition: Edition, content: any): number {
+  const sections = LIVENESS_SECTIONS[edition]; // same section lists apply
+  if (!sections) return 0;
+  let empty = 0;
+  for (const sec of sections) {
+    if (!Array.isArray(content?.[sec]) || content[sec].length === 0) empty++;
+  }
+  return empty;
+}
 
 // ============================================================================
 // SECTION 24:  GROUND TRUTH & COVERAGE SCORING

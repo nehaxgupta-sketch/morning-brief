@@ -276,8 +276,8 @@ async function authoriseRequest(req: NextApiRequest): Promise<{ ok: boolean; via
 // ----------------------------------------------------------------------------
 // The mode entry points the cron hits: modeFetch (Stage 1 -> raw_stories),
 // modeWrite (writes editions 5->10->deep sequentially), modePush (OneSignal).
-// emptySectionCount() is a shared diagnostic.
-// Fns:   modeFetch, modeWrite, modePush, emptySectionCount
+// (emptySectionCount now lives in scoring.ts.)
+// Fns:   modeFetch, modeWrite, modePush
 // Flags: -
 // ============================================================================
 async function modeFetch() {
@@ -479,15 +479,7 @@ async function modePush() {
 // empty section, floored at 0. deep has schema-enforced minimum counts, so no
 // section can be empty there.
 
-function emptySectionCount(edition: Edition, content: any): number {
-  const sections = LIVENESS_SECTIONS[edition]; // same section lists apply
-  if (!sections) return 0;
-  let empty = 0;
-  for (const sec of sections) {
-    if (!Array.isArray(content?.[sec]) || content[sec].length === 0) empty++;
-  }
-  return empty;
-}
+// emptySectionCount() moved to @/lib/generate-brief/scoring (its only caller).
 
 // ─── Sprint 14.8 — OMISSION-AWARE SCORING (founder decision) ─────────────────
 //
