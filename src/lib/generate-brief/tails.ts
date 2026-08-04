@@ -18,6 +18,10 @@ import {
 } from '@/lib/generate-brief/fetch';
 import {
   isWhitelistedSource,
+  isRegionalSource,
+  REGIONAL_BY_CITY,
+  TOPIC_SOURCES,
+  publisherLabel as wlPublisherLabel,
 } from '@/lib/whitelist';
 import {
   logOpenAICost,
