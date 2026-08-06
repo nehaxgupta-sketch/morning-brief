@@ -16,22 +16,21 @@ import {
   fetchStrategy_Rss, fetchStoriesFromFeeds,
   type RssPool, type RssStory,
 } from './clustering';
-import type { Section } from './feeds';
 import { FLAGS, minorFeedSet } from './config';
 import type { Pool, PoolStory, StepFetch, UserSelections } from './types';
 
 // Topical/geo sections we flatten. 'major_events' is intentionally omitted — it
 // is a curated duplicate view of india/world; route rebuilds it from nw.
-const FLATTEN_SECTIONS: Section[] = [
+const FLATTEN_SECTIONS: string[] = [
   'world', 'india', 'business', 'technology', 'climate_health', 'sport', 'culture', 'politics', 'markets_news',
 ];
-const GEO = new Set<Section>(['world', 'india']);
+const GEO = new Set<string>(['world', 'india']);
 
 // Provisional ids for minor stories sit in a negative band so they never collide
 // with the engine's non-negative eventIds; dedupe reassigns real ids.
 let provisional = -1;
 
-function toPoolStory(s: RssStory, sections: Section[], call: 'major' | 'minor'): PoolStory {
+function toPoolStory(s: RssStory, sections: string[], call: 'major' | 'minor'): PoolStory {
   return {
     eventId: s.eventId != null ? s.eventId : provisional--,
     eventCorr: s.eventCorr || 1,
@@ -49,7 +48,7 @@ function toPoolStory(s: RssStory, sections: Section[], call: 'major' | 'minor'):
 // cluster's section memberships into a candidacy seed (geo + `sec:*` topic_tags;
 // dedupe turns the seed into candidateSections).
 function flattenMajor(pool: RssPool): PoolStory[] {
-  const byId = new Map<number, { story: PoolStory; secs: Set<Section> }>();
+  const byId = new Map<number, { story: PoolStory; secs: Set<string> }>();
   for (const sec of FLATTEN_SECTIONS) {
     const list = (pool as any)[sec] as RssStory[] | undefined;
     if (!list) continue;
