@@ -42,7 +42,7 @@ export const EDITION_BOUNDS: Record<Exclude<Edition, 'deep'>, { floor: number; c
 };
 
 // Per selected area, stories we aim to add before the ceiling clamp (route.ts).
-export const AREA_QUOTA = { city: 3, interest: 3, industry: 2 } as const;
+export const AREA_QUOTA: Record<SectionKind, number> = { core: 0, city: 3, interest: 3, industry: 2 };
 
 // major_events eligibility: a story is a front-page candidate once its nw clears
 // this bar; route then takes the top CORE.major_events by nw. Env-tunable.

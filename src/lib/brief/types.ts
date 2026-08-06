@@ -191,6 +191,19 @@ export interface EditionSection {
   why_it_matters?: string;         // personalised sections only
 }
 
+// Deep edition (the third format) — a synthesis ACROSS the routed articles, not
+// a story list. Written by write-deep; attached to EditionBrief.deep.
+export interface DeepPattern { title: string; body: string; stories_connected: string[]; }
+export interface DeepContent {
+  three_patterns: DeepPattern[];
+  long_read: { title: string; body: string };
+  watching_this_week: { title: string; body: string }[];
+  signature: {
+    one_number: { value: string; context: string };
+    one_quote?: { quote: string; attribution: string; context: string } | null;
+  };
+}
+
 export interface EditionBrief {
   userId: string;
   date: string;
@@ -198,7 +211,7 @@ export interface EditionBrief {
   sections: EditionSection[];
   markets: Markets;
   lens: Lens;
-  // closer / deep-synthesis attached per edition; shapes defined at assemble/deep.
+  deep?: DeepContent;  // present only for the deep edition
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

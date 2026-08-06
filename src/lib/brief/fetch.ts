@@ -14,8 +14,9 @@
 
 import {
   fetchStrategy_Rss, fetchStoriesFromFeeds,
-  type RssPool, type RssStory, type Section,
+  type RssPool, type RssStory,
 } from './clustering';
+import type { Section } from './feeds';
 import { FLAGS, minorFeedSet } from './config';
 import type { Pool, PoolStory, StepFetch, UserSelections } from './types';
 

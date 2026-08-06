@@ -11,6 +11,29 @@ import { extractJsonObject } from './primitives';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 export const WRITER_MODEL = process.env.BRIEF_WRITER_MODEL || 'gpt-4o-mini';
 
+// ── Cost ledger (per serverless request) ─────────────────────────────────────
+// Prices are $ per 1M tokens [input, output] — APPROXIMATE; verify/adjust to
+// current OpenAI rates. Covers the WRITER calls (write-facts / write-wim /
+// write-deep); the fetch engine's embedding/scoring cost is tracked separately
+// by your existing cost-log.
+const PRICES: Record<string, [number, number]> = {
+  'gpt-4o-mini': [0.15, 0.60],
+  'gpt-4o': [2.50, 10.00],
+};
+function priceOf(model: string, inTok: number, outTok: number): number {
+  const key = PRICES[model] ? model : Object.keys(PRICES).find((k) => model.startsWith(k));
+  const [pin, pout] = key ? PRICES[key] : [0, 0];
+  return (inTok * pin + outTok * pout) / 1e6;
+}
+let LEDGER: { model: string; inTok: number; outTok: number; usd: number }[] = [];
+export function resetCost() { LEDGER = []; }
+export function snapshotCost() {
+  return LEDGER.reduce(
+    (a, e) => ({ usd: a.usd + e.usd, inTok: a.inTok + e.inTok, outTok: a.outTok + e.outTok, calls: a.calls + 1 }),
+    { usd: 0, inTok: 0, outTok: 0, calls: 0 },
+  );
+}
+
 export async function chatJson(
   prompt: string,
   opts?: { model?: string; maxTokens?: number; tag?: string; search?: boolean },
@@ -30,8 +53,8 @@ export async function chatJson(
   const data = await res.json();
   const text = data.output?.find((o: any) => o.type === 'message')?.content?.[0]?.text;
   const u = data.usage;
-  console.log(`[${tag}] ${model} ${res.status}${u ? ` (in ${u.input_tokens}/out ${u.output_tokens})` : ''}`);
+  if (u) LEDGER.push({ model, inTok: u.input_tokens || 0, outTok: u.output_tokens || 0, usd: priceOf(model, u.input_tokens || 0, u.output_tokens || 0) });
+  console.log(`[${tag}] ${model} ${res.status}${u ? ` (in ${u.input_tokens}/out ${u.output_tokens}, $${priceOf(model, u.input_tokens || 0, u.output_tokens || 0).toFixed(4)})` : ''}`);
   if (!text) throw new Error(`[${tag}] no text in response: ${JSON.stringify(data).slice(0, 400)}`);
-  // TODO(cost): route `u` through @/lib/cost-log (function names not reproduced here).
   return extractJsonObject(text);
 }
