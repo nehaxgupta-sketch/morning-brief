@@ -112,10 +112,12 @@ export async function runFull(selections: UserSelections[], date: string, editio
 // ── Profiles → UserSelections[] ──────────────────────────────────────────────
 async function loadSelections(): Promise<UserSelections[]> {
   try {
-    const { supabaseAdmin } = await import('@/lib/supabase'); // adjust import to your client
-    const { data, error } = await supabaseAdmin.from('profiles').select('id, city_current, interests, industries');
+    const mod: any = await import('@/lib/supabase'); // works with any client export name
+    const db = mod.supabaseAdmin || mod.supabase || mod.default || null;
+    if (!db) { console.warn('[run] no supabase client export found — pass selections in the request body.'); return []; }
+    const { data, error } = await db.from('profiles').select('id, city_current, interests, industries');
     if (error || !data) { console.warn('[run] loadSelections failed:', error?.message); return []; }
-    return (data as any[]).map((p) => ({
+    return (data as any[]).map((p: any) => ({
       userId: p.id,
       cities: [p.city_current].filter(Boolean),
       interests: Array.isArray(p.interests) ? p.interests : [],
