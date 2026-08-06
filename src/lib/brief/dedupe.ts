@@ -34,10 +34,14 @@ function candidateSectionsFor(s: PoolStory): SectionKey[] {
   for (const g of s.geo) out.add(g);                                   // world / india
   for (const t of s.topic_tags) if (t.startsWith('sec:')) out.add(t.slice(4)); // base topical sections
   if ((s.nw ?? 0) >= MAJOR_NW_MIN) out.add('major_events');           // front-page eligibility by nw
-  const hay = `${s.headline} ${s.body}`.toLowerCase();
-  for (const r of KW_RULES) if (r.kws.some((k) => k && hay.includes(k))) { out.add(r.key); if (r.base) out.add(r.base); }
+  // WHOLE-WORD keyword match: pad + strip punctuation so "ai" matches the word
+  // "ai", not the "ai" inside "said"/"campaign"/"air". Keywords under 3 chars are
+  // dropped as too ambiguous even on a word boundary (e.g. "us", "ev", "ml").
+  const hay = ` ${`${s.headline} ${s.body}`.toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
+  const has = (k: string) => k.length >= 3 && hay.includes(` ${k} `);
+  for (const r of KW_RULES) if (r.kws.some(has)) { out.add(r.key); if (r.base) out.add(r.base); }
   for (const c of s.city_tags) out.add(cityKey(c));                    // explicit city tags
-  for (const slug of CITY_SLUGS) if (hay.includes(slug)) out.add(`city:${slug}`); // city name match
+  for (const slug of CITY_SLUGS) if (has(slug)) out.add(`city:${slug}`); // city name match (whole word)
   return Array.from(out);
 }
 

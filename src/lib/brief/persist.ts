@@ -65,3 +65,12 @@ export async function loadRuns(sinceISO: string): Promise<any[]> {
   if (error) { console.warn('[persist] loadRuns failed:', error.message); return []; }
   return data || [];
 }
+
+// Full detail for one run (includes per-step logs + cost).
+export async function loadRun(id: string): Promise<any | null> {
+  const db = await client();
+  if (!db) return null;
+  const { data, error } = await db.from('brief_runs').select('*').eq('id', id).single();
+  if (error) { console.warn('[persist] loadRun failed:', error.message); return null; }
+  return data || null;
+}

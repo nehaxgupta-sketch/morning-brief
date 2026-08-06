@@ -19,7 +19,7 @@ import { writeWim } from '@/lib/brief/write-wim';
 import { writeDeep } from '@/lib/brief/write-deep';
 import { assembleBrief } from '@/lib/brief/assemble';
 import { resetCost, snapshotCost } from '@/lib/brief/transport';
-import { saveRun, saveEditions, loadRuns, type StepRow } from '@/lib/brief/persist';
+import { saveRun, saveEditions, loadRuns, loadRun, type StepRow } from '@/lib/brief/persist';
 
 export const config = { maxDuration: 300 };
 
@@ -141,6 +141,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const window = String(req.query.window || '7d');
     const since = new Date(Date.now() - (window === 'month' ? 31 : 7) * 864e5).toISOString();
     return res.status(200).json({ mode, window, since, runs: await loadRuns(since) });
+  }
+
+  if (mode === 'run') {
+    const id = String(req.query.id || req.body?.id || '');
+    if (!id) return res.status(400).json({ error: 'mode=run needs ?id=<run id>' });
+    return res.status(200).json({ mode, run: await loadRun(id) });
   }
 
   const selections: UserSelections[] = req.body?.selections || (await loadSelections());
