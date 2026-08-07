@@ -118,7 +118,7 @@ function analyzeRun(res: ApiResult, selections?: any[]): RcaReport {
   if (briefs.length) {
     const groups = new Map<string, string[]>();
     briefs.forEach((b) => { const k = sigOf(b); const g = groups.get(k) || []; g.push(String(b.userId)); groups.set(k, g); });
-    const identical = [...groups.values()].filter((g) => g.length > 1);
+    const identical = Array.from(groups.values()).filter((g) => g.length > 1);
     const starved: string[] = [];
     briefs.forEach((b) => { const sel = selByUser.get(String(b.userId)); if (sel && selCount(sel) > 0 && persoOf(b).length === 0) starved.push(String(b.userId)); });
     if (identical.length || starved.length) {
@@ -159,7 +159,7 @@ function analyzeRun(res: ApiResult, selections?: any[]): RcaReport {
     briefs.forEach((b) => {
       const ids: number[] = [];
       secList(b).forEach((sec: any) => idsOf(sec).forEach((x) => ids.push(x)));
-      const dups = [...new Set(ids.filter((id, i) => ids.indexOf(id) !== i))];
+      const dups = Array.from(new Set(ids.filter((id, i) => ids.indexOf(id) !== i)));
       if (dups.length) findings.push({ step: 'dedupe', sev: 'HIGH', title: `Duplicate story within ${b.userId}'s brief (D2 violated)`, evidence: [`eventId(s) ${dups.join(', ')} appear in more than one section.`], fix: 'A clustering split slipped past the prefix-aware same-event backstop (ledger #2). Tighten the backstop; do NOT lower the similarity threshold.' });
     });
   }
@@ -204,7 +204,7 @@ function analyzeRun(res: ApiResult, selections?: any[]): RcaReport {
   }
 
   // bonus: feeds that contributed nothing --------------------------------------
-  const zeroFeeds = [...new Set(lines.map((l) => { const m = l.match(/kept=\s*0\b.*?\d+ms\s+(.+?)\s+\[/); return m ? m[1].trim() : null; }).filter(Boolean) as string[])];
+  const zeroFeeds = Array.from(new Set(lines.map((l) => { const m = l.match(/kept=\s*0\b.*?\d+ms\s+(.+?)\s+\[/); return m ? m[1].trim() : null; }).filter(Boolean) as string[]));
   if (zeroFeeds.length) {
     findings.push({
       step: 'fetch', sev: 'LOW',
