@@ -75,12 +75,28 @@ function feedsForInterest(label: string): string[] {
   return INTEREST_FEEDS[INTEREST_FEED_ALIAS[k] || k] || INTEREST_FEEDS[k] || [];
 }
 
+// Sprint 29.2 — some taxonomy entries point at a section that exists in the
+// Section type but was never wired to a feed (e.g. `markets_news`). The live
+// pool tags those stories under their PARENT section instead — the fetch feed
+// map sends `sec:markets` → `business`, so markets stories live in `business`.
+// Without this, 'Markets & Investing' (section `markets_news`) matches candidacy
+// against a section no story carries and comes back empty (cand 0), even though
+// there are 300+ business stories in the pool. Reconcile the dangling section to
+// the one that actually carries its stories. Extend/verify against feeds.config
+// if other interests point at non-live sections (e.g. `politics`).
+const SECTION_ALIAS: Record<string, Section> = {
+  markets_news: 'business',
+};
+function liveSection(s: Section | undefined): Section | undefined {
+  return s ? (SECTION_ALIAS[s] ?? s) : s;
+}
+
 export function interestDef(label: string): UnifiedDef | null {
   const d = (INTEREST_SECTIONS as Record<string, any>)[label];
   if (!d) return null;
   return {
     key: label, label: d.label || label, kind: 'interest',
-    baseSection: d.section, keywords: (d.keywords || []).map((k: string) => k.toLowerCase()),
+    baseSection: liveSection(d.section), keywords: (d.keywords || []).map((k: string) => k.toLowerCase()),
     why: d.why || '', feeds: feedsForInterest(label),
   };
 }
@@ -89,7 +105,7 @@ export function industryDef(key: string): UnifiedDef | null {
   if (!d) return null;
   return {
     key: industryKey(key), label: d.label || key, kind: 'industry',
-    baseSection: d.section, keywords: (d.keywords || []).map((k: string) => k.toLowerCase()),
+    baseSection: liveSection(d.section), keywords: (d.keywords || []).map((k: string) => k.toLowerCase()),
     why: d.why || '', feeds: [],
   };
 }
