@@ -134,25 +134,29 @@ function analyzeRun(res: ApiResult, selections?: any[]): RcaReport {
       });
     }
 
-    // 3) core off the fixed 10 -------------------------------------------------
-    const CORE_BASE: Record<string, number> = { major_events: 3, india: 4, world: 3 };
+    // 3) india/world backfill above the fixed core — a NOTE, not a defect -----
+    // Backfill above the fixed 10 is expected for any user whose selected areas
+    // don't fill the ceiling (they cap at AREA_QUOTA). A genuinely broken user
+    // (selections but 0 personalised) is already caught HIGH in (2), so this is
+    // informational only.
     briefs.forEach((b) => {
       const coreSecs = secList(b).filter((sec: any) => sec.kind === 'core');
       if (!coreSecs.length) return;
       const total = coreSecs.reduce((n: number, sec: any) => n + secCount(sec), 0);
-      const over = coreSecs.some((sec: any) => CORE_BASE[sec.key] != null && secCount(sec) > CORE_BASE[sec.key]);
-      if (total !== 10 || over) {
-        const sel = selByUser.get(String(b.userId));
-        const zero = sel ? selCount(sel) === 0 : undefined;
-        const detail = coreSecs.map((sec: any) => `${sec.key} ${secCount(sec)}${CORE_BASE[sec.key] != null ? `/${CORE_BASE[sec.key]}` : ''}`).join(', ');
-        findings.push({
-          step: 'route', sev: 'MED',
-          title: `Core sections off the fixed 10 for ${b.userId}`,
-          evidence: [`${b.userId} core-kind: ${detail} (total ${total}; fixed core = 10). The excess is india/world backfill lumped into the core sections.`],
-          fix: 'Symptom of the personalisation gap — with personalised sections empty, Phase B overflow fills india/world to the ceiling; resolves once personalisation places. Separately decide whether backfill above the fixed 10 should stay inside the core india/world sections or surface as a distinct "More from India/World" block (D5 labelling).',
-          note: zero === true ? `${b.userId} selected nothing, so india/world expansion here is partly by design (D5) — but it should be distinguishable from the fixed core.` : undefined,
-        });
-      }
+      if (total <= 10) return; // exactly the fixed core — nothing to note
+      const backfill = total - 10;
+      const perso = persoOf(b).reduce((n: number, sec: any) => n + secCount(sec), 0);
+      const sel = selByUser.get(String(b.userId));
+      const zero = sel ? selCount(sel) === 0 : undefined;
+      const detail = coreSecs.map((sec: any) => `${sec.key} ${secCount(sec)}`).join(', ');
+      findings.push({
+        step: 'route', sev: 'INFO',
+        title: `India/World backfill above the fixed core for ${b.userId}`,
+        evidence: [`${b.userId}: 10 fixed core + ${perso} personalised + ${backfill} india/world backfill = ${total + perso} (${detail}). The ceiling is filled; backfill sits inside the core india/world sections.`],
+        fix: zero === true
+          ? 'Expected: a zero-selection user has no personalised areas, so everything above the fixed 10 is india/world backfill (D5). The only open choice is labelling — keep it inside india/world or surface a distinct "More from India/World" block.'
+          : 'By design: personalised areas cap at AREA_QUOTA (default 3/interest, 3/city), so a lightly-selected user\'s remaining ceiling is india/world backfill — not a defect. Levers for a denser mix: raise AREA_QUOTA (config.ts), raise NW_SCORE_MAX (env) to rank the tail on newsworthiness, or surface backfill as a separate "More from India/World" block (D5 labelling).',
+      });
     });
 
     // bonus: D2 duplicates within a user --------------------------------------
@@ -184,10 +188,10 @@ function analyzeRun(res: ApiResult, selections?: any[]): RcaReport {
     const cov = pool ? Math.round((scored / pool) * 100) : undefined;
     if (capFrom > scored || (cov != null && cov < 25)) {
       findings.push({
-        step: 'dedupe', sev: 'MED',
-        title: 'Low newsworthiness coverage → personalised-section starvation risk',
-        evidence: [`nw scored ${scored} of ${capFrom} eligible${pool != null ? `; pool is ${pool} unique events (~${cov}% scored, ~${100 - (cov as number)}% unscored)` : ''}. Personalised sections are quality-gated, so unscored candidates get excluded.`],
-        fix: 'Ledger #24: raise the engine scoring cap (clustering.ts) OR let routing place unscored ranked-last (route.ts). This build does the latter; raising the cap is the cleaner long-term fix (needs clustering.ts).',
+        step: 'dedupe', sev: 'LOW',
+        title: 'Newsworthiness scored on a capped subset (tuning lever)',
+        evidence: [`nw scored ${scored} of ${capFrom} eligible${pool != null ? `; pool is ${pool} unique events (~${cov}% scored)` : ''}. Personalised sections fill from the unscored tail, ranked last — working, but ordered by recency/corroboration rather than nw.`],
+        fix: 'Not a defect: route places unscored stories ranked-last so sections still fill (ledger #24). To rank personalised sections on real newsworthiness instead, raise NW_SCORE_MAX (env, default 120) — at proportional gpt-4o-mini scoring cost.',
       });
     }
   }

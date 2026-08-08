@@ -703,8 +703,7 @@ export async function fetchStoriesFromFeeds(
   await Promise.all(Array.from({ length: conc }, () => worker()));
   const { kept } = await dedupe(all);
   const stories = kept.map(
-    ({ _tier, _secs, _w, _emb, _corr, _isSport, _eventCorr, _eventSig, _eventId, ...rest }) =>
-      ({ ...rest, topic_tags: _secs.map((sc) => `sec:${sc}`) } as RssStory),
+    ({ _tier, _secs, _w, _emb, _corr, _isSport, _eventCorr, _eventSig, _eventId, ...rest }) => rest as RssStory,
   );
   const reachability = `feeds ${responded}/${feeds.length} responded, ${empty} empty, ${failed} unreachable -> ${all.length} items -> ${stories.length} after dedupe`;
   return { stories, reachability };
@@ -1067,7 +1066,7 @@ export async function fetchStrategy_Rss(_universe?: any): Promise<RssPool> {
   // one-home placement; drop only the truly internal scratch fields.
   for (const sec of SECTIONS) {
     pool[sec] = (pool[sec] as PoolItem[]).map(({ _tier, _secs, _w, _emb, _corr, _isSport, _eventCorr, _eventSig, _eventId, ...rest }) =>
-      ({ ...rest, eventId: _eventId, eventCorr: _eventCorr, topic_tags: _secs.map((sc) => `sec:${sc}`) } as RssStory));
+      ({ ...rest, eventId: _eventId, eventCorr: _eventCorr } as RssStory));
   }
 
   // Markets (real numbers) + a mechanical lens (no fabrication).

@@ -19,7 +19,7 @@
 //   3) When a 200 yields 0 parsed for a chunk, LOG the shape (ledger #19) — never
 //      fall back silently again.
 
-import type { DedupedPool, DedupedStory, Article, ArticleStore, StepWriteFacts } from './types';
+import type { DedupedPool, DedupedStory, Article, StepWriteFacts } from './types';
 import { chatJson } from './transport';
 
 const CHUNK = parseInt(process.env.BRIEF_WRITE_CHUNK || '8', 10);
